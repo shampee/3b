@@ -1,0 +1,14 @@
+(package game)
+
+(struct Vertex2D
+  [pos   Vec2
+   uv    Vec2
+   color Rgba8])
+
+(enum BlendMode
+  [Normal
+   Additive
+   Multiply])
+
+(fn vert2 [pos Vec2 uv Vec2 color Rgba8] Vertex2D (Vertex2D pos uv color))
+(fn vert2p [x f32 y f32 uv0 f32 uv1 f32 color Rgba8] Vertex2D (Vertex2D (vec2 x y) (vec2 uv0 uv1) color))

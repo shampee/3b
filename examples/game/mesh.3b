@@ -1,0 +1,82 @@
+(package game)
+(import gl)
+
+(struct Mesh
+  [vao          u32
+   vbo          u32
+   ibo          u32
+   vertex-count u32
+   index-count  u32])
+
+(handle Mesh)
+
+(fn make-mesh
+  [vertices        (const f32*)
+   vertex-count    u32
+   indices         (const u32*)
+   index-count     u32
+   attributes      (const AttribDesc*)
+   attribute-count u32] Mesh^
+  (let [mesh (zero Mesh)
+        mesh-handle (handle-alloc Mesh)]
+    (set (. mesh vertex-count) vertex-count)
+    (set (. mesh index-count) index-count)
+
+    (gl/gen-vertex-arrays 1 (& mesh vao))
+    (gl/gen-buffers 1 (& mesh vbo))
+    (gl/bind-vertex-array (. mesh vao))
+
+    (gl/bind-buffer gl/ARRAY_BUFFER (. mesh vbo))
+    (gl/buffer-data gl/ARRAY_BUFFER (cast i64 (* (sizeof f32 u32) vertex-count)) (cast any vertices) gl/STATIC_DRAW)
+
+    (when (and indices (> index-count 0u32))
+      (gl/gen-buffers 1 (& mesh ibo))
+      (gl/bind-buffer gl/ELEMENT_ARRAY_BUFFER (. mesh ibo))
+      (gl/buffer-data gl/ELEMENT_ARRAY_BUFFER
+        (cast i64 (* (sizeof f32 u32) index-count))
+        (cast any indices) gl/STATIC_DRAW))
+
+    (for [i 0u32 attribute-count]
+      (let [attr (addr (nth attributes i))]
+        (gl/enable-vertex-attrib-array (. attr location))
+        (gl/vertex-attrib-pointer
+          (. attr location)
+          (cast i32 (. attr count))
+          gl/FLOAT
+          false
+          (cast i32 (. attr stride))
+          (cast any (cast u64 (. attr offset))))))
+    (gl/bind-vertex-array 0u32)
+    (set (deref (handle-deref mesh-handle)) mesh)
+    mesh-handle))
+
+(fn destroy-mesh [mesh Mesh^] void
+  (when (not (handle-valid? mesh)) (return))
+  (let [m (handle-deref mesh)]
+    (when (. m vao) (gl/delete-vertex-arrays 1 (& m vao)))
+    (when (. m vbo) (gl/delete-buffers 1 (& m vbo)))
+    (when (. m ibo) (gl/delete-buffers 1 (& m ibo)))
+    (mem-zero m (sizeof Mesh))
+    (handle-free mesh)))
+
+(fn draw-mesh [mesh Mesh^] void
+  (when (not (handle-valid? mesh)) (return))
+  (let [m (handle-deref mesh)]
+    (gl/bind-vertex-array (. m vao))
+    (if (. m ibo)
+      (gl/draw-elements gl/TRIANGLES (cast i32 (. m index-count)) gl/UNSIGNED_INT (cast any nil))
+      (gl/draw-arrays gl/TRIANGLES 0 (cast i32 (. m vertex-count))))
+    (gl/bind-vertex-array 0u32)))
+
+(fn make-fullscreen-quad [] Mesh^
+  (let [verts [f32 24]
+        [-1.0  1.0  0.0  1.0
+         -1.0 -1.0  0.0  0.0
+          1.0 -1.0  1.0  0.0
+         -1.0  1.0  0.0  1.0
+          1.0 -1.0  1.0  0.0
+          1.0  1.0  1.0  1.0]
+        attribs [AttribDesc 2]
+        [(AttribDesc 0u32 2u32 AttribKind/Float (* 4u32 (sizeof f32 u32)) 0u32)
+         (AttribDesc 1u32 2u32 AttribKind/Float (* 4u32 (sizeof f32 u32)) (* 2u32 (sizeof f32 u32)))]]
+    (make-mesh verts (cast u32 (len verts)) nil 0u32 attribs (cast u32 (len attribs)))))

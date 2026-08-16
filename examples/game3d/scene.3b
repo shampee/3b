@@ -1,0 +1,1361 @@
+(package game3d)
+(import vm)
+
+;; "A model instance in this scene" as one real type -- before this,
+;; adding a model to main.3b meant editing three separate places (setup,
+;; per-frame pose update, per-frame draw); add-model below is one call,
+;; and update-scene/draw-scene handle every added object uniformly.
+;;
+;; The two model instances this demo has (see main.3b) differ in HOW they
+;; compute their current pose each frame -- hand-wiggle one joint or
+;; sample a real animation clip -- and, separately, in HOW they move
+;; through the world each frame -- stand still, or read player input.
+;; Both are genuinely different CODE, not different parameters of one
+;; formula, so Thing carries two function-pointer fields for them
+;; (pose, controller): ordinary C-style behavior pointers (the same idea
+;; as sdl/'s own timer-callback alias), not the generic TYPES 3b
+;; permanently rules out. Each behavior stays its own named top-level
+;; function (pose-bind/pose-hand-wiggle/pose-clip, controller-idle/
+;; controller-player below) instead of one shared function's `match`
+;; growing every time a new kind of motion or animation shows up.
+;;
+;; Thing is the ONE flat per-instance array for "a thing in this scene
+;; with a position and maybe a model and maybe some behavior" -- no ECS,
+;; just optional fields (game3d-brush-editor-goal/handles-design-no-
+;; generics project memory: this codebase special-cases generic-shaped
+;; features as builtins/plain structs rather than ever growing real
+;; generics or a component system). `controller-kind` picks which of
+;; THREE mutually exclusive ways (if any) a Thing moves/acts on its own
+;; each frame:
+;;   None     -- inert, e.g. a prop with no per-frame behavior at all
+;;   Native   -- `controller` (a real 3b fn pointer) runs directly, same
+;;               mechanism this had before Scripted existed
+;;   Scripted -- `script-handle`/`script-fn` (via `script-engine`, vm.3b)
+;;               get called instead -- a hot-reloadable `.3b`/`.3bs`
+;;               script drives this Thing's movement/animation-clock by
+;;               calling BACK into thing-get-field/thing-set-field below
+;;               (native_script_register_u64_to_u32 and friends,
+;;               script_native.h), not by returning a value -- update-
+;;               scene never reads the script's return. ANY Thing can end
+;;               up Scripted, whether or not it was created that way --
+;;               add-scripted-thing sets this up front for a model-less
+;;               one, attach-script (below) flips an already-placed
+;;               modeled Thing (add-model/add-prop) over to script control
+;;               later, at any point.
+
+;; Half-extent (in world units) of the ortho box the sun's shadow map
+;; covers -- see shadow.3b's shadow-light-space-matrix for why this has to
+;; be at least the scene's footprint. This demo's ground is a 24x24 slab
+;; (see main.3b's ground-half), so its corner-to-centre distance is ~17;
+;; 20 leaves margin without wasting much shadow-map resolution on empty
+;; space beyond the ground.
+(val shadow-half-extent f32 20.0)
+
+;; Player-controller tuning -- see controller-player below.
+(val player-move-speed    f32 3.0)  ; world units/sec
+(val camera-follow-height f32 0.9)  ; camera target sits this high above the player's feet
+
+;; The most terrain-height is allowed to change in a single frame's
+;; worth of horizontal movement before controller-player just refuses
+;; that movement outright, same as walking into a wall. Actually climbing
+;; the ramp's slope only ever changes height a little per frame (a few
+;; hundredths of a unit, at player-move-speed); stepping straight onto it
+;; from its vertical back/side faces would otherwise SNAP the full
+;; ramp-height in one frame, since terrain-height has no notion of "wall"
+;; -- this is what turns that snap into an actual wall.
+(val player-max-step f32 0.25)
+
+;; atan2(move.x, move.z) below gives the world yaw where the +Z axis of
+;; controller-player's own sin/cos convention points -- but CesiumMan's
+;; rig (after main.3b's Z-up -> Y-up `correction`) doesn't walk toward
+;; its local +Z, so that raw angle isn't the model's actual facing.
+;; Applied as a fixed offset here rather than baked into `correction`
+;; itself, since correction's job is purely "stand this model upright",
+;; not "and also point it at yaw zero".
+(val player-facing-offset f32 (- (/ tau 4.0)))
+
+;; Raw bit-pattern reinterpret (NOT a numeric conversion -- `cast` between
+;; two DIFFERENT value types, e.g. `(cast u32 3.5)`, truncates to 3; this
+;; is what `reinterpret` is for). The only way an f32 crosses the
+;; Direct-mode host-import boundary (vm/register-getter and friends,
+;; script_native.h) -- that mechanism is integer/pointer-only, so both
+;; sides (a thing-get-*/thing-set-* callback here, and whatever a script
+;; does with the u32 it gets back) have to agree on THIS as the shared
+;; meaning of the bits.
+(fn f32-to-bits [v f32] u32
+  (reinterpret u32 v))
+
+(fn bits-to-f32 [b u32] f32
+  (reinterpret f32 b))
+
+;; draw-scene's own marker-cube color for any model-less Thing (see that
+;; fn's comment) -- distinct from every point-light color (warm/cool/
+;; green, main.3b's light-colors) so a model-less Thing's own marker is
+;; never confused for a light gizmo.
+(val thing-marker-color Vec3 (Vec3 {:x 1.0 :y 0.85 :z 0.1}))
+
+;; draw-scene's own gizmo color for a DISABLED point light (light.3b's
+;; `enabled`) -- dim/neutral so it reads as "off" at a glance, distinct
+;; from every actual light color this demo uses (main.3b's light-colors)
+;; and from thing-marker-color above.
+(val disabled-light-gizmo-color Vec3 (Vec3 {:x 0.2 :y 0.2 :z 0.22}))
+
+(enum ControllerKind
+  [None      ; inert -- update-scene skips controller dispatch entirely
+   Native    ; `controller` (a real 3b fn pointer) runs directly
+   Scripted]) ; `script-handle`/`script-fn` (via `script-engine`) run instead
+
+(struct Thing
+  [model            Model    ; loaded directly into place by add-model
+   has-model        bool     ; false = logic-only, nothing to draw/pose/skin
+   base-fit         Mat4     ; this instance's model-fit-matrix result, computed once at add-time
+   ;; The file `model` came from, and the correction/target-height it was
+   ;; originally fit with -- add-model/add-prop's own arguments, kept
+   ;; around purely so a LATER assets.3b poll-asset-reloads hit can redo
+   ;; model-fit-matrix identically (reload-changed-things below) rather
+   ;; than needing either of those threaded back in from wherever the
+   ;; original add-model/add-prop call site was (main.3b, editor.3b's
+   ;; model-browser, ...), which by then is long gone. `path` doubles as
+   ;; how reload-changed-things recognizes which live Things a given
+   ;; model reload actually affects (an empty string for a model-less
+   ;; Thing -- add-scripted-thing's own construction -- never matches a
+   ;; real path, so this needs no separate has-model guard of its own).
+   path             string
+   correction       Mat4
+   target-height    f32
+   material         Material
+   offset           Vec3     ; world-space translation -- controller may update this every frame
+   yaw              f32      ; facing, radians about +Y -- controller may update this every frame
+   ;; Uniform multiplier applied ON TOP of base-fit (object-transform),
+   ;; about the model's own already-fitted origin -- 1.0 = base-fit's own
+   ;; size unchanged. Lets editor.3b resize a placed prop live (a matrix
+   ;; multiply, no mesh rebuild -- see EditorState.resize-axis's own
+   ;; comment for why Sphere/Thing share the same one-DOF resize
+   ;; treatment) without having to re-derive base-fit itself.
+   scale            f32
+   anim-time        f32      ; this thing's own animation clock -- controller advances it, pose reads it
+   wiggle-joint     i32      ; -1 = unused; only pose-hand-wiggle reads this
+   collision-radius f32      ; world units, XZ circle -- 0 = doesn't participate in collision at all
+   local            Mat4*    ; this frame's joint LOCAL transforms (sized to the model's own joint count)
+   joints           Mat4*    ; this frame's skinning matrices, ready for draw-model-instance
+   pose             (fn [model Model* out-local Mat4* time f32 wiggle-joint i32] void)
+   controller-kind  ControllerKind
+   ;; `self` is this thing's own index into scene.things -- controller-
+   ;; player needs it to skip itself when checking collision against
+   ;; every OTHER thing (resolve-collisions below). Used iff Native.
+   controller       (fn [obj Thing* self u64 scene Scene* input Input* dt f32] void)
+   ;; Used iff Scripted -- see vm.3b (create/load/call2). `script-
+   ;; fn` is called every frame as (self:u64 dt-bits:u32) -- see update-
+   ;; scene -- and mutates this Thing purely by calling the thing-get-*/
+   ;; thing-set-* host callbacks below, never through a return value.
+   script-engine    any
+   script-handle    u32
+   script-fn        string])
+
+(struct Scene
+  [camera           Camera
+   lights           Lights
+   ground-half      Vec3     ; world units -- controller-player clamps movement to this (clamp-to-ground)
+   ground           Mesh^
+   ground-material  Material
+   ground-transform Mat4
+   gizmo            Mesh^
+   ;; A unit cube (-0.5..0.5 every axis) -- editor.3b's draw-gizmo-arm
+   ;; scales+translates this into each of the translate gizmo's three
+   ;; thin axis handles, rather than every arm needing its own mesh.
+   gizmo-arm        Mesh^
+   ;; A unit wedge (make-ramp-mesh 1.0 1.0 1.0) -- make-ramp-mesh's own
+   ;; vertices are all directly proportional to half-x/half-z/height (no
+   ;; cross terms), so a real Ramp brush's shape is exactly this scaled
+   ;; per-axis by (half-x, height, half-z). editor.3b's draw-wireframe-
+   ;; brush reuses it the same way gizmo-arm is reused for Box/Hole, for
+   ;; Ramp's own wireframe outline/resize-ghost preview.
+   unit-ramp        Mesh^
+   ;; A unit-radius sphere (mesh.3b's make-sphere-mesh 1.0) -- same reuse
+   ;; convention as unit-ramp above, editor.3b's draw-wireframe-brush
+   ;; scales this by BrushKind/Sphere's own `radius` uniformly on all 3
+   ;; axes (a sphere scaled non-uniformly wouldn't be a sphere any more,
+   ;; unlike unit-ramp's legitimately-per-axis half-x/height/half-z scale).
+   unit-sphere      Mesh^
+   ;; Three placeholder textures (two procedurally baked via texture.3b's
+   ;; make-checker-texture, one loaded from an actual file on disk via
+   ;; load-texture-from-file -- main.3b registers it with assets.3b's
+   ;; watch-texture right after make-scene returns, so it hot-reloads
+   ;; live), created once here same as gizmo/unit-ramp/unit-sphere above --
+   ;; editor.3b's `U` cycles the selected brush's
+   ;; own texture-id through 0 (none)/this/this/this, and level.3b
+   ;; resolves save/load's symbolic "checker"/"brick"/"dots" tags against
+   ;; these three fields rather than a raw (run-to-run unstable) GL id.
+   texture-checker  u32
+   texture-brick    u32
+   texture-dots     u32
+   ;; A soft round dot (texture.3b's make-circle-texture), created once
+   ;; here same as the three above -- draw-scene-billboards uses this as
+   ;; every point light's own icon, tinted per-light via draw-billboard's
+   ;; `color` (see its own comment).
+   light-icon-texture u32
+   ;; 0 = renderer.3b's draw-sky computes its own live gradient+sun-glow
+   ;; every frame (the default); non-zero means sample THIS cubemap
+   ;; instead -- see sky.3b's own header comment for the full set-
+   ;; skybox-cubemap/generate-skybox-gradient/load-skybox-from-files API
+   ;; that manages this field, same "0 = fallback, else sample it"
+   ;; convention every other texture-id in this project already uses.
+   sky-cubemap      u32
+   ;; No fixed cap on either -- see add-box-brush/add-ramp-brush/add-model,
+   ;; all three grow via vector-push the same way. An untouched Scene's
+   ;; `brushes` is empty, which is exactly the flat-ground behavior this
+   ;; had before brushes existed.
+   brushes          [Brush]
+   things           [Thing]
+   time             f32])
+
+(enum BrushKind
+  [Box     ; flat-topped solid platform
+   Ramp    ; sloped wedge, low end at the placed origin
+   Hole     ; negative space -- never solid, see add-hole-brush/rebuild-all-wall-meshes
+   Sphere]) ; decorative prop -- see add-sphere-brush, never walkable/collidable (terrain-height skips it
+            ; the same way it skips Hole)
+
+;; A placed piece of level geometry: axis-aligned footprint (half-x by
+;; half-z), placed at `offset` and turned `yaw` radians about +Y -- the
+;; same offset+yaw convention Thing uses -- with its own mesh/
+;; material. `kind` is a fat-struct tag (see light.3b's identical Light/
+;; LightKind pattern): Box uses half-y (half its vertical extent, walkable
+;; surface flat at the top); Ramp uses height (how high its slope climbs
+;; from the low end at `offset` to the high end). A Scene holds any number
+;; of them, so growing this to more shapes later means adding a BrushKind
+;; variant plus a case in add-*-brush/terrain-height, not restructuring
+;; how Scene stores or draws them.
+;;
+;; Hole is the odd one out: it's Box-shaped (same half-x/half-y/half-z/
+;; lift-by-half-y placement convention as Box, `height` unused) but never
+;; solid -- it never gets a real GL mesh (`mesh` is a placeholder value,
+;; NEVER dereferenced -- see add-hole-brush), never draws, never collides
+;; (terrain-height skips it), and never gets picked as ground. It only
+;; participates by CARVING an opening into whichever same-yaw Box brush's
+;; footprint it horizontally pierces -- see rebuild-all-wall-meshes.
+;; editor.3b renders it as a permanent wireframe outline so it's visible
+;; (and selectable/movable/resizable/deletable) while editing.
+;;
+;; IMPORTANT for actually punching something: "pierces" means the Hole's
+;; own half-x (or half-z) must be BIGGER than the wall's, not smaller --
+;; this only ever cuts a real THROUGH-hole (like a door/window reaching
+;; all the way through a wall's thickness), never an interior cavity
+;; smaller than the wall on every axis (that's a different, much harder
+;; CSG problem this deliberately doesn't attempt). In practice: the wall
+;; has to be a genuinely THIN panel (small half-x or half-z, e.g. a real
+;; wall's thickness) on whichever axis the hole should cut through, not a
+;; cube-shaped/chunky Box -- two default-sized brushes overlapping will
+;; NOT punch anything, since neither is thinner than the other on any
+;; axis (confirmed via live testing: default Box half=(1.0,0.5,1.0) vs
+;; default Hole half=(0.4,1.0,0.2) never pierces either horizontal axis).
+;;
+;; On the two axes the hole DOESN'T pierce, it's fine for it to reach (or
+;; overshoot) the wall's own edge -- gather-wall-holes clamps to the
+;; wall's bounds rather than rejecting, which is what makes a door
+;; reaching the wall's own base work (a door and its wall usually share
+;; the same floor-level `offset.y`, so the door's bottom edge is exactly
+;; flush with the wall's, not floating with clearance above it like a
+;; window). Only a hole with NO overlap at all on one of those axes
+;; (clamping would collapse to zero-or-negative width) is rejected.
+(struct Brush
+  [kind      BrushKind
+   mesh      Mesh^
+   material  Material
+   transform Mat4     ; world placement, ready for draw-model
+   offset    Vec3
+   yaw       f32
+   half-x    f32
+   half-z    f32
+   half-y    f32       ; Box only
+   height    f32       ; Ramp only
+   ;; Sphere only -- the CANONICAL size (editor.3b's resize/rebuild-
+   ;; brush-mesh only ever touch this one field for a Sphere), but
+   ;; add-sphere-brush also mirrors it into half-x/half-y/half-z so every
+   ;; generic half-extent-based AABB routine (terrain-height,
+   ;; scene-pick-brush, ortho-face-pick) keeps working unmodified,
+   ;; treating a Sphere as its own bounding cube for picking purposes --
+   ;; plenty precise for a click target, not worth a real ray/sphere test.
+   radius    f32
+   ;; 0 = untextured (draw-textured-model's own "no texture" convention,
+   ;; see renderer.3b). Meaningless on a Hole (never drawn -- see this
+   ;; struct's own comment), still always present so every Brush literal
+   ;; names every field uniformly, same as height/radius already do.
+   texture-id u32])
+
+;; Every joint's bind-pose local transform, unmodified. The "do nothing
+;; extra" pose -- used directly for a model with no animation of its own,
+;; and as the fallback inside pose-clip when a model has no clip loaded.
+(fn pose-bind [model Model* out-local Mat4* time f32 wiggle-joint i32] void
+  (skeleton-copy-bind-pose (& model skeleton) out-local))
+
+;; Stage 2: bind pose, then one joint's local rotation gets a hand-driven
+;; sine wiggle added on top -- proof that skinning actually deforms the
+;; mesh, for a model with no baked animation clip to sample instead.
+(fn pose-hand-wiggle [model Model* out-local Mat4* time f32 wiggle-joint i32] void
+  (skeleton-copy-bind-pose (& model skeleton) out-local)
+  (when (>= wiggle-joint 0)
+    (set (nth out-local (cast u32 wiggle-joint))
+      (mul-mat4 (nth out-local (cast u32 wiggle-joint))
+        (make-rotate-mat4 (vec3 1.0 0.0 0.0) (* (sin (* time 2.0)) 0.6))))))
+
+;; Stage 3: a real animation clip, sampled and (via sample-clip's own
+;; `mod`) looped. Falls back to bind pose for a model whose file didn't
+;; have a clip after all, rather than leaving `out-local` uninitialized.
+(fn pose-clip [model Model* out-local Mat4* time f32 wiggle-joint i32] void
+  (if (. model has-clip)
+    (sample-clip (& model clip) (& model skeleton) time out-local)
+    (skeleton-copy-bind-pose (& model skeleton) out-local)))
+
+;; Stands in place, facing wherever it was placed -- this object's own
+;; anim-time still advances every frame (so pose-hand-wiggle keeps
+;; wiggling), it just never moves or turns on its own.
+(fn controller-idle [obj Thing* self u64 scene Scene* input Input* dt f32] void
+  (+= (. obj anim-time) dt))
+
+;; Pushes `desired` (a candidate next position) out of any OTHER object's
+;; collision circle it would otherwise overlap -- plain XZ circle-vs-
+;; circle, `self` excluded so an object never collides with itself.
+;; Objects with collision-radius 0 (the default -- see add-model) never
+;; push anything and are never pushed.
+(fn resolve-collisions [scene Scene* self u64 desired Vec3 radius f32] Vec3
+  (when (<= radius 0.0) (return desired))
+  (var x f32 (. desired x))
+  (var z f32 (. desired z))
+  (for [[i other] (. scene things)]
+    (when (!= i self)
+      (let [other-radius (. other collision-radius)]
+        (when (> other-radius 0.0)
+          (let [dx (- x (. other offset x))
+                dz (- z (. other offset z))
+                dist (sqrt (+ (* dx dx) (* dz dz)))
+                min-dist (+ radius other-radius)]
+            ;; dist > 0.0001 guards the degenerate exactly-coincident
+            ;; case (push direction undefined) -- not worth resolving,
+            ;; and can't happen once any push HAS separated them.
+            (when (and (< dist min-dist) (> dist 0.0001))
+              (let [push (/ (- min-dist dist) dist)]
+                (+= x (* dx push))
+                (+= z (* dz push)))))))))
+  (vec3 x (. desired y) z))
+
+;; Clamps `pos` so a `radius`-wide circle around it stays on the ground
+;; slab (scene.ground-half) instead of walking off the edge.
+(fn clamp-to-ground [scene Scene* pos Vec3 radius f32] Vec3
+  (let [half (. scene ground-half)]
+    (vec3
+      (clamp (. pos x) (+ (- (. half x)) radius) (- (. half x) radius))
+      (. pos y)
+      (clamp (. pos z) (+ (- (. half z)) radius) (- (. half z) radius)))))
+
+;; WASD/arrow-key movement, camera-relative: "forward" is whatever
+;; direction the orbit camera is currently looking, projected onto the
+;; ground plane -- see camera.3b's camera-eye for the same sin(yaw)-on-X/
+;; cos(yaw)-on-Z pairing used below. Turns to face its movement direction,
+;; only advances its own walk-clip time while actually moving (so it
+;; holds its last pose instead of moonwalking through the idle frame),
+;; and keeps the camera's orbit target pinned to itself every frame,
+;; moving or not, so the camera always follows. Movement is walking only
+;; -- no jump/gravity -- so Y is never simulated, only ever SNAPPED to
+;; terrain-height's answer for the new XZ position -- gated by player-
+;; max-step so that snap can only ever be the small per-frame amount an
+;; actual walk up the ramp's slope produces, never the ramp's full
+;; height in one step (see player-max-step's own comment).
+(fn controller-player [obj Thing* self u64 scene Scene* input Input* dt f32] void
+  (let [camera (& scene camera)
+        axis (input-move-axis input)
+        axis-len (length-vec2 axis)]
+    (when (> axis-len 0.001)
+      (let [dir       (scale-vec2 axis (/ 1.0 axis-len))
+            move-raw  (add-vec3 (scale-vec3 (camera-right-flat camera) (. dir x))
+                                 (scale-vec3 (camera-forward-flat camera) (. dir y)))
+            move      (normalize-vec3 move-raw)
+            radius    (. obj collision-radius)
+            desired   (add-vec3 (. obj offset) (scale-vec3 move (* player-move-speed dt)))
+            pushed    (resolve-collisions scene self desired radius)
+            clamped   (clamp-to-ground scene pushed radius)
+            new-y     (terrain-height scene (. clamped x) (. clamped z))]
+        (set (. obj yaw) (+ (atan2 (. move x) (. move z)) player-facing-offset))
+        ;; Too big a step to be the slope means it's the ramp's vertical
+        ;; back/side face -- block the horizontal move entirely (same as
+        ;; walking into any other wall, rather than sliding along it --
+        ;; simplest thing that still reads as solid) and don't advance
+        ;; the walk-clip either, since nothing actually moved.
+        (when (<= (abs (- new-y (. obj offset y))) player-max-step)
+          (set (. obj offset) (vec3 (. clamped x) new-y (. clamped z)))
+          (+= (. obj anim-time) dt))))
+    (set (. camera target) (add-vec3 (. obj offset) (vec3 0.0 camera-follow-height 0.0)))))
+
+(fn make-scene
+  [camera          Camera
+   ground-half     Vec3
+   ground-material Material
+   gizmo-half      Vec3
+   ambient         Vec3
+   sun             Light] Scene
+  (let [scene (zero Scene)]
+    (set (. scene camera) camera)
+    (set (. scene lights ambient) ambient)
+    (set (. scene lights sun) sun)
+    (set (. scene ground-half) ground-half)
+    (set (. scene ground) (make-box-mesh ground-half))
+    (set (. scene ground-material) ground-material)
+    ;; Top face at y = 0 -- everything else in the scene stands on it.
+    (set (. scene ground-transform) (make-translate-mat4 (vec3 0.0 (- (. ground-half y)) 0.0)))
+    (set (. scene gizmo) (make-box-mesh gizmo-half))
+    (set (. scene gizmo-arm) (make-cube-mesh))
+    (set (. scene unit-ramp) (make-ramp-mesh 1.0 1.0 1.0))
+    (set (. scene unit-sphere) (make-sphere-mesh 1.0))
+    (set (. scene texture-checker) (make-checker-texture (vec3 0.85 0.85 0.85) (vec3 0.22 0.22 0.25) 8u32))
+    (set (. scene texture-brick)   (make-checker-texture (vec3 0.55 0.34 0.22) (vec3 0.38 0.22 0.13) 16u32))
+    (set (. scene texture-dots)    (load-texture-from-file "dots.png"))
+    (set (. scene light-icon-texture) (make-circle-texture))
+    scene))
+
+;; Shared tail end of add-box-brush/add-ramp-brush: push an already-built
+;; Brush onto the scene. `vector-push` now accepts a field-access target
+;; directly (a compiler improvement made alongside this refactor -- it
+;; used to require a local-var round-trip, see any of THIS function's own
+;; prior commits).
+(fn push-brush [scene Scene* arena arena b Brush] void
+  (vector-push arena (. scene brushes) b))
+
+;; Adds one flat-topped solid platform (mesh.3b's make-box-mesh) to the
+;; scene -- any number. The mesh itself is centred on its own local
+;; origin, so the transform lifts it by `half-y` on top of translate/
+;; rotate to make `offset` mean "the platform's footprint center, at its
+;; base", the same placement convention add-ramp-brush uses.
+(fn add-box-brush
+  [scene      Scene*
+   arena      arena
+   half-x     f32
+   half-y     f32
+   half-z     f32
+   material   Material
+   texture-id u32
+   offset     Vec3
+   yaw        f32] void
+  (push-brush scene arena
+    (Brush
+      {:kind BrushKind/Box
+       :mesh (make-box-mesh (vec3 half-x half-y half-z))
+       :material material
+       :transform (mul-mat4
+                    (make-translate-mat4 (add-vec3 offset (vec3 0.0 half-y 0.0)))
+                    (make-rotate-mat4 (vec3 0.0 1.0 0.0) yaw))
+       :offset offset
+       :yaw yaw
+       :half-x half-x
+       :half-z half-z
+       :half-y half-y
+       :height 0.0
+       :radius 0.0
+       :texture-id texture-id})))
+
+;; Adds one walkable ramp (mesh.3b's make-ramp-mesh) to the scene -- any
+;; number. Rises from y=0 to y=`height` along its OWN local +Z axis, then
+;; that whole slope is placed at `offset` and turned `yaw` radians about
+;; +Y, same convention as Thing's own offset/yaw. terrain-height
+;; below queries every brush's placement to answer "how high is the
+;; ground here", so controller-player can walk up/down whichever one
+;; it's on.
+(fn add-ramp-brush
+  [scene      Scene*
+   arena      arena
+   half-x     f32
+   half-z     f32
+   height     f32
+   material   Material
+   texture-id u32
+   offset     Vec3
+   yaw        f32] void
+  (push-brush scene arena
+    (Brush
+      {:kind BrushKind/Ramp
+       :mesh (make-ramp-mesh half-x half-z height)
+       :material material
+       :transform (mul-mat4 (make-translate-mat4 offset) (make-rotate-mat4 (vec3 0.0 1.0 0.0) yaw))
+       :offset offset
+       :yaw yaw
+       :half-x half-x
+       :half-z half-z
+       :half-y 0.0
+       :height height
+       :radius 0.0
+       :texture-id texture-id})))
+
+;; Adds one Hole brush -- negative space, never solid. Same offset/yaw/
+;; lift-by-half-y placement convention as add-box-brush (a Hole IS Box-
+;; shaped), but it never calls make-box-mesh: `mesh` is a placeholder,
+;; NEVER dereferenced (draw-scene/draw-scene-depth/destroy-scene all skip
+;; Hole brushes explicitly, and rebuild-brush-mesh/editor-commit never
+;; call make-mesh-family functions for one either) -- see runtime/
+;; bbb_handle.h's own note on why a zeroed/placeholder handle can't just
+;; be trusted to deref as "invalid" on its own. `height` is unused (Hole
+;; has no slope), stored as 0.0 for the same reason add-box-brush stores
+;; it.
+(fn add-hole-brush
+  [scene    Scene*
+   arena    arena
+   half-x   f32
+   half-y   f32
+   half-z   f32
+   offset   Vec3
+   yaw      f32] void
+  (push-brush scene arena
+    (Brush
+      {:kind BrushKind/Hole
+       :mesh (zero Mesh^)
+       :material (zero Material)
+       :transform (mul-mat4
+                    (make-translate-mat4 (add-vec3 offset (vec3 0.0 half-y 0.0)))
+                    (make-rotate-mat4 (vec3 0.0 1.0 0.0) yaw))
+       :offset offset
+       :yaw yaw
+       :half-x half-x
+       :half-z half-z
+       :half-y half-y
+       :height 0.0
+       :radius 0.0
+       :texture-id 0u32})))
+
+;; Adds one decorative sphere prop to the scene -- any number. Unlike
+;; Box/Ramp/Hole, `offset` still means "footprint base" (the transform
+;; lifts by `radius`, same lift-by-half-y convention Box/Hole use, just
+;; with radius standing in for half-y) rather than the sphere's own
+;; centre, purely so every brush kind shares one placement convention --
+;; a future "place at cursor" spawn always means "sits on the ground/
+;; whatever's under the cursor", not "centred THROUGH it", regardless of
+;; kind. half-x/half-y/half-z are set equal to `radius` (never read as
+;; the authoritative size -- see Brush.radius's own comment) purely so
+;; terrain-height/scene-pick-brush/ortho-face-pick, none of which know
+;; about BrushKind/Sphere specifically, still treat it as a sane
+;; (cube-shaped) pick/AABB target instead of a degenerate zero-size one.
+;; Never walkable (terrain-height skips it, same as Hole) and never
+;; punches holes (gather-wall-holes only ever looks at Hole brushes) --
+;; a Sphere is purely a visual prop today, no other brush kind interacts
+;; with it.
+(fn add-sphere-brush
+  [scene      Scene*
+   arena      arena
+   radius     f32
+   material   Material
+   texture-id u32
+   offset     Vec3
+   yaw        f32] void
+  (push-brush scene arena
+    (Brush
+      {:kind BrushKind/Sphere
+       :mesh (make-sphere-mesh radius)
+       :material material
+       :transform (mul-mat4
+                    (make-translate-mat4 (add-vec3 offset (vec3 0.0 radius 0.0)))
+                    (make-rotate-mat4 (vec3 0.0 1.0 0.0) yaw))
+       :offset offset
+       :yaw yaw
+       :half-x radius
+       :half-z radius
+       :half-y radius
+       :height 0.0
+       :radius radius
+       :texture-id texture-id})))
+
+;; ~~ Hole-punch recomputation -- see mesh.3b's make-box-mesh-holes for the
+;; actual geometry; this file's job is finding which Hole brushes apply to
+;; which Box brush and turning their world placement into that fn's
+;; (axis, [HoleRect]) inputs.
+
+(val hole-yaw-epsilon     f32 0.01) ; radians -- how close a Hole's yaw must be to its wall's to count as aligned
+(val hole-through-epsilon f32 0.01) ; world units -- how far past a wall's own edge a hole must reach to count
+                                    ; as fully piercing that axis (not just exactly touching it)
+(val hole-margin-epsilon  f32 0.01) ; world units -- minimum resulting opening width/height on the two axes the
+                                    ; hole DOESN'T pierce, after clamping to the wall's own bounds (below) --
+                                    ; guards against a degenerate (zero-or-negative-width) opening, not against
+                                    ; touching the wall's edge (that's now legal, see gather-wall-holes)
+
+;; Every Hole brush that fully (and only) pierces `wall` horizontally,
+;; returned as mesh.3b's HoleRect list alongside the through-axis (0 or
+;; 2) those rects are in terms of, or an empty list/-1 if none apply --
+;; see BrushKind/Brush's own comment for the full restriction this
+;; enforces (Box-only, same-yaw, horizontal-only). If valid holes for
+;; BOTH axes exist (from different Hole brushes), only the ones matching
+;; whichever axis the FIRST valid one (in scene.brushes order) used are
+;; kept -- same "first eligible wins" tie convention scene-pick-brush
+;; already uses for an exact overlap.
+;;
+;; `holes` is built as a genuinely LOCAL Vector and returned (multi-
+;; return, not an in/out parameter) -- a `[T]` Vector is just a plain
+;; pointer under the hood (see TypeKind_Vector's own comment in 3b.h), and
+;; `vector-push` reassigns whichever target it's applied to on growth
+;; (a plain local here, `scene.brushes` directly for push-brush/add-model
+;; -- `vector-push` accepts a field-access target directly now, no
+;; local-var round-trip needed there any more): passed as an ordinary
+;; by-VALUE parameter instead, any push inside this fn would only ever
+;; update ITS OWN copy of that pointer, never the caller's, hence
+;; returning it instead.
+;;
+;; On the two axes a hole DOESN'T pierce, its rect is CLAMPED to the
+;; wall's own bounds rather than rejected outright if it reaches or
+;; exceeds an edge -- this is what makes a door reaching the wall's own
+;; base work (a hole placed with the same offset.y as its wall, so both
+;; start from the same floor-level base, would otherwise ALWAYS fail a
+;; strict "must not touch either edge" check, since neither Box nor Hole
+;; is ever given independent Y placement beyond that shared base
+;; convention). Only a hole that doesn't overlap the wall's interior AT
+;; ALL on one of these axes (clamping would collapse to zero-or-negative
+;; width) is rejected -- mesh.3b's make-box-mesh-holes independently
+;; skips the "reveal" wall on whichever side actually ended up flush with
+;; the wall's own edge (nothing to reveal there -- the opening already
+;; reaches the wall's true exterior face, which is why this doesn't
+;; z-fight with that face).
+(fn gather-wall-holes [scene Scene* wall Brush* arena arena] (i32 [HoleRect])
+  (var axis i32 -1)
+  (var holes [HoleRect])
+  (for [h (. scene brushes)]
+    (when (and (= (. h kind) BrushKind/Hole) (< (abs (- (. h yaw) (. wall yaw))) hole-yaw-epsilon))
+      (let [dx (- (. h offset x) (. wall offset x))
+            dz (- (. h offset z) (. wall offset z))
+            cy (cos (. wall yaw))
+            sy (sin (. wall yaw))
+            lx (- (* dx cy) (* dz sy))
+            lz (+ (* dx sy) (* dz cy))
+            ly (- (+ (. h offset y) (. h half-y)) (+ (. wall offset y) (. wall half-y)))
+            pierces-x (and (<= (- lx (. h half-x)) (- (- (. wall half-x)) hole-through-epsilon))
+                           (>= (+ lx (. h half-x)) (+ (. wall half-x) hole-through-epsilon)))
+            pierces-z (and (<= (- lz (. h half-z)) (- (- (. wall half-z)) hole-through-epsilon))
+                           (>= (+ lz (. h half-z)) (+ (. wall half-z) hole-through-epsilon)))]
+        (when (and pierces-x (not pierces-z) (or (< axis 0) (= axis 0)))
+          (let [min-a (clamp (- ly (. h half-y)) (- (. wall half-y)) (. wall half-y))
+                max-a (clamp (+ ly (. h half-y)) (- (. wall half-y)) (. wall half-y))
+                min-b (clamp (- lz (. h half-z)) (- (. wall half-z)) (. wall half-z))
+                max-b (clamp (+ lz (. h half-z)) (- (. wall half-z)) (. wall half-z))]
+            (when (and (> max-a (+ min-a hole-margin-epsilon)) (> max-b (+ min-b hole-margin-epsilon)))
+              (set axis 0)
+              (let [rect (HoleRect min-a max-a min-b max-b)] (vector-push arena holes rect)))))
+        (when (and pierces-z (not pierces-x) (or (< axis 0) (= axis 2)))
+          (let [min-a (clamp (- lx (. h half-x)) (- (. wall half-x)) (. wall half-x))
+                max-a (clamp (+ lx (. h half-x)) (- (. wall half-x)) (. wall half-x))
+                min-b (clamp (- ly (. h half-y)) (- (. wall half-y)) (. wall half-y))
+                max-b (clamp (+ ly (. h half-y)) (- (. wall half-y)) (. wall half-y))]
+            (when (and (> max-a (+ min-a hole-margin-epsilon)) (> max-b (+ min-b hole-margin-epsilon)))
+              (set axis 2)
+              (let [rect (HoleRect min-a max-a min-b max-b)] (vector-push arena holes rect))))))))
+  (return axis holes))
+
+;; Recomputes EVERY Box brush's mesh from its current dimensions plus
+;; whatever Hole brushes presently overlap it -- brute-force, no dirty-
+;; tracking (same "just loop over every brush" style terrain-height
+;; already uses; brush counts at house/level scale make this trivial).
+;; Call after any discrete brush change is done -- see editor.3b's
+;; editor-commit and the spawn/delete call sites -- never every frame
+;; during a live drag (that's exactly what editor.3b's deferred-rebuild
+;; change avoids).
+(fn rebuild-all-wall-meshes [scene Scene* arena arena] void
+  (for [i 0u64 (len (. scene brushes))]
+    (let [w (addr (nth (. scene brushes) i))]
+      (when (= (. w kind) BrushKind/Box)
+        (let [[axis holes] (gather-wall-holes scene w arena)]
+          (destroy-mesh (. w mesh))
+          (set (. w mesh)
+            (make-box-mesh-holes (vec3 (. w half-x) (. w half-y) (. w half-z)) axis holes arena)))))))
+
+;; Ground height at world (x, z): 0 outside every brush's footprint, or
+;; that brush's own kind-specific height inside it (flat for Box, linear
+;; rise for Ramp -- see BrushKind/Brush's own comment), PLUS `offset.y`
+;; (both add-box-brush/add-ramp-brush place a brush's BASE, not centre,
+;; at `offset` -- see their own comments -- so `offset.y` is that base's
+;; own height, and needs adding on top of the brush-local extent below).
+;;
+;; A brush whose base sits more than player-max-step above 0 is skipped
+;; entirely, footprint included -- editor.3b's translate gizmo (Y arm) or
+;; Q/E raise can now lift a brush clean off the ground, and without this,
+;; ANY brush floating overhead still counted as "the ground here", so a
+;; player standing underneath (feet near 0, this brush's top far above)
+;; read as needing an impossibly large single-frame step and got walled
+;; off by controller-player's player-max-step check below -- unable to
+;; walk under a brush with three feet of clearance over their head. A
+;; brush actually resting on (or near) the ground -- offset.y within a
+;; step of 0 -- is unaffected: it still participates normally, still
+;; blocks like a wall if ITS OWN top height is too tall to step onto.
+;;
+;; Rotates the query point into each brush's local space (the inverse of
+;; its own translate*rotate, i.e. the transpose of that rotation -- see
+;; make-rotate-mat4's own (x*cos+z*sin, -x*sin+z*cos) convention, which
+;; this inverts) rather than transforming the mesh, since there's nothing
+;; to transform except two numbers. Brushes aren't expected to overlap,
+;; so the first eligible one whose footprint contains the point wins.
+;; Hole brushes are skipped entirely (outer `when` below) -- negative
+;; space is never ground, never a wall; see BrushKind/Brush's own comment.
+(fn terrain-height [scene Scene* world-x f32 world-z f32] f32
+  (for [b (. scene brushes)]
+    (when (and (!= (. b kind) BrushKind/Hole) (!= (. b kind) BrushKind/Sphere)
+               (<= (. b offset y) player-max-step))
+      (let [dx (- world-x (. b offset x))
+            dz (- world-z (. b offset z))
+            cy (cos (. b yaw))
+            sy (sin (. b yaw))
+            lx (- (* dx cy) (* dz sy))
+            lz (+ (* dx sy) (* dz cy))]
+        (when (and (<= (abs lx) (. b half-x)) (<= (abs lz) (. b half-z)))
+          (match (. b kind)
+            [BrushKind/Box (return (+ (. b offset y) (* 2.0 (. b half-y))))
+             BrushKind/Ramp
+             (return (+ (. b offset y)
+                        (* (clamp (/ (+ lz (. b half-z)) (* 2.0 (. b half-z))) 0.0 1.0)
+                           (. b height))))
+             BrushKind/Hole (void 0)
+             ;; Unreachable -- filtered out by the outer `when` above,
+             ;; same as Hole -- kept only for match exhaustiveness.
+             BrushKind/Sphere (void 0)])))))
+  0.0)
+
+;; Which brush a world-space ray (camera.3b's camera-ray) hits first (-1
+;; for none), plus that hit's face normal in the BRUSH's OWN local,
+;; unrotated frame -- editor.3b's click-to-select AND click-to-resize both
+;; read off of this (a plain select is just "hit something, drag never
+;; moved"; see update-editor). Same per-brush inverse-yaw rotation as
+;; terrain-height above (world XZ into the brush's own local frame),
+;; extended to a full local-space AABB: X/Z from the brush's own
+;; half-x/half-z, Y from 0 up to whichever height each BrushKind reports
+;; for terrain-height (2*half-y for a Box's flat top, `height` for a
+;; Ramp's high end) -- a Ramp is picked (and resized) against its
+;; bounding box, not its actual slope, which is close enough to click on
+;; and much simpler than a real ray/wedge test. Ties (an exact overlap)
+;; go to whichever brush is earlier in scene.brushes, since `<` only
+;; replaces `best` on a STRICTLY closer hit.
+(fn scene-pick-brush [scene Scene* origin Vec3 dir Vec3] (i32 Vec3)
+  (var best i32 -1)
+  (var best-t f32 1000000.0)
+  (var best-normal Vec3 (vec3 0.0 0.0 0.0))
+  (for [[i b] (. scene brushes)]
+    (let [dx (- (. origin x) (. b offset x))
+          dz (- (. origin z) (. b offset z))
+          cy (cos (. b yaw))
+          sy (sin (. b yaw))
+          local-origin (vec3 (- (* dx cy) (* dz sy)) (- (. origin y) (. b offset y)) (+ (* dx sy) (* dz cy)))
+          local-dir (vec3 (- (* (. dir x) cy) (* (. dir z) sy)) (. dir y) (+ (* (. dir x) sy) (* (. dir z) cy)))
+          ;; Box and Hole are both Box-shaped (same half-y-based extent);
+          ;; only Ramp reports something different (`height`, its high end).
+          extent-y (match (. b kind) [BrushKind/Ramp (. b height) else (* 2.0 (. b half-y))])
+          [hit t normal] (ray-aabb-hit local-origin local-dir
+                    (vec3 (- (. b half-x)) 0.0 (- (. b half-z)))
+                    (vec3 (. b half-x) extent-y (. b half-z)))]
+      (when (and hit (< t best-t))
+        (set best (cast i32 i))
+        (set best-t t)
+        (set best-normal normal))))
+  (return best best-normal))
+
+;; light-pick-radius wide either side of each point light's own `pos` --
+;; deliberately bigger than the tiny emissive gizmo-cube draw-scene
+;; actually draws there (gizmo-half is 0.08, see main.3b's make-scene
+;; call), same "wider than the visual for a forgiving click target"
+;; convention editor.3b's gizmo-pick-thickness already uses for the
+;; translate gizmo's own arms.
+(val light-pick-radius f32 0.25)
+
+;; Which point light a world-space ray hits first (-1 for none) --
+;; editor.3b's click-to-select, tried only after scene-pick-brush comes
+;; up empty (see update-editor's own pick handling) so an overlapping
+;; brush always wins. No face/normal to report back (a light has nothing
+;; to resize), unlike scene-pick-brush.
+(fn scene-pick-light [scene Scene* origin Vec3 dir Vec3] i32
+  (var best i32 -1)
+  (var best-t f32 1000000.0)
+  (let [r (vec3 light-pick-radius light-pick-radius light-pick-radius)]
+    (for [i 0u32 (. scene lights point-count)]
+      (let [pos (. (nth (. scene lights points) i) pos)
+            [hit t normal] (ray-aabb-hit origin dir (sub-vec3 pos r) (add-vec3 pos r))]
+        (when (and hit (< t best-t))
+          (set best (cast i32 i))
+          (set best-t t)))))
+  best)
+
+;; Which model-bearing Thing a world-space ray hits first (-1 for none) --
+;; editor.3b's click-to-select, tried only after scene-pick-brush AND
+;; scene-pick-light both come up empty (same "first eligible kind wins"
+;; ordering scene-pick-light already has relative to scene-pick-brush) so
+;; level geometry and lights both keep priority over a decorative prop
+;; that happens to overlap them on screen. No face/normal reported back,
+;; same as scene-pick-light -- editor.3b's Thing resize is always a
+;; single uniform `scale` knob (EditorState's own comment), so there's no
+;; "which face" to resolve the way a Brush's per-axis half-extents need.
+;;
+;; Tests each Thing's WORLD-space AABB, built by transforming its own
+;; model.bounds-min/bounds-max's 8 corners through object-transform --
+;; same corner-sweep technique model-fit-matrix itself uses to fit a
+;; model's raw (un-transformed) bounds through an arbitrary correction
+;; matrix, just with THIS frame's full placement transform instead. An
+;; axis-aligned box around a possibly-rotated mesh is a looser fit than
+;; scene-pick-brush's own per-brush-local-space test, but plenty precise
+;; for a click target -- the same tradeoff Brush.radius's own comment
+;; already accepts for Sphere.
+(fn scene-pick-thing [scene Scene* origin Vec3 dir Vec3] i32
+  (var best i32 -1)
+  (var best-t f32 1000000.0)
+  (for [[i obj] (. scene things)]
+    (when (. obj has-model)
+      (let [transform (object-transform (addr obj))
+            raw-lo (. obj model bounds-min)
+            raw-hi (. obj model bounds-max)]
+        (var lo Vec3 (vec3 1000000.0 1000000.0 1000000.0))
+        (var hi Vec3 (vec3 -1000000.0 -1000000.0 -1000000.0))
+        (for [corner 0 8]
+          (let [p (transform-point transform
+                    (vec3 (if (bit-and corner 1) (. raw-hi x) (. raw-lo x))
+                          (if (bit-and corner 2) (. raw-hi y) (. raw-lo y))
+                          (if (bit-and corner 4) (. raw-hi z) (. raw-lo z))))]
+            (set lo (vec3 (min (. lo x) (. p x)) (min (. lo y) (. p y)) (min (. lo z) (. p z))))
+            (set hi (vec3 (max (. hi x) (. p x)) (max (. hi y) (. p y)) (max (. hi z) (. p z))))))
+        (let [[hit t normal] (ray-aabb-hit origin dir lo hi)]
+          (when (and hit (< t best-t))
+            (set best (cast i32 i))
+            (set best-t t))))))
+  best)
+
+;; scene-pick-brush's own face normal is USELESS for an orthographic
+;; pick (editor.3b's Top/Front/Side panes): `dir` there is always a
+;; straight axis-aligned unit vector (camera.3b's ortho-view-dir), so of
+;; ray-aabb-hit's three per-axis loops, only the one matching `dir`'s own
+;; nonzero component ever sets a normal at all -- exactly the ONE axis an
+;; orthographic view can't show or usefully resize (Top's Y, Front's Z,
+;; Side's X), never the two axes actually visible on screen. Worse, once
+;; `origin` (built from wherever camera.target/editor.selection currently
+;; sit, not pulled back a fixed depth the way a perspective eye is) drifts
+;; onto the WRONG side of that locked axis relative to the brush, the ray
+;; starts already inside the box on every axis and ray-aabb-hit reports a
+;; degenerate all-zero normal instead (its own comment) -- editor-start-
+;; resize's cascading if/else then silently misreads that as a Z-axis
+;; grab.
+;;
+;; This is the real fix: given `b` was already confirmed hit (by
+;; scene-pick-brush, whose INDEX/ranking is still correct -- only the
+;; normal is unusable), pick the face by comparing the click's own
+;; position (still `origin` -- for an orthographic ray the two axes
+;; perpendicular to `dir` are exactly the click's mapped world position on
+;; those axes, unaffected by `t`) against `b`'s half-extents, in `b`'s own
+;; local (unrotated) frame -- same inverse-yaw rotation scene-pick-brush
+;; itself applies to dx/dz. Whichever of the two axes NOT most aligned
+;; with `dir` (found by rotating `dir` into the same local frame) sits
+;; CLOSER to its own boundary, as a fraction of its own half-extent, wins
+;; -- so a click nearer a brush's left/right edge in Top view grabs X, one
+;; nearer front/back grabs Z, matching what's actually visible on screen
+;; instead of an axis this view can't show at all.
+(fn ortho-face-pick [b Brush* origin Vec3 dir Vec3] Vec3
+  (let [cy (cos (. b yaw)) sy (sin (. b yaw))
+        dx (- (. origin x) (. b offset x))
+        dz (- (. origin z) (. b offset z))
+        local-x (- (* dx cy) (* dz sy))
+        local-y (- (. origin y) (. b offset y))
+        local-z (+ (* dx sy) (* dz cy))
+        local-dir-x (- (* (. dir x) cy) (* (. dir z) sy))
+        local-dir-y (. dir y)
+        local-dir-z (+ (* (. dir x) sy) (* (. dir z) cy))
+        ;; Box and Hole both use half-y-based extent; only Ramp reports
+        ;; `height` (its high end) -- same split scene-pick-brush's own
+        ;; extent-y uses.
+        extent-y (match (. b kind) [BrushKind/Ramp (. b height) else (* 2.0 (. b half-y))])
+        ;; How close each axis's click position sits to ITS OWN boundary,
+        ;; as a fraction of that axis's own half-extent (smaller = closer
+        ;; to/past the edge, so the axis with the SMALLEST fraction is the
+        ;; one whose face the click landed nearest). Y's own extent runs
+        ;; [0, extent-y] rather than a centred ±half, hence its own form.
+        frac-x (/ (- (. b half-x) (abs local-x)) (. b half-x))
+        frac-z (/ (- (. b half-z) (abs local-z)) (. b half-z))
+        frac-y (/ (min local-y (- extent-y local-y)) (* 0.5 extent-y))
+        abs-dir-x (abs local-dir-x)
+        abs-dir-y (abs local-dir-y)
+        abs-dir-z (abs local-dir-z)]
+    (if (and (>= abs-dir-y abs-dir-x) (>= abs-dir-y abs-dir-z))
+      ;; Top view: Y is locked, compare X vs Z.
+      (if (< frac-x frac-z)
+        (vec3 (if (> local-x 0.0) 1.0 -1.0) 0.0 0.0)
+        (vec3 0.0 0.0 (if (> local-z 0.0) 1.0 -1.0)))
+      (if (and (>= abs-dir-x abs-dir-y) (>= abs-dir-x abs-dir-z))
+        ;; Side view: X is locked, compare Z vs Y. Y's own sign is
+        ;; ALWAYS +1, never picked from local-y like X/Z's signs are --
+        ;; editor-apply-resize's axis-1 case is anchored at the base
+        ;; (half-y/height grows upward only, `offset` never shifts, see
+        ;; its own comment), so there's no real "grabbed the bottom
+        ;; face" the way X/Z have two real opposite faces. A click low
+        ;; on a brush's Y extent (the common case for a Ramp's low,
+        ;; sloped Front/Side silhouette) would otherwise get sign -1,
+        ;; flipping editor-apply-resize's drag-direction formula so
+        ;; dragging up SHRINKS instead of grows.
+        (if (< frac-z frac-y)
+          (vec3 0.0 0.0 (if (> local-z 0.0) 1.0 -1.0))
+          (vec3 0.0 1.0 0.0))
+        ;; Front view: Z is locked, compare X vs Y (same fixed Y sign
+        ;; as the Side branch above).
+        (if (< frac-x frac-y)
+          (vec3 (if (> local-x 0.0) 1.0 -1.0) 0.0 0.0)
+          (vec3 0.0 1.0 0.0))))))
+
+;; Loads `path` and adds it as a new model instance. `correction`/
+;; `target-height` go straight to model-fit-matrix (model.3b) -- see its
+;; own comment for what a model's "fit" matrix does and why a correction
+;; rotation is usually needed. `offset` is this instance's starting
+;; world placement (yaw starts at 0 -- facing whatever `correction`
+;; leaves as "forward"); `wiggle-joint` only matters to pose-hand-wiggle
+;; (pass -1 for any other `pose`); `collision-radius` is this instance's
+;; XZ collision circle (pass 0.0 to opt out entirely -- it'll neither
+;; push nor be pushed, see resolve-collisions); `controller` decides
+;; whether/how this instance moves on its own each frame (controller-
+;; idle/controller-player below, or a new one for a new kind of motion).
+;; A failed load (load-model's `ok`) adds nothing rather than pushing a
+;; placeholder object that would sit invisible but still collide/animate.
+(fn add-model
+  [scene            Scene*
+   arena            arena
+   path             string
+   correction       Mat4
+   target-height    f32
+   material         Material
+   offset           Vec3
+   wiggle-joint     i32
+   collision-radius f32
+   pose             (fn [model Model* out-local Mat4* time f32 wiggle-joint i32] void)
+   controller       (fn [obj Thing* self u64 scene Scene* input Input* dt f32] void)] void
+  (let [[ok model] (load-model arena path)]
+    (when (not ok) (return))
+    (let [joint-count (max (. model skeleton joint-count) 1u32)
+          obj (Thing
+                {:model model
+                 :has-model true
+                 :base-fit (model-fit-matrix (addr model) correction target-height)
+                 :path path
+                 :correction correction
+                 :target-height target-height
+                 :material material
+                 :offset offset
+                 :yaw 0.0
+                 :scale 1.0
+                 :anim-time 0.0
+                 :wiggle-joint wiggle-joint
+                 :collision-radius collision-radius
+                 :local (push arena Mat4 joint-count)
+                 :joints (push arena Mat4 joint-count)
+                 :pose pose
+                 :controller-kind ControllerKind/Native
+                 :controller controller
+                 :script-engine (cast any nil)
+                 :script-handle 0u32
+                 :script-fn ""})]
+      (vector-push arena (. scene things) obj))))
+
+;; Every model dropped in through editor.3b's model-browser starts THIS
+;; tall (world units) before any live editor resize -- add-prop's own
+;; comment explains why this can't just be "trust the file's raw
+;; bounds": confirmed live against a Blender-exported prop whose authored
+;; units were nowhere near 1 world unit per metre (model-fit-matrix's
+;; scale came out ~1.0, and the result filled most of the perspective
+;; pane from a few units away). Nothing stops the next dropped-in file
+;; being authored the same way, which is why this is a fixed height
+;; rather than the file's own. Matches the human-scale ballpark main.3b's
+;; own add-model call sites already hand-pick per asset (1.8-2.2).
+(val add-prop-default-height f32 1.8)
+
+;; editor.3b's model-browser counterpart to add-model above: no per-asset
+;; correction tuning up front (main.3b's own add-model call sites each
+;; hand-pick one for ONE specific known file -- CesiumMan's and
+;; RiggedFigure's Z-up rigs -- which an arbitrary file picked live from
+;; disk has no equivalent of, so this always uses identity) and no
+;; per-asset target-height either -- add-prop-default-height above,
+;; NOT the model's own raw bounds height (see that val's own comment for
+;; why trusting raw authored units doesn't work in general). Centred on
+;; X/Z and standing on its own base at `offset`, same placement
+;; convention add-model's instances already use. Starts inert
+;; (ControllerKind/None -- ordinary content, not a character) at
+;; Thing.scale 1.0; editor.3b's gizmo/resize-drag are what move and
+;; resize it afterward -- resize is a plain multiplier on TOP of this
+;; starting height, so "reads oddly large/small at scale 1.0" is exactly
+;; what that control is for, not a bug to chase per-asset. `pose-clip`
+;; (not pose-bind) so a model that DOES carry a baked clip (e.g.
+;; CesiumMan.gltf) plays it immediately, same as main.3b's own
+;; cesium-path add-model call -- it degrades to bind pose for one that
+;; doesn't (pose-clip's own comment). A failed load adds nothing and
+;; returns -1, same "no placeholder" convention add-model already has.
+(fn add-prop [scene Scene* arena arena path string offset Vec3] (bool i32)
+  (let [[ok model] (load-model arena path)]
+    (when (not ok) (return false -1))
+    (let [joint-count (max (. model skeleton joint-count) 1u32)
+          obj (Thing
+                {:model model
+                 :has-model true
+                 :base-fit (model-fit-matrix (addr model) (mat4 1.0) add-prop-default-height)
+                 :path path
+                 :correction (mat4 1.0)
+                 :target-height add-prop-default-height
+                 :material (material (vec3 1.0 1.0 1.0) 32.0 0.15)
+                 :offset offset
+                 :yaw 0.0
+                 :scale 1.0
+                 :anim-time 0.0
+                 :wiggle-joint -1
+                 :collision-radius 0.0
+                 :local (push arena Mat4 joint-count)
+                 :joints (push arena Mat4 joint-count)
+                 :pose pose-clip
+                 :controller-kind ControllerKind/None
+                 :controller controller-idle
+                 :script-engine (cast any nil)
+                 :script-handle 0u32
+                 :script-fn ""})]
+      (vector-push arena (. scene things) obj)
+      (return true (cast i32 (- (len (. scene things)) 1u64))))))
+
+;; Adds a THING with no model at all -- a pure-logic entity, driven
+;; entirely by a hot-reloadable script (see vm.3b's create/load,
+;; and the thing-get-*/thing-set-* host callbacks below that `script-fn`
+;; calls back into every frame). `offset`/`yaw`/`collision-radius` start
+;; it placed the same way add-model's instances are; there's no mesh to
+;; fit/pose/skin, so has-model stays false and update-scene/draw-scene
+;; both skip that work for it entirely.
+(fn add-scripted-thing
+  [scene            Scene*
+   arena            arena
+   offset           Vec3
+   collision-radius f32
+   engine           any
+   script-path      string
+   script-fn        string] (bool u64)
+  (let [[loaded handle] (vm/load engine script-path)]
+    (when (not loaded) (return false 0u64))
+    (watch-script arena engine handle)
+    (let [obj (Thing
+                {:model (zero Model)
+                 :has-model false
+                 :base-fit (mat4 1.0)
+                 :path ""
+                 :correction (mat4 1.0)
+                 :target-height 0.0
+                 :material (zero Material)
+                 :offset offset
+                 :yaw 0.0
+                 :scale 1.0
+                 :anim-time 0.0
+                 :wiggle-joint -1
+                 :collision-radius collision-radius
+                 :local nil
+                 :joints nil
+                 :pose pose-bind
+                 :controller-kind ControllerKind/Scripted
+                 :controller controller-idle
+                 :script-engine engine
+                 :script-handle handle
+                 :script-fn script-fn})
+          index (len (. scene things))]
+      (vector-push arena (. scene things) obj)
+      (return true index))))
+
+;; ~~ Host callbacks a Scripted Thing calls BACK into (see
+;; native_script_register_u64_to_u32 and friends, script_native.h) to
+;; read/write its own state. `g-active-scene` exists because a Direct-
+;; mode host import is a plain, argument-only C function (see
+;; bytecode.h's own BcHostImportKind_Direct note: "meaningless for
+;; userdata") -- there's nowhere else for it to reach the live Scene
+;; from. Set once, in main.3b, right after make-scene; this project only
+;; ever has one Scene alive at a time.
+;;
+;; THIS USED TO BE one get/set PAIR PER FIELD (thing-get-offset-x,
+;; thing-set-yaw, ...) -- every new field meant editing three places (a
+;; new host fn here, a new vm/register-* call below, a new `(extern (fn
+;; ...))` in every script touching it) for one number, and reading back
+;; unchanged components just to preserve them through a multi-component
+;; setter (thing/set-offset always needing all of x/y/z, even to change
+;; only one). Now there are only ever TWO host callbacks -- thing-get-
+;; field/thing-set-field below -- each taking a `field` id (thing-field-*
+;; below) alongside the Thing's index, and exposing a new field from here
+;; on is one new `val` plus one new `match` arm in each, nothing
+;; registered again.
+;;
+;; A Direct-mode Getter can only carry a SINGLE u64 argument in (fixed
+;; arity, integer-only -- script_native.h's own note), so there's no
+;; separate parameter slot for a field id alongside the Thing's index.
+;; Both get and set below instead take one PACKED u64: the Thing's index
+;; in the high bits, the field id in the low 8 (a Scene will never hold
+;; anywhere near 2^56 Things, and Thing will never grow anywhere near 256
+;; scriptable fields) -- pack via `(bit-or (bit-shl idx 8u64) (cast u64
+;; field))`. That packing expression is the one piece of shared
+;; convention a script has to copy locally (same deal as f32-to-bits/
+;; bits-to-f32 above -- each script keeps its own copy, since a script
+;; and its host are compiled completely separately, and a `.3bs` script
+;; can only `(import ...)` the fixed compiler-embedded module whitelist --
+;; script.c's g_known_modules -- not an arbitrary sibling file like this
+;; one).
+(var g-active-scene Scene* nil)
+
+;; Field ids thing-get-field/thing-set-field understand -- the shared
+;; vocabulary a script packs against. Bare u32 constants rather than a
+;; real `enum ThingField` purely so a script can copy just the numbers it
+;; needs (see this section's own top comment on why no real sharing is
+;; possible); keep this list and its two `match` arms below in sync when
+;; adding a field, same as f32-to-bits already needing its own two copies.
+(val thing-field-offset-x         u32 0u32)
+(val thing-field-offset-y         u32 1u32)
+(val thing-field-offset-z         u32 2u32)
+(val thing-field-yaw              u32 3u32)
+(val thing-field-scale            u32 4u32)
+(val thing-field-anim-time        u32 5u32)
+(val thing-field-wiggle-joint     u32 6u32) ; i32 -- crosses as its raw bits too; same-width int<->int, so `cast` (not `reinterpret`) round-trips it
+(val thing-field-collision-radius u32 7u32)
+
+(fn thing-get-field [h u64] u32
+  (let [t     (addr (nth (. g-active-scene things) (bit-shr h 8u64)))
+        field (cast u32 (bit-and h 255u64))]
+    (match field
+      [0u32 (f32-to-bits (. t offset x))
+       1u32 (f32-to-bits (. t offset y))
+       2u32 (f32-to-bits (. t offset z))
+       3u32 (f32-to-bits (. t yaw))
+       4u32 (f32-to-bits (. t scale))
+       5u32 (f32-to-bits (. t anim-time))
+       6u32 (cast u32 (. t wiggle-joint))
+       else (f32-to-bits (. t collision-radius))])))
+
+(fn thing-set-field [h u64 bits u32] void
+  (let [t     (addr (nth (. g-active-scene things) (bit-shr h 8u64)))
+        field (cast u32 (bit-and h 255u64))]
+    (match field
+      [0u32 (void (set (. t offset x) (bits-to-f32 bits)))
+       1u32 (void (set (. t offset y) (bits-to-f32 bits)))
+       2u32 (void (set (. t offset z) (bits-to-f32 bits)))
+       3u32 (void (set (. t yaw) (bits-to-f32 bits)))
+       4u32 (void (set (. t scale) (bits-to-f32 bits)))
+       5u32 (void (set (. t anim-time) (bits-to-f32 bits)))
+       6u32 (void (set (. t wiggle-joint) (cast i32 bits)))
+       else (void (set (. t collision-radius) (bits-to-f32 bits)))])))
+
+;; Registers thing-get-field/thing-set-field onto `engine`, under the
+;; exact names a script declares via `(extern (fn thing/get [h u64] u32))`
+;; / `(extern (fn thing/set [h u64 bits u32] void))`. Call this once,
+;; right after vm/engine-create and BEFORE any vm/load whose script calls
+;; back into either -- see script_native.h's own registration-ordering
+;; note.
+(fn register-thing-callbacks [engine any] void
+  (vm/register-getter  engine "thing/get" thing-get-field)
+  (vm/register-setter1 engine "thing/set" thing-set-field)
+  (void 0))
+
+;; Hands an ALREADY-PLACED Thing (add-model/add-prop/add-scripted-thing,
+;; doesn't matter which) over to script-driven control -- update-scene's
+;; own ControllerKind/Scripted branch and thing-get-field/thing-set-field
+;; above don't care how a Thing was created, only what its
+;; controller-kind currently is. This is what makes EVERY Thing
+;; scriptable, not just the model-less kind add-scripted-thing creates --
+;; a placed prop or an NPC can be handed off to a script well after
+;; add-time (editor.3b wiring a placed prop up to a behavior; main.3b
+;; handing an existing character to a script mid-game). Same hot-reload
+;; registration (watch-script) and same false-on-a-bad-path behavior as
+;; add-scripted-thing; on failure the Thing is left exactly as it was.
+(fn attach-script
+  [scene       Scene*
+   arena       arena
+   index       u64
+   engine      any
+   script-path string
+   script-fn   string] bool
+  (let [[loaded handle] (vm/load engine script-path)]
+    (when (not loaded) (return false))
+    (watch-script arena engine handle)
+    (let [t (addr (nth (. scene things) index))]
+      (set (. t script-engine) engine)
+      (set (. t script-handle) handle)
+      (set (. t script-fn) script-fn)
+      (set (. t controller-kind) ControllerKind/Scripted))
+    (return true)))
+
+;; Reverts a Scripted Thing back to inert (ControllerKind/None). Does NOT
+;; vm/unload the script -- the same engine handle may still be in use by
+;; other Things, and watch-script's hot-reload polling isn't per-Thing --
+;; this only stops update-scene from calling into it for THIS Thing.
+(fn detach-script [scene Scene* index u64] void
+  (let [t (addr (nth (. scene things) index))]
+    (set (. t controller-kind) ControllerKind/None)))
+
+;; Brings every already-PLACED Thing back in sync after assets.3b's own
+;; poll-asset-reloads actually reloaded one or more model paths -- a Thing
+;; holds its OWN copy of Model (offset/yaw/scale/material are per-instance,
+;; so Thing can't just be a pointer into model-cache the way, say, a
+;; Brush's texture-id is a shared GL id -- see
+;; [[game3d-model-browser-placement]] project memory on why a full
+;; model-fit-matrix-shaped resource can't reuse the same "just re-upload
+;; into the existing id" trick a Texture-kind watch gets to use), so a
+;; reload has to be pushed out to
+;; every Thing that came from that path, not just the cache entry. Brute-
+;; force scan (every Thing against every changed path) -- editor-session
+;; brush/thing counts are small, same "just loop" reasoning terrain-
+;; height already uses. Recomputes base-fit via the Thing's OWN
+;; remembered correction/target-height (Thing.path's own comment) so a
+;; reload lands exactly where add-model/add-prop originally placed it,
+;; not re-centred/re-scaled around whatever the fresh file's raw bounds
+;; happen to be. `local`/`joints` are re-pushed at the (possibly changed)
+;; new joint-count rather than reused -- a stale-sized array here would
+;; either truncate a joint that grew in or read garbage past one that
+;; shrank.
+(fn reload-changed-things [scene Scene* arena arena changed-paths [string]] void
+  (when (<= (len changed-paths) 0u64) (return))
+  (for [i 0u64 (len (. scene things))]
+    (let [obj (addr (nth (. scene things) i))]
+      (when (. obj has-model)
+        (for [path changed-paths]
+          (when (= (. obj path) path)
+            (let [[ok fresh] (load-model arena path)] ; cache hit -- model.3b already reloaded it
+              (when ok
+                (let [joint-count (max (. fresh skeleton joint-count) 1u32)]
+                  (set (. obj model) fresh)
+                  (set (. obj base-fit) (model-fit-matrix (addr fresh) (. obj correction) (. obj target-height)))
+                  (set (. obj local) (push arena Mat4 joint-count))
+                  (set (. obj joints) (push arena Mat4 joint-count)))))))))))
+
+;; Runs every thing's controller (movement/facing/camera-follow) --
+;; Native calls `controller` directly, Scripted calls into `script-fn`
+;; instead (self index + this frame's dt, packed as f32 bits -- see
+;; f32-to-bits below -- since a Direct-mode host import can only ever
+;; carry integers; its RETURN value is ignored on purpose, a script
+;; mutates this Thing only by calling the thing-get-*/thing-set-* host
+;; callbacks back into the host mid-call) -- then poses whichever ones
+;; have both a model AND a skeleton. Doesn't touch the lights -- this
+;; demo's own light choreography (update-lights, main.3b) is content, not
+;; mechanism, so it stays called separately from main.3b's own loop.
+(fn update-scene [scene Scene* input Input* dt f32] void
+  (for [i 0u64 (len (. scene things))]
+    (let [obj (addr (nth (. scene things) i))]
+      (match (. obj controller-kind)
+        [ControllerKind/None (void 0)
+         ControllerKind/Native
+         (let [controller-fn (. obj controller)]
+           (controller-fn obj i scene input dt))
+         ControllerKind/Scripted
+         (void (vm/call2 (. obj script-engine) (. obj script-handle) (. obj script-fn)
+                (cast i64 i) (cast i64 (f32-to-bits dt))))])
+      (when (and (. obj has-model) (. obj model has-skeleton))
+        (let [pose-fn (. obj pose)]
+          (pose-fn (& obj model) (. obj local) (. obj anim-time) (. obj wiggle-joint)))
+        (skeleton-pose (& obj model skeleton) (. obj local) (. obj joints))))))
+
+;; This frame's world transform for a thing: offset * facing * scale * fit,
+;; shared by draw-scene and draw-scene-depth so the shadow it casts always
+;; lines up with where it's actually drawn. `scale` sits BETWEEN base-fit
+;; and the yaw rotation (not outside the whole thing) specifically so it
+;; scales about base-fit's own origin -- the model's already-centred,
+;; feet-at-zero placement point (model-fit-matrix's own comment) -- rather
+;; than about world space, which would also drag the model sideways off
+;; `offset` the further `scale` strays from 1.0.
+(fn object-transform [obj Thing*] Mat4
+  (let [t (make-translate-mat4 (. obj offset))
+        r (make-rotate-mat4 (vec3 0.0 1.0 0.0) (. obj yaw))
+        s (make-scale-mat4 (vec3 (. obj scale) (. obj scale) (. obj scale)))
+        f (mul-mat4 r (mul-mat4 s (. obj base-fit)))]
+    (mul-mat4 t f)))
+
+;; `resize-ghost-index` is -1 in every ordinary (Play-mode) call -- pass
+;; the selected brush's index instead while editor.3b has it mid-face-
+;; drag-resize (see EditorState.resize-axis), which skips drawing that
+;; ONE brush's real (now-stale-shaped) mesh for the length of the drag;
+;; editor.3b's draw-wireframe-brush draws a live wireframe ghost in its
+;; place instead, using its current (not-yet-committed) dimensions.
+(fn draw-scene [renderer Renderer* scene Scene* resize-ghost-index i32] void
+  (draw-model renderer (. scene ground) (. scene ground-transform) (. scene ground-material))
+  ;; Hole brushes have no real mesh -- see BrushKind/Brush's own comment --
+  ;; editor.3b draws their wireframe outline separately, in edit-mode only.
+  (for [[i b] (. scene brushes)]
+    (when (and (!= (. b kind) BrushKind/Hole) (!= (cast i32 i) resize-ghost-index))
+      (draw-textured-model renderer (. b mesh) (. b transform) (. b material) (. b texture-id))))
+
+  (for [obj (. scene things)]
+    (when (. obj has-model)
+      (let [transform (object-transform (addr obj))]
+        (draw-model-instance renderer (& obj model) transform (. obj material)
+          (. obj joints) (. obj model skeleton joint-count)))))
+
+  ;; One little emissive cube per model-less Thing (add-scripted-thing)
+  ;; -- without this a purely script-driven entity (e.g. orbiter.3bs) has
+  ;; literally nothing drawn for it, so there'd be no way to SEE it
+  ;; actually moving. Point lights use to draw a cube here too -- see
+  ;; draw-scene-billboards below, a separate call (needs its own camera
+  ;; basis/view-proj, see its own comment for why that can't just be
+  ;; folded into this function).
+  (for [obj (. scene things)]
+    (when (not (. obj has-model))
+      (draw-model renderer (. scene gizmo)
+        (make-translate-mat4 (. obj offset))
+        (emissive-material thing-marker-color)))))
+
+;; World units, both axes -- editor.3b's gizmo-half (0.08, the OLD cube
+;; marker's half-extent) made for a tiny, easy-to-miss click target;
+;; sized up now that a flat round icon reads clearly at a glance instead
+;; of relying on a lit face to even show up.
+(val light-icon-size f32 0.35)
+
+;; One camera-facing round icon per point light, tinted by its own color
+;; (light.3b's own Light.color) -- a disabled one (Light.enabled,
+;; editor.3b's `V`) is dimmed to disabled-light-gizmo-color instead, same
+;; "still visible/selectable/movable, just reads as off" convention the
+;; old cube gizmo already had. A SEPARATE call from draw-scene (not
+;; folded into it) because a billboard needs the CURRENT view's own
+;; camera basis/view-proj -- draw-scene has no notion of "current view"
+;; at all (every draw-*-model call inside it just uses whatever's already
+;; bound on the lit shader) -- and edit mode's 4-pane view has FOUR
+;; different ones live in a single frame, so main.3b calls this once per
+;; pane/per Play-mode frame with whichever is currently active (see
+;; camera.3b's camera-basis/camera-view-proj, editor.3b's
+;; pane-camera-basis, main.3b's own draw-scene-billboards call sites).
+(fn draw-scene-billboards
+  [renderer Renderer* scene Scene* view-proj Mat4 cam-right Vec3 cam-up Vec3] void
+  (for [i 0u32 (. scene lights point-count)]
+    (let [light (addr (nth (. scene lights points) i))
+          color (if (. light enabled) (. light color) disabled-light-gizmo-color)]
+      (draw-billboard renderer (. light pos) (vec2 light-icon-size light-icon-size)
+        (vec4 (. color x) (. color y) (. color z) 1.0) (. scene light-icon-texture)
+        view-proj cam-right cam-up))))
+
+;; Depth-only counterpart to draw-scene, for renderer.3b's shadow pass
+;; (call between begin-shadow-pass and end-shadow-pass). Skips the point-
+;; light gizmo cubes -- they're tiny emissive markers, not something
+;; anything should visibly cast a shadow from or onto.
+(fn draw-scene-depth [renderer Renderer* scene Scene* resize-ghost-index i32] void
+  (draw-model-depth renderer (. scene ground) (. scene ground-transform))
+  (for [[i b] (. scene brushes)]
+    (when (and (!= (. b kind) BrushKind/Hole) (!= (cast i32 i) resize-ghost-index))
+      (draw-model-depth renderer (. b mesh) (. b transform))))
+
+  (for [obj (. scene things)]
+    (when (. obj has-model)
+      (let [transform (object-transform (addr obj))]
+        (draw-model-instance-depth renderer (& obj model) transform
+          (. obj joints) (. obj model skeleton joint-count))))))
+
+;; Same shape as draw-scene-depth, one face of ONE shadow slot's cubemap
+;; at a time (renderer.3b's begin-point-shadow-face/end-point-shadow-
+;; pass) -- call once per face, once per slot (light.3b's max-point-
+;; shadows, 3). Skips the point-light gizmo cubes for the same reason
+;; draw-scene-depth does.
+(fn draw-scene-point-shadow [renderer Renderer* slot i32 scene Scene* resize-ghost-index i32] void
+  (draw-model-point-shadow renderer slot (. scene ground) (. scene ground-transform))
+  (for [[i b] (. scene brushes)]
+    (when (and (!= (. b kind) BrushKind/Hole) (!= (cast i32 i) resize-ghost-index))
+      (draw-model-point-shadow renderer slot (. b mesh) (. b transform))))
+
+  (for [obj (. scene things)]
+    (when (. obj has-model)
+      (let [transform (object-transform (addr obj))]
+        (draw-model-instance-point-shadow renderer slot (& obj model) transform
+          (. obj joints) (. obj model skeleton joint-count))))))
+
+;; This frame's sun shadow-map view-projection -- shadow-half-extent above
+;; sets how much of the world it covers; scene.3b owns this (rather than
+;; main.3b computing it inline) because it depends on the ground size this
+;; file already knows.
+(fn scene-light-space-matrix [scene Scene*] Mat4
+  (shadow-light-space-matrix (. scene lights sun dir) (vec3 0.0 1.0 0.0) shadow-half-extent))
+
+(fn destroy-scene [scene Scene*] void
+  (for [b (. scene brushes)]
+    (when (!= (. b kind) BrushKind/Hole)
+      (destroy-mesh (. b mesh))))
+  (destroy-mesh (. scene gizmo))
+  (destroy-mesh (. scene gizmo-arm))
+  (destroy-mesh (. scene unit-ramp))
+  (destroy-mesh (. scene unit-sphere))
+  (destroy-mesh (. scene ground)))

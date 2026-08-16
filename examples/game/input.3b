@@ -1,0 +1,17 @@
+(package game)
+(import sdl)
+
+(struct Input
+  [move-left  bool
+   move-right bool
+   run        bool
+   jump       bool
+   attack     bool])
+
+(fn input-handle-key [input Input* key u32 down bool] void
+  (match key
+    [[sdl/SDLK_LEFT   sdl/SDLK_A]      (set (. input move-left)  down)
+     [sdl/SDLK_RIGHT  sdl/SDLK_D]      (set (. input move-right) down)
+     [sdl/SDLK_LSHIFT sdl/SDLK_RSHIFT] (set (. input run)        down)
+     sdl/SDLK_SPACE                    (set (. input jump)       down)
+     sdl/SDLK_J                        (set (. input attack)     down)]))

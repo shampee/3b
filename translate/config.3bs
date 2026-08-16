@@ -1,0 +1,111 @@
+(package config)
+
+;; The `config` module -- see the 3bscript-bytecode-vm-design project
+;; memory ("3bs: scripting as a distinct language identity" and "real
+;; cross-package bytecode imports") for the full design. A `.3bs`
+;; translator-config script gets this via `(import config)`, compiled as
+;; its OWN separate BcProgram (see script.c's own top-of-file note) and
+;; called via a QUALIFIED name, e.g. `(config/add-header "GL/gl.h")`.
+;; ONLY a driver that specifically built a real `Config*` and registered
+;; bc_register_config_primitives against it can actually run a script
+;; that imports this module (see bcconfigprims.h's own comment) --
+;; unlike `build`, this is NOT safe for a general-purpose
+;; `3b run <script.3bs>` invocation.
+;;
+;; Every wrapper here is a THIN passthrough to a `config-*`-prefixed raw
+;; host import (bcconfigprims.c) -- one Config entry per call. `.3bs` now
+;; has collection `for` (see the 3bscript-bytecode-vm-design project
+;; memory's "feature parity" pass), so the batch-taking forms below
+;; (add-headers, add-exclude-funcs, ...) loop over a `[string]` and call
+;; the singular per-item wrapper once per element -- real loops compiled
+;; to real bytecode, not unrolled by a script author calling the singular
+;; form once per item by hand. These mirror the DSL config reader's own
+;; batch forms (translate/config.c's `headers`/`exclude-func`/... take a
+;; whole `[...]` vector already) so a `.3bs` config script has the same
+;; batch ergonomics as a plain `.cfg.3b` file.
+
+(extern (fn config-set-package [name string] void))
+(extern (fn config-add-header [path string] void))
+(extern (fn config-add-define [platform string name string value string] void))
+(extern (fn config-set-strip-const-prefix [prefix string] void))
+(extern (fn config-set-strip-func-prefix [prefix string] void))
+(extern (fn config-set-strip-struct-prefix [prefix string] void))
+(extern (fn config-add-type-map [c-name string b3-name string] void))
+(extern (fn config-add-pin-type [c-name string b3-name string c-spelling string] void))
+(extern (fn config-add-enum-group-member [group string member string] void))
+(extern (fn config-add-flags-group-member [group string member string] void))
+(extern (fn config-set-enum-group-pattern [group string pattern string] void))
+(extern (fn config-set-flags-group-pattern [group string pattern string] void))
+(extern (fn config-add-force-opaque [name string] void))
+(extern (fn config-add-construct-outparam [func string param-index i32] void))
+(extern (fn config-add-mutate-outparam [func string param-index i32] void))
+(extern (fn config-add-arena-outparam [func string count-param-index i32 out-param-index i32] void))
+(extern (fn config-add-rename-func [from string to string] void))
+(extern (fn config-add-rename-const [from string to string] void))
+(extern (fn config-add-rename-type [from string to string] void))
+(extern (fn config-add-rename-const-pattern [pattern string replacement string] void))
+(extern (fn config-add-rename-func-pattern [pattern string replacement string] void))
+(extern (fn config-add-rename-type-pattern [pattern string replacement string] void))
+(extern (fn config-add-exclude-func [name string] void))
+(extern (fn config-add-exclude-const [name string] void))
+(extern (fn config-set-skip-deprecated [] void))
+
+(fn set-package [name string] void (config-set-package name))
+(fn add-header [path string] void (config-add-header path))
+(fn add-define [platform string name string value string] void (config-add-define platform name value))
+(fn set-strip-const-prefix [prefix string] void (config-set-strip-const-prefix prefix))
+(fn set-strip-func-prefix [prefix string] void (config-set-strip-func-prefix prefix))
+(fn set-strip-struct-prefix [prefix string] void (config-set-strip-struct-prefix prefix))
+(fn add-type-map [c-name string b3-name string] void (config-add-type-map c-name b3-name))
+(fn add-pin-type [c-name string b3-name string] void (config-add-pin-type c-name b3-name ""))
+;; ...and the form for a C name the generated HEADER cannot see, which stands
+;; the emitted typedef on a spelling it can (`Uint64` -> `typedef uint64_t
+;; sdl_Uint64;`). Mirrors the DSL's `[C_NAME B3_NAME "c-spelling"]` entry.
+(fn add-pin-type-spelled [c-name string b3-name string c-spelling string] void
+  (config-add-pin-type c-name b3-name c-spelling))
+(fn add-enum-group-member [group string member string] void (config-add-enum-group-member group member))
+(fn add-flags-group-member [group string member string] void (config-add-flags-group-member group member))
+(fn set-enum-group-pattern [group string pattern string] void (config-set-enum-group-pattern group pattern))
+(fn set-flags-group-pattern [group string pattern string] void (config-set-flags-group-pattern group pattern))
+(fn add-force-opaque [name string] void (config-add-force-opaque name))
+(fn add-construct-outparam [func string param-index i32] void (config-add-construct-outparam func param-index))
+(fn add-mutate-outparam [func string param-index i32] void (config-add-mutate-outparam func param-index))
+(fn add-arena-outparam [func string count-param-index i32 out-param-index i32] void
+  (config-add-arena-outparam func count-param-index out-param-index))
+(fn add-rename-func [from string to string] void (config-add-rename-func from to))
+(fn add-rename-const [from string to string] void (config-add-rename-const from to))
+(fn add-rename-type [from string to string] void (config-add-rename-type from to))
+;; Pattern renames -- a regex plus a `{1:pascal}`-style replacement template,
+;; standing in for a whole family of `add-rename-*` calls. Explicit renames
+;; still win over these, so the two compose: pattern the family, then hand-
+;; write the members it gets wrong.
+(fn add-rename-const-pattern [pattern string replacement string] void
+  (config-add-rename-const-pattern pattern replacement))
+(fn add-rename-func-pattern [pattern string replacement string] void
+  (config-add-rename-func-pattern pattern replacement))
+(fn add-rename-type-pattern [pattern string replacement string] void
+  (config-add-rename-type-pattern pattern replacement))
+(fn add-exclude-func [name string] void (config-add-exclude-func name))
+(fn add-exclude-const [name string] void (config-add-exclude-const name))
+;; Drop every function the header marks deprecated rather than wrapping it.
+;; Opt-in, because it is an API change: the generated wrapper's own body is
+;; what calls the deprecated function, so binding one warns whether or not
+;; anything ever calls the wrapper. Mirrors the DSL's `(skip-deprecated)`.
+(fn set-skip-deprecated [] void (config-set-skip-deprecated))
+
+;; Batch forms -- one `for` loop over the singular wrapper above, matching
+;; the DSL reader's own `headers`/`exclude-func`/`exclude-const`/
+;; `force-opaque`/`enum-group`/`flags-group` forms, which already take a
+;; whole `[...]` vector at once (see translate/example.cfg.3b).
+(fn add-headers [paths [string]] void
+  (for [p paths] (add-header p)))
+(fn add-exclude-funcs [names [string]] void
+  (for [n names] (add-exclude-func n)))
+(fn add-exclude-consts [names [string]] void
+  (for [n names] (add-exclude-const n)))
+(fn add-force-opaques [names [string]] void
+  (for [n names] (add-force-opaque n)))
+(fn add-enum-group-members [group string members [string]] void
+  (for [m members] (add-enum-group-member group m)))
+(fn add-flags-group-members [group string members [string]] void
+  (for [m members] (add-flags-group-member group m)))

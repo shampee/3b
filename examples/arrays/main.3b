@@ -1,0 +1,155 @@
+;; Arrays: fixed-size array struct fields and literals, module-level array
+;; variables, and 2D arrays (nested `nth` and the `[i j]` multi-index sugar).
+;; Also `nth-checked` -- like `nth`, but a checked-nilable pointer instead
+;; of trusting the index the way `nth`'s own bare C `[]` does.
+(package arrays)
+
+(struct Inventory [items [i32 4] gold i32])
+
+(fn make-inventory [] Inventory
+  (Inventory {:items [10 20 30 40] :gold 500}))
+
+;; The same struct, but with the array field filled from an array VALUE
+;; rather than an inline literal -- the shape you get whenever the contents
+;; have to be computed. Both of these are whole-array COPIES: `items` and
+;; `grid` below are independent of whatever was passed in, exactly like any
+;; other by-value field.
+(fn fill-inventory [gold i32] Inventory
+  (var items [i32 4])
+  (for [i 0 4] (set (nth items i) (* (+ i 1) 3)))
+  (Inventory {:items items :gold gold}))
+
+;; ...and the same fill through `set` on the field afterwards instead.
+(fn restock [inv Inventory* items [i32 4]] void
+  (set (. inv items) items))
+
+(struct Board [grid [[i32 3] 2]])
+
+;; Nested arrays go through the same two paths, and `set` is an expression
+;; whose value is the array it just assigned -- so this indexes the result
+;; of the `set` directly.
+(fn make-board [] Board
+  (var grid [[i32 3] 2])
+  (for [r 0 2] (for [c 0 3] (set (nth grid [r c]) (+ (* r 10) c))))
+  (Board {:grid grid}))
+
+(fn reboard [board Board* grid [[i32 3] 2]] i32
+  (nth (set (. board grid) grid) [1 2]))
+
+(fn inventory-item [inv Inventory idx i32] i32
+  (nth (get inv items) idx))
+
+(var scratch [u8 64])
+
+(fn write-scratch [idx i32 val u8] u8
+  (set (nth scratch idx) val))
+
+(fn grid-value [] i32
+  (let [grid [[i32 3] 2] [[1 2 3] [4 5 6]]]
+    (nth (nth grid 1) 2)))
+
+(var multi-grid [[i32 3] 2] [[1 2 3] [4 5 6]])
+
+(fn grid-value-multi-index [] i32
+  (nth multi-grid [1 2]))
+
+(fn set-multi-grid [val i32] i32
+  (set (nth multi-grid [1 2]) val))
+
+;; `for` iteration: `[item coll]` (element only) and `[[i item] coll]`
+;; (index + element) over a fixed-size array.
+(fn sum-items [] i32
+  (var total i32 0)
+  (for [x scratch]
+    (set total (+ total (cast i32 x))))
+  total)
+
+(fn sum-indices-and-items [] i32
+  (var total u64 0u64)
+  (for [[i x] scratch]
+    (set total (+ total (+ i (cast u64 x)))))
+  (cast i32 total))
+
+(fn main [] i32
+  (var ok bool true)
+
+  (val inv Inventory (make-inventory))
+  (println "make-inventory: gold = {} items[2] = {} (expect 500, 30)" (get inv gold) (inventory-item inv 2))
+  (when (not (= (get inv gold) 500)) (set ok false))
+  (when (not (= (inventory-item inv 2) 30)) (set ok false))
+
+  ;; Array-valued (not literal) field fills, through a struct literal and
+  ;; through `set`. Both used to be broken: the literal silently wrote the
+  ;; decayed POINTER into the field's first element and zeroed the rest, and
+  ;; the `set` never reached a C compiler that would accept it.
+  (var stocked Inventory (fill-inventory 250))
+  (println "fill-inventory(250): items = {} {} {} {} gold = {} (expect 3 6 9 12, 250)"
+           (nth (get stocked items) 0) (nth (get stocked items) 1)
+           (nth (get stocked items) 2) (nth (get stocked items) 3) (get stocked gold))
+  (for [i 0 4]
+    (when (not (= (nth (get stocked items) i) (* (+ i 1) 3))) (set ok false)))
+  (when (not (= (get stocked gold) 250)) (set ok false))
+
+  (var fresh [i32 4] [5 6 7 8])
+  (restock (addr stocked) fresh)
+  (println "after restock: items = {} {} {} {} (expect 5 6 7 8)"
+           (nth (get stocked items) 0) (nth (get stocked items) 1)
+           (nth (get stocked items) 2) (nth (get stocked items) 3))
+  (for [i 0 4]
+    (when (not (= (nth (get stocked items) i) (+ i 5))) (set ok false)))
+  ;; The copy is independent: writing through `stocked` leaves `fresh` alone.
+  (set (nth (get stocked items) 0) -1)
+  (println "fresh[0] after writing stocked.items[0] = {} (expect 5, the field is a copy)" (nth fresh 0))
+  (when (not (= (nth fresh 0) 5)) (set ok false))
+
+  (val board Board (make-board))
+  (println "make-board: grid[1][2] = {} (expect 12, 2D array field filled from a value)"
+           (nth (get board grid) [1 2]))
+  (when (not (= (nth (get board grid) [1 2]) 12)) (set ok false))
+
+  (var reboarded Board (zero Board))
+  (var next-grid [[i32 3] 2] [[1 2 3] [4 5 6]])
+  (println "reboard() = {} (expect 6, `set` on a 2D array field, indexed through its own value)"
+           (reboard (addr reboarded) next-grid))
+  (when (not (= (nth (get reboarded grid) [0 1]) 2)) (set ok false))
+
+  (write-scratch 3 (cast u8 42))
+  (println "scratch[3] after write-scratch(3, 42) = {} (expect 42, proves the module-level array var was actually written)" (nth scratch 3))
+  (when (not (= (nth scratch 3) (cast u8 42))) (set ok false))
+
+  (println "sum-items() = {} (expect 42, `for [x scratch]` over all 64 bytes, only index 3 nonzero)" (sum-items))
+  (when (not (= (sum-items) 42)) (set ok false))
+
+  (println "sum-indices-and-items() = {} (expect 2058 = sum(0..63) + 42, `for [[i x] scratch]`)" (sum-indices-and-items))
+  (when (not (= (sum-indices-and-items) 2058)) (set ok false))
+
+  (println "grid-value() = {} (expect 6, nested array indexed two levels deep)" (grid-value))
+  (when (not (= (grid-value) 6)) (set ok false))
+
+  (println "grid-value-multi-index() = {} (expect 6, same via the `(nth grid [1 2])` sugar)" (grid-value-multi-index))
+  (when (not (= (grid-value-multi-index) 6)) (set ok false))
+
+  (set-multi-grid 99)
+  (println "multi-grid[1][2] after set-multi-grid(99) = {} (expect 99)" (grid-value-multi-index))
+  (when (not (= (grid-value-multi-index) 99)) (set ok false))
+
+  ;; `nth-checked` -- a checked-nilable `T*` instead of trusting the index
+  (let [p (nth-checked scratch 3)]
+    (println "nth-checked(scratch, 3) present={} v={} (expect true, 42)" (if p true false) (if p (deref p) (cast u8 0)))
+    (when (or (not p) (not (= (deref p) (cast u8 42)))) (set ok false)))
+  (let [p (nth-checked scratch 999)]
+    (println "nth-checked(scratch, 999) present={} (expect false, out of range)" (if p true false))
+    (when p (set ok false)))
+
+  (var vec (Vector i32))
+  (val a arena (create))
+  (dyn-push a vec 7)
+  (dyn-push a vec 8)
+  (let [p (nth-checked vec 1)]
+    (println "nth-checked(vec, 1) present={} v={} (expect true, 8)" (if p true false) (if p (deref p) -1))
+    (when (or (not p) (not (= (deref p) 8))) (set ok false)))
+  (let [p (nth-checked vec 5)]
+    (println "nth-checked(vec, 5) present={} (expect false, out of range)" (if p true false))
+    (when p (set ok false)))
+
+  (if ok 0 1))

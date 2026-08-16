@@ -1,0 +1,127 @@
+(package game3d)
+(import os)
+(import vm)
+
+;; ~~ Unified asset-watcher -- ONE registry + poll loop covering textures,
+;; models, AND scripts, replacing three previously-separate poll
+;; functions (texture.3b's own poll-texture-reloads, model.3b's own
+;; poll-model-reloads, scene.3b's own poll-scripted-things). Call
+;; poll-asset-reloads ~once/sec (main.3b's own reload-poll-timer) --
+;; every kind's staleness check does real I/O (a stat() for Texture/
+;; Model, a full content-hash re-read for Script -- vm.3b's own
+;; poll-reload, script.c's own bc_content_hash), so this is throttled the
+;; same way every one of the three separate pollers already was.
+;;
+;; This is the WATCHING that's unified, not the reloading -- a Script's
+;; actual reload still runs through vm/poll-reload exactly as before
+;; (same thread, same call site, its own internal staleness check), never
+;; anything of this file's own doing. Folding scripts into the SAME
+;; registry the other two kinds live in is purely about "one thing to
+;; call from main.3b, one place to read to see everything this project
+;; watches" -- not a change in how or where a script gets reloaded, which
+;; stays wherever it's actually safe to do that (main thread, never a
+;; lane -- see [[game3d-asset-hot-reload]] project memory).
+
+(enum AssetKind [Texture Model Script])
+
+(struct WatchedAsset
+  [kind          AssetKind
+   ;; Texture/Model only -- the watched file, and this watcher's own
+   ;; last-observed mtime for it. Meaningless for Script (left empty/0):
+   ;; vm.3b's own poll-reload tracks ITS staleness internally via a
+   ;; content hash, not an mtime (script.c's own bc_content_hash), so
+   ;; there's nothing here for this registry to usefully compare against
+   ;; even if it wanted to -- Script entries exist in this same registry
+   ;; purely so poll-asset-reloads is the one place a caller polls
+   ;; everything, not because they share a staleness mechanism.
+   path          string
+   mtime         i64
+   texture-id    u32   ; Texture only -- where a reload re-uploads into
+   script-engine any   ; Script only
+   script-handle u32]) ; Script only
+
+(private (var watched-assets [WatchedAsset]))
+
+;; Registers an ALREADY-LOADED texture `id` for watching -- decoupled
+;; from loading (unlike watch-model/watch-script below) because textures
+;; have no single natural load call site the way load-model/vm/load do:
+;; scene.3b's own make-scene (dots.png's own loader) has no arena to grow
+;; this registry with, so main.3b registers it right after make-scene
+;; returns instead, once a real arena (renderer.asset-arena) is in scope.
+;; A no-op for id 0 (a failed load -- nothing to watch).
+(fn watch-texture [arena arena path string id u32] void
+  (when (!= id 0u32)
+    (vector-push arena watched-assets
+      (WatchedAsset {:kind AssetKind/Texture :path path :mtime (os/file-mtime path)
+                      :texture-id id :script-engine (cast any nil) :script-handle 0u32}))))
+
+;; model.3b's own load-model calls this on a genuine cache MISS only --
+;; never a hit, or placing five instances of one file would register it
+;; five times over (and reload it five times over, each poll it's stale).
+(fn watch-model [arena arena path string] void
+  (vector-push arena watched-assets
+    (WatchedAsset {:kind AssetKind/Model :path path :mtime (os/file-mtime path)
+                    :texture-id 0u32 :script-engine (cast any nil) :script-handle 0u32})))
+
+;; scene.3b's own add-scripted-thing calls this once per successful
+;; vm/load. `path`/`mtime` stay empty/0 -- see WatchedAsset's own comment
+;; for why this kind never reads them.
+(fn watch-script [arena arena engine any handle u32] void
+  (vector-push arena watched-assets
+    (WatchedAsset {:kind AssetKind/Script :path "" :mtime 0i64
+                    :texture-id 0u32 :script-engine engine :script-handle handle})))
+
+;; Call ~once/sec (main.3b's own reload-poll-timer). Every Texture/Model
+;; entry gets stat'd and, on a changed mtime, actually reloaded in place;
+;; every Script entry just calls straight into vm/poll-reload, which does
+;; its OWN staleness check internally (see WatchedAsset's own comment) --
+;; this never stats or reads a script file itself. Returns every MODEL
+;; path that reloaded this poll (usually empty) -- the one kind needing
+;; propagation beyond this file, since a Thing holds its own COPY of
+;; Model rather than a shared id/reference the way a Texture-kind reload
+;; needs none (see scene.3b's own reload-changed-things, the only
+;; consumer of this return value).
+;;
+;; Deliberately plain serial, not lane-parallelized -- measured directly
+;; (a temporary benchmark, not kept in this file): fork/join has a fixed
+;; ~24us cost per poll (waking sleeping lane threads, condvar sync,
+;; joining), while a single cached stat() costs ~1.3us. Serial won at
+;; every size tested from 10 to 800 watched assets (3.3x faster at 10,
+;; still 1.2x faster at 800) -- this project has 5 today. See
+;; [[game3d-asset-hot-reload]]'s own Follow-up section for the numbers.
+;; The actual RELOAD work below was never a lane candidate regardless of
+;; that measurement: reload-texture-from-file-into and
+;; load-model-uncached's own build-primitive both make real GL calls
+;; (glTexImage2D, glGenBuffers, ...), and a GL context is single-thread-
+;; owned.
+(fn poll-asset-reloads [arena arena] [string]
+  (var changed-models [string])
+  (for [i 0u64 (len watched-assets)]
+    (let [w (addr (nth watched-assets i))]
+      (match (. w kind)
+        [AssetKind/Texture
+         (let [current (os/file-mtime (. w path))]
+           (when (!= current (. w mtime))
+             (if (reload-texture-from-file-into (. w texture-id) (. w path))
+               (void (println "[asset] reloaded texture {}" (. w path)) (set (. w mtime) current))
+               (println "[asset] texture reload failed for {} -- keeping previous content" (. w path)))))
+
+         AssetKind/Model
+         (let [current (os/file-mtime (. w path))]
+           (when (!= current (. w mtime))
+             (let [cached (map-get model-cache (. w path))]
+               (when cached
+                 (let [old (deref cached)
+                       [ok fresh] (load-model-uncached arena (. w path))]
+                   (if ok
+                     (do
+                       (destroy-model (addr old))
+                       (map-set arena model-cache (. w path) fresh)
+                       (vector-push arena changed-models (. w path))
+                       (set (. w mtime) current)
+                       (println "[asset] reloaded model {}" (. w path)))
+                     (println "[asset] model reload failed for {} -- keeping previous content" (. w path))))))))
+
+         AssetKind/Script
+         (void (vm/poll-reload (. w script-engine) (. w script-handle)))])))
+  changed-models)

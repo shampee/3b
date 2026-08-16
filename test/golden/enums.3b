@@ -1,0 +1,20 @@
+;; Enum auto-numbering, an explicit value, and `flags` bit assignment --
+;; cg_enum_decl's own assignment algorithm, which bcgen replicates separately.
+(package golden)
+
+(enum Status
+  [Idle
+   Running
+   Failed 42
+   Retired])
+
+(flags Access
+  [Read
+   Write
+   Exec])
+
+(fn status-code [s Status] i32
+  (cast i32 s))
+
+(fn main [] i32
+  (+ (status-code Status/Failed) (cast i32 (bit-or Access/Read Access/Exec))))

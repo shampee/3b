@@ -1,0 +1,271 @@
+(package game3d)
+(import sdl)
+
+;; Mouse2 (right button) free-look, mouse3 (middle button) pan (editor
+;; mode's ortho panes only, see editor.3b's apply-input-editor), wheel-
+;; to-zoom, plus a couple of toggles. SDL's relative mouse mode isn't in
+;; the generated sdl bindings (SDL_mouse.h isn't one of the headers
+;; sdl.cfg.3b translates), so mouse-look/pan here is driven by the
+;; xrel/yrel already carried on every MouseMotion event instead of by
+;; capturing the pointer. Mouse1 (left button) is free for click-to-
+;; select instead (`pick` below), since it's not doing camera duty.
+
+(val orbit-sensitivity f32 0.006)
+
+(struct Input
+  [looking      bool  ; mouse2 held -- MouseMotion below accumulates orbit-x/y while true
+   orbit-x      f32   ; accumulated this frame, consumed by apply-input
+   orbit-y      f32
+   zoom         f32
+   ;; mouse3 (middle button) held -- MouseMotion below accumulates pan-x/y
+   ;; while true, same lifecycle as looking/orbit-x/y above just for a
+   ;; different button. editor.3b's apply-input-editor is the only
+   ;; consumer: dragging pans whichever ortho pane (Top/Front/Side) is
+   ;; hovered -- Perspective has no pan of its own yet, only orbit/fly.
+   panning      bool
+   pan-x        f32
+   pan-y        f32
+   ;; Held state, not per-frame deltas like orbit-x/y above -- WASD/arrow
+   ;; movement needs to keep applying every frame a key is held down, not
+   ;; just on the KeyDown event itself, so these are toggled true/false by
+   ;; KeyDown/KeyUp and read continuously by input-move-axis.
+   move-forward bool
+   move-back    bool
+   move-left    bool
+   move-right   bool
+   paused       bool
+   wireframe    bool
+   quit         bool
+   ;; Editor mode (F1) -- persistent toggle, same lifecycle as paused/
+   ;; wireframe above.
+   edit-mode    bool
+   ;; Grid snapping (G), editor-only -- same persistent-toggle lifecycle
+   ;; as edit-mode above. editor.3b's own EditorState carries the actual
+   ;; grid SIZE (not here -- it's per-editor-session tunable state, not a
+   ;; raw key-driven signal), this is only the on/off switch.
+   snap-to-grid bool
+   ;; Held, editor-only: Q/E raise/lower and Z/X rotate the selected
+   ;; brush (or the free edit cursor) every frame they're down, same
+   ;; held-state lifecycle as move-forward/etc above.
+   edit-raise   bool
+   edit-lower   bool
+   edit-rotate-left  bool
+   edit-rotate-right bool
+   ;; One-shot, editor-only: true for exactly the frame the key went
+   ;; down, consumed and cleared by input-begin-frame next frame -- same
+   ;; per-frame-accumulator lifecycle as orbit-x/orbit-y/zoom above,
+   ;; just boolean instead of summed.
+   new-box       bool
+   new-ramp      bool
+   new-hole      bool
+   new-sphere    bool
+   ;; One-shot, editor-only: spawns a point light (L) -- same lifecycle
+   ;; as new-box/etc above, editor.3b's editor-spawn-light is the only
+   ;; consumer.
+   new-light     bool
+   ;; One-shot, editor-only: toggles cast-shadow on whatever's selected
+   ;; (a light) or the sun if nothing/a brush is selected -- see
+   ;; editor.3b's update-editor for the actual selection logic.
+   toggle-shadow bool
+   ;; Held, editor-only: shrink/grow the selected light's radius (`,`/
+   ;; `.`) every frame they're down -- same held-key lifecycle as
+   ;; edit-raise/edit-lower above, just for a light's falloff distance
+   ;; instead of Y position. No-op on anything but a selected light.
+   light-radius-down bool
+   light-radius-up   bool
+   delete-brush  bool
+   select-prev   bool
+   select-next   bool
+   ;; One-shot, editor-only: F5/F9 save/load the current brushes+lights
+   ;; to/from level.3b's default-level-path -- same lifecycle as
+   ;; new-box/etc above, editor.3b's update-editor is the only consumer.
+   save-level    bool
+   load-level    bool
+   ;; One-shot, editor-only: cycles the selected BRUSH's own texture
+   ;; (editor.3b's next-brush-texture/editor-cycle-brush-texture), same
+   ;; lifecycle as new-box/etc above.
+   cycle-texture bool
+   ;; One-shot, editor-only: toggles `enabled` on the selected LIGHT, or
+   ;; the sun if nothing/a brush is selected -- same fallback convention
+   ;; toggle-shadow already uses, and the same one-shot lifecycle as
+   ;; new-box/etc.
+   toggle-enabled bool
+   ;; One-shot, works in EITHER mode (not editor-only -- see main.3b's
+   ;; own `K` handler): toggles between the sky's live per-frame gradient
+   ;; and a baked cubemap snapshot of it (sky.3b's generate-skybox-
+   ;; gradient/clear-skybox).
+   toggle-skybox bool
+   ;; One-shot, editor-only: opens/closes editor.3b's texture-picker
+   ;; panel (ui.3b) -- same one-shot lifecycle as every other toggle
+   ;; above, editor.3b's update-editor is the only consumer.
+   toggle-texture-picker bool
+   ;; One-shot, editor-only: opens/closes editor.3b's color-picker panel
+   ;; (ui.3b) -- same one-shot lifecycle/independence from selection as
+   ;; toggle-texture-picker above, just for the selected brush/light's
+   ;; color instead of a brush's texture.
+   toggle-color-picker bool
+   ;; One-shot, editor-only: opens/closes editor.3b's light-properties
+   ;; panel (ui.3b) -- same shape as toggle-color-picker above.
+   toggle-light-panel bool
+   ;; One-shot, editor-only: opens/closes editor.3b's model-browser panel
+   ;; (ui.3b) -- same one-shot/independent-of-selection lifecycle as
+   ;; toggle-texture-picker/toggle-color-picker/toggle-light-panel above,
+   ;; just for placing a NEW Thing (editor.3b's add-prop) rather than
+   ;; editing whatever's already selected.
+   toggle-model-browser bool
+   ;; One-shot: mouse1 went down this frame, at window pixel (pick-x,
+   ;; pick-y) -- same per-frame lifecycle as new-box/etc above. editor.3b's
+   ;; update-editor is the only consumer (camera.3b's camera-ray + scene.3b's
+   ;; scene-pick-brush); pick-x/pick-y are only meaningful while pick is true.
+   pick          bool
+   pick-x        f32
+   pick-y        f32
+   ;; mouse1 held state, same idea as `looking` above but for the LEFT
+   ;; button -- editor.3b's face-drag resizing AND its gizmo-arm dragging
+   ;; both need to know "is a drag still going" every frame, not just the
+   ;; one-shot down edge `pick` captures. drag-x/y accumulate MouseMotion
+   ;; the same way orbit-x/y do while `looking`, just gated on this
+   ;; instead -- whichever of resize-axis/move-axis is active (mutually
+   ;; exclusive, editor.3b's own concern) is what actually consumes them.
+   mouse1-down   bool
+   drag-x        f32
+   drag-y        f32
+   ;; Continuous window-pixel mouse position, updated on EVERY MouseMotion
+   ;; event regardless of any button state -- unlike pick-x/pick-y (only
+   ;; meaningful for the one frame `pick` fires) or drag-x/y (deltas, only
+   ;; while mouse1-down), this always reflects "where is the mouse right
+   ;; now." editor.3b's 4-pane view uses it to tell which pane is hovered
+   ;; for scroll-zoom/orbit even when no button is held at all.
+   mouse-x       f32
+   mouse-y       f32])
+
+(fn input-begin-frame [input Input*] void
+  (set (. input orbit-x) 0.0)
+  (set (. input orbit-y) 0.0)
+  (set (. input zoom) 0.0)
+  (set (. input pan-x) 0.0)
+  (set (. input pan-y) 0.0)
+  (set (. input new-box) false)
+  (set (. input new-ramp) false)
+  (set (. input new-hole) false)
+  (set (. input new-sphere) false)
+  (set (. input new-light) false)
+  (set (. input toggle-shadow) false)
+  (set (. input delete-brush) false)
+  (set (. input select-prev) false)
+  (set (. input select-next) false)
+  (set (. input pick) false)
+  (set (. input drag-x) 0.0)
+  (set (. input drag-y) 0.0)
+  (set (. input save-level) false)
+  (set (. input load-level) false)
+  (set (. input cycle-texture) false)
+  (set (. input toggle-enabled) false)
+  (set (. input toggle-skybox) false)
+  (set (. input toggle-texture-picker) false)
+  (set (. input toggle-color-picker) false)
+  (set (. input toggle-light-panel) false)
+  (set (. input toggle-model-browser) false))
+
+(fn input-handle-event [input Input* event sdl/Event*] void
+  (match (cast sdl/EventType (. event type))
+    [sdl/EventType/Quit
+     (set (. input quit) true)
+
+     sdl/EventType/KeyDown
+     (match (. event key key)
+       [sdl/SDLK_ESCAPE             (set (. input quit)         true)
+        sdl/SDLK_SPACE              (set (. input paused)       (not (. input paused)))
+        sdl/SDLK_TAB                (set (. input wireframe)    (not (. input wireframe)))
+        sdl/SDLK_F1                 (set (. input edit-mode)    (not (. input edit-mode)))
+        sdl/SDLK_G                  (set (. input snap-to-grid) (not (. input snap-to-grid)))
+        [sdl/SDLK_W sdl/SDLK_UP]    (set (. input move-forward) true)
+        [sdl/SDLK_S sdl/SDLK_DOWN]  (set (. input move-back)    true)
+        [sdl/SDLK_A sdl/SDLK_LEFT]  (set (. input move-left)    true)
+        [sdl/SDLK_D sdl/SDLK_RIGHT] (set (. input move-right)   true)
+        sdl/SDLK_E                  (set (. input edit-raise)   true)
+        sdl/SDLK_Q                  (set (. input edit-lower)   true)
+        sdl/SDLK_Z                  (set (. input edit-rotate-left)  true)
+        sdl/SDLK_X                  (set (. input edit-rotate-right) true)
+        sdl/SDLK_B                  (set (. input new-box)      true)
+        sdl/SDLK_R                  (set (. input new-ramp)     true)
+        sdl/SDLK_H                  (set (. input new-hole)     true)
+        sdl/SDLK_O                  (set (. input new-sphere)   true)
+        sdl/SDLK_L                  (set (. input new-light)    true)
+        sdl/SDLK_T                  (set (. input toggle-shadow) true)
+        sdl/SDLK_COMMA              (set (. input light-radius-down) true)
+        sdl/SDLK_PERIOD             (set (. input light-radius-up)   true)
+        [sdl/SDLK_DELETE sdl/SDLK_BACKSPACE] (set (. input delete-brush) true)
+        sdl/SDLK_LEFTBRACKET        (set (. input select-prev)  true)
+        sdl/SDLK_RIGHTBRACKET       (set (. input select-next)  true)
+        sdl/SDLK_F5                 (set (. input save-level)   true)
+        sdl/SDLK_F9                 (set (. input load-level)   true)
+        sdl/SDLK_U                  (set (. input cycle-texture) true)
+        sdl/SDLK_V                  (set (. input toggle-enabled) true)
+        sdl/SDLK_K                  (set (. input toggle-skybox)  true)
+        sdl/SDLK_Y                  (set (. input toggle-texture-picker) true)
+        sdl/SDLK_N                  (set (. input toggle-color-picker) true)
+        sdl/SDLK_M                  (set (. input toggle-light-panel) true)
+        sdl/SDLK_P                  (set (. input toggle-model-browser) true)])
+
+     sdl/EventType/KeyUp
+     (match (. event key key)
+       [[sdl/SDLK_W sdl/SDLK_UP]    (set (. input move-forward) false)
+        [sdl/SDLK_S sdl/SDLK_DOWN]  (set (. input move-back)    false)
+        [sdl/SDLK_A sdl/SDLK_LEFT]  (set (. input move-left)    false)
+        [sdl/SDLK_D sdl/SDLK_RIGHT] (set (. input move-right)   false)
+        sdl/SDLK_E                  (set (. input edit-raise)   false)
+        sdl/SDLK_Q                  (set (. input edit-lower)   false)
+        sdl/SDLK_Z                  (set (. input edit-rotate-left)  false)
+        sdl/SDLK_X                  (set (. input edit-rotate-right) false)
+        sdl/SDLK_COMMA              (set (. input light-radius-down) false)
+        sdl/SDLK_PERIOD             (set (. input light-radius-up)   false)])
+
+     sdl/EventType/MouseButtonDown
+     (do
+       (when (= (. event button button) 3u8) (set (. input looking) true))
+       (when (= (. event button button) 2u8) (set (. input panning) true))
+       (when (= (. event button button) 1u8)
+         (set (. input pick) true)
+         (set (. input pick-x) (. event button x))
+         (set (. input pick-y) (. event button y))
+         (set (. input mouse1-down) true)))
+
+     sdl/EventType/MouseButtonUp
+     (do
+       (when (= (. event button button) 3u8) (set (. input looking) false))
+       (when (= (. event button button) 2u8) (set (. input panning) false))
+       (when (= (. event button button) 1u8) (set (. input mouse1-down) false)))
+
+     sdl/EventType/MouseMotion
+     (do
+       (set (. input mouse-x) (. event motion x))
+       (set (. input mouse-y) (. event motion y))
+       (when (. input looking)
+         (+= (. input orbit-x) (. event motion xrel))
+         (+= (. input orbit-y) (. event motion yrel)))
+       (when (. input panning)
+         (+= (. input pan-x) (. event motion xrel))
+         (+= (. input pan-y) (. event motion yrel)))
+       (when (. input mouse1-down)
+         (+= (. input drag-x) (. event motion xrel))
+         (+= (. input drag-y) (. event motion yrel))))
+
+     sdl/EventType/MouseWheel
+     (+= (. input zoom) (. event wheel y))]))
+
+(fn apply-input [input Input* camera Camera*] void
+  (camera-orbit camera
+    (* (. input orbit-x) (- orbit-sensitivity))
+    (* (. input orbit-y) orbit-sensitivity))
+  (when (!= (. input zoom) 0.0) (camera-zoom camera (. input zoom))))
+
+;; This frame's raw movement axis from held WASD/arrow keys: x = right
+;; (-1..1), y = forward (-1..1). Diagonal input comes out with length
+;; sqrt(2) -- scene.3b's controller-player normalizes it, not here, since
+;; "raw axis" is the more reusable shape for a future caller that wants
+;; the individual components.
+(fn input-move-axis [input Input*] Vec2
+  (vec2
+    (- (if (. input move-right)   1.0 0.0) (if (. input move-left) 1.0 0.0))
+    (- (if (. input move-forward) 1.0 0.0) (if (. input move-back) 1.0 0.0))))

@@ -1,0 +1,286 @@
+(package gl)
+;; `GL/gl.h` + `GL/glext.h` pull in EVERY GL function ever registered
+;; (every vendor extension across 30 years, plus deprecated GL 1.x
+;; fixed-function calls) -- gl.c unconditionally emits a wrapper for each
+;; one, but GLAD (game/glad/gl.h) was deliberately generated for just
+;; `core=4.3, extensions=''`, so most of those wrappers called a symbol
+;; GLAD never declared/loaded, triggering an implicit-function-declaration
+;; warning for each (and only "worked" at all because this system's
+;; libGL.so happens to export many of them directly -- not something to
+;; rely on). `GL/glcorearb.h` is the Khronos-maintained header scoped to
+;; the modern core-profile GL ecosystem, which cuts the deprecated GL 1.x
+;; fixed-function calls and most vendor-extension noise -- translating it
+;; instead of gl.h/glext.h gets gl.3b's surface much closer to what GLAD
+;; provides. It's not an exact match though: glcorearb.h still carries a
+;; handful of ARB/EXT/vendor-suffixed functions, and (being continuously
+;; updated upstream) core GL versions past 4.3 that GLAD's fixed
+;; `core=4.3` generation doesn't have -- see the big `exclude-func` block
+;; below for that remainder.
+(headers ["KHR/khrplatform.h" "GL/glcorearb.h"])
+(ifdef :common [GL_GLEXT_PROTOTYPES 1]) ; gates every GLAPI decl in glcorearb.h, same as gl.h/glext.h
+(strip-const-prefix "GL_")
+(strip-func-prefix "gl")
+(type-map
+  [GLenum     u32
+   GLint      i32
+   GLfloat    f32
+   GLbitfield u32])
+;; GLint64/GLuint64 are khronos_int64_t/khronos_uint64_t, which are glibc's
+;; int64_t/uint64_t, which are `long`; 3b's i64/u64 are `long long`. Same width,
+;; distinct C type, so every glGetInteger64v-style call passing one by address
+;; warned. Pinning the two <stdint.h> leaves fixes the whole chain at once: each
+;; alias above them is a transparent C typedef, so gl_GLint64 ends up being
+;; int64_t itself. Pinning GLint64 directly would not work -- a pinned name has
+;; to be visible in the generated *header*, which sees only 3b_runtime.h's
+;; <stdint.h>/<stddef.h>, not glad/gl.h (`include-first` reaches just the .c).
+;;
+;; GLboolean is the same shape one level along: GL declares it `unsigned char`,
+;; while 3b's `bool` is C's 1-byte `_Bool`. Same width and representation, but a
+;; distinct C type, so `bool*` against glGetBooleanv's `GLboolean*` warned.
+;; `type-map GLboolean bool` cannot fix that -- it substitutes `bool` at the use
+;; site, losing the name -- and it has to come OUT of the map above for the pin
+;; to reach GLboolean at all. Pinning names the leaf rather than `GLboolean`,
+;; for the header-visibility reason just described. The 3b side stays `bool`, so
+;; call sites still pass `true`/`false`.
+(pin-type
+  [int64_t   i64
+   uint64_t  u64
+   GLboolean bool "unsigned char"])
+(arena-outparam gen-textures [count-param 1 out-param 2])
+;; Not covered by GLAD's macro redirection (game/glad/gl.h) and not real
+;; exported symbols in this system's libGL.so either -- would be link
+;; errors (`undefined reference`) if left in, since gl.c unconditionally
+;; emits a wrapper for every translated function whether the game calls it
+;; or not. None of these are used by the game.
+(exclude-func [glBlendEquationSeparateATI
+               glBufferPageCommitmentMemNV
+               glCreateSemaphoresNV
+               glGetSemaphoreParameterivNV
+               glNamedBufferPageCommitmentMemNV
+               glSemaphoreParameterivNV
+               glTexPageCommitmentMemNV
+               glTexturePageCommitmentMemNV])
+;; Real functions (glcorearb.h does declare them), but NOT covered by
+;; GLAD's macro redirection (game/glad/gl.h, generated for `core=4.3,
+;; extensions=''`) -- either an ARB/EXT/vendor-suffixed extension
+;; glcorearb.h still carries, or a core function added after GL 4.3.
+;; Left in, gl.c's unconditional per-function wrapper would call a symbol
+;; with no declaration in scope: an implicit-function-declaration warning
+;; at best, and on any driver that doesn't happen to export the symbol
+;; directly from libGL.so, an undefined-reference link error. None of
+;; these are used by the game; regenerate this list (see cstring_char_type
+;; memory / this file's translate invocation) if GLAD is ever regenerated
+;; for a newer core version or with extensions enabled.
+(exclude-func [
+               glActiveProgramEXT glApplyFramebufferAttachmentCMAAINTEL glBeginConditionalRenderNV
+               glBeginPerfMonitorAMD glBeginPerfQueryINTEL glBindBuffersBase glBindBuffersRange
+               glBindImageTextures glBindMultiTextureEXT glBindSamplers glBindShadingRateImageNV glBindTextureUnit
+               glBindTextures glBindVertexBuffers glBlendBarrierKHR glBlendBarrierNV glBlendEquationSeparateiARB
+               glBlendEquationiARB glBlendFuncSeparateiARB glBlendFunciARB glBlendParameteriNV
+               glBlitNamedFramebuffer glBufferAddressRangeNV glBufferAttachMemoryNV glBufferPageCommitmentARB
+               glBufferStorage glCallCommandListNV glCheckNamedFramebufferStatus glCheckNamedFramebufferStatusEXT
+               glClearDepthdNV glClearNamedBufferData glClearNamedBufferDataEXT glClearNamedBufferSubData
+               glClearNamedBufferSubDataEXT glClearNamedFramebufferfi glClearNamedFramebufferfv
+               glClearNamedFramebufferiv glClearNamedFramebufferuiv glClearTexImage glClearTexSubImage
+               glClientAttribDefaultEXT glClipControl glColorFormatNV glCommandListSegmentsNV
+               glCompileCommandListNV glCompileShaderIncludeARB glCompressedMultiTexImage1DEXT
+               glCompressedMultiTexImage2DEXT glCompressedMultiTexImage3DEXT glCompressedMultiTexSubImage1DEXT
+               glCompressedMultiTexSubImage2DEXT glCompressedMultiTexSubImage3DEXT glCompressedTextureImage1DEXT
+               glCompressedTextureImage2DEXT glCompressedTextureImage3DEXT glCompressedTextureSubImage1D
+               glCompressedTextureSubImage1DEXT glCompressedTextureSubImage2D glCompressedTextureSubImage2DEXT
+               glCompressedTextureSubImage3D glCompressedTextureSubImage3DEXT glConservativeRasterParameterfNV
+               glConservativeRasterParameteriNV glCopyMultiTexImage1DEXT glCopyMultiTexImage2DEXT
+               glCopyMultiTexSubImage1DEXT glCopyMultiTexSubImage2DEXT glCopyMultiTexSubImage3DEXT
+               glCopyNamedBufferSubData glCopyPathNV glCopyTextureImage1DEXT glCopyTextureImage2DEXT
+               glCopyTextureSubImage1D glCopyTextureSubImage1DEXT glCopyTextureSubImage2D
+               glCopyTextureSubImage2DEXT glCopyTextureSubImage3D glCopyTextureSubImage3DEXT
+               glCoverFillPathInstancedNV glCoverFillPathNV glCoverStrokePathInstancedNV glCoverStrokePathNV
+               glCoverageModulationNV glCoverageModulationTableNV glCreateBuffers glCreateCommandListsNV
+               glCreateFramebuffers glCreatePerfQueryINTEL glCreateProgramPipelines glCreateQueries
+               glCreateRenderbuffers glCreateSamplers glCreateShaderProgramEXT glCreateStatesNV glCreateTextures
+               glCreateTransformFeedbacks glCreateVertexArrays glDebugMessageCallbackARB
+               glDebugMessageControlARB glDebugMessageInsertARB
+               glDeleteCommandListsNV glDeleteNamedStringARB glDeletePathsNV glDeletePerfMonitorsAMD
+               glDeletePerfQueryINTEL glDeleteStatesNV glDepthBoundsdNV glDepthRangeArraydvNV
+               glDepthRangeIndexeddNV glDepthRangedNV glDisableClientStateIndexedEXT glDisableClientStateiEXT
+               glDisableIndexedEXT glDisableVertexArrayAttrib glDisableVertexArrayAttribEXT
+               glDisableVertexArrayEXT glDispatchComputeGroupSizeARB glDrawArraysInstancedARB
+               glDrawArraysInstancedEXT glDrawCommandsAddressNV glDrawCommandsNV glDrawCommandsStatesAddressNV
+               glDrawCommandsStatesNV glDrawElementsInstancedARB glDrawElementsInstancedEXT
+               glDrawMeshTasksIndirectNV glDrawMeshTasksNV glDrawVkImageNV glEGLImageTargetTexStorageEXT
+               glEGLImageTargetTextureStorageEXT glEdgeFlagFormatNV glEnableClientStateIndexedEXT
+               glEnableClientStateiEXT glEnableIndexedEXT glEnableVertexArrayAttrib glEnableVertexArrayAttribEXT
+               glEnableVertexArrayEXT glEndConditionalRenderNV glEndPerfMonitorAMD glEndPerfQueryINTEL
+               glEvaluateDepthValuesARB glFlushMappedNamedBufferRange glFlushMappedNamedBufferRangeEXT
+               glFogCoordFormatNV glFragmentCoverageColorNV glFramebufferDrawBufferEXT glFramebufferDrawBuffersEXT
+               glFramebufferFetchBarrierEXT glFramebufferParameteriMESA glFramebufferReadBufferEXT
+               glFramebufferSampleLocationsfvARB glFramebufferSampleLocationsfvNV glFramebufferTextureARB
+               glFramebufferTextureFaceARB glFramebufferTextureLayerARB glFramebufferTextureMultiviewOVR
+               glGenPathsNV glGenPerfMonitorsAMD glGenerateMultiTexMipmapEXT glGenerateTextureMipmap
+               glGenerateTextureMipmapEXT glGetBooleanIndexedvEXT glGetBufferParameterui64vNV glGetCommandHeaderNV
+               glGetCompressedMultiTexImageEXT glGetCompressedTextureImage glGetCompressedTextureImageEXT
+               glGetCompressedTextureSubImage glGetCoverageModulationTableNV glGetDebugMessageLogARB
+               glGetDoubleIndexedvEXT glGetDoublei_vEXT glGetFirstPerfQueryIdINTEL glGetFloatIndexedvEXT
+               glGetFloati_vEXT glGetFramebufferParameterivEXT glGetFramebufferParameterivMESA
+               glGetGraphicsResetStatus glGetGraphicsResetStatusARB glGetImageHandleARB glGetImageHandleNV
+               glGetIntegerIndexedvEXT glGetIntegerui64i_vNV glGetIntegerui64vNV glGetInternalformatSampleivNV
+               glGetMemoryObjectDetachedResourcesuivNV glGetMultiTexEnvfvEXT glGetMultiTexEnvivEXT
+               glGetMultiTexGendvEXT glGetMultiTexGenfvEXT glGetMultiTexGenivEXT glGetMultiTexImageEXT
+               glGetMultiTexLevelParameterfvEXT glGetMultiTexLevelParameterivEXT glGetMultiTexParameterIivEXT
+               glGetMultiTexParameterIuivEXT glGetMultiTexParameterfvEXT glGetMultiTexParameterivEXT
+               glGetNamedBufferParameteri64v glGetNamedBufferParameteriv glGetNamedBufferParameterivEXT
+               glGetNamedBufferParameterui64vNV glGetNamedBufferPointerv glGetNamedBufferPointervEXT
+               glGetNamedBufferSubData glGetNamedBufferSubDataEXT glGetNamedFramebufferAttachmentParameteriv
+               glGetNamedFramebufferAttachmentParameterivEXT glGetNamedFramebufferParameteriv
+               glGetNamedFramebufferParameterivEXT glGetNamedProgramLocalParameterIivEXT
+               glGetNamedProgramLocalParameterIuivEXT glGetNamedProgramLocalParameterdvEXT
+               glGetNamedProgramLocalParameterfvEXT glGetNamedProgramStringEXT glGetNamedProgramivEXT
+               glGetNamedRenderbufferParameteriv glGetNamedRenderbufferParameterivEXT glGetNamedStringARB
+               glGetNamedStringivARB glGetNextPerfQueryIdINTEL glGetObjectLabelEXT glGetPathCommandsNV
+               glGetPathCoordsNV glGetPathDashArrayNV glGetPathLengthNV glGetPathMetricRangeNV glGetPathMetricsNV
+               glGetPathParameterfvNV glGetPathParameterivNV glGetPathSpacingNV glGetPerfCounterInfoINTEL
+               glGetPerfMonitorCounterDataAMD glGetPerfMonitorCounterInfoAMD glGetPerfMonitorCounterStringAMD
+               glGetPerfMonitorCountersAMD glGetPerfMonitorGroupStringAMD glGetPerfMonitorGroupsAMD
+               glGetPerfQueryDataINTEL glGetPerfQueryIdByNameINTEL glGetPerfQueryInfoINTEL glGetPointerIndexedvEXT
+               glGetPointeri_vEXT glGetProgramResourcefvNV glGetQueryBufferObjecti64v glGetQueryBufferObjectiv
+               glGetQueryBufferObjectui64v glGetQueryBufferObjectuiv glGetShadingRateImagePaletteNV
+               glGetShadingRateSampleLocationivNV glGetStageIndexNV glGetTextureHandleARB glGetTextureHandleNV
+               glGetTextureImage glGetTextureImageEXT glGetTextureLevelParameterfv glGetTextureLevelParameterfvEXT
+               glGetTextureLevelParameteriv glGetTextureLevelParameterivEXT glGetTextureParameterIiv
+               glGetTextureParameterIivEXT glGetTextureParameterIuiv glGetTextureParameterIuivEXT
+               glGetTextureParameterfv glGetTextureParameterfvEXT glGetTextureParameteriv
+               glGetTextureParameterivEXT glGetTextureSamplerHandleARB glGetTextureSamplerHandleNV
+               glGetTextureSubImage glGetTransformFeedbacki64_v glGetTransformFeedbacki_v glGetTransformFeedbackiv
+               glGetUniformi64vARB glGetUniformi64vNV glGetUniformui64vARB glGetUniformui64vNV
+               glGetVertexArrayIndexed64iv glGetVertexArrayIndexediv glGetVertexArrayIntegeri_vEXT
+               glGetVertexArrayIntegervEXT glGetVertexArrayPointeri_vEXT glGetVertexArrayPointervEXT
+               glGetVertexArrayiv glGetVertexAttribLi64vNV glGetVertexAttribLui64vARB glGetVertexAttribLui64vNV
+               glGetVkProcAddrNV
+               glGetnCompressedTexImage glGetnCompressedTexImageARB glGetnTexImage glGetnTexImageARB
+               glGetnUniformdv glGetnUniformdvARB glGetnUniformfv glGetnUniformfvARB glGetnUniformi64vARB
+               glGetnUniformiv glGetnUniformivARB glGetnUniformui64vARB glGetnUniformuiv glGetnUniformuivARB
+               glIndexFormatNV glInsertEventMarkerEXT glInterpolatePathsNV glInvalidateNamedFramebufferData
+               glInvalidateNamedFramebufferSubData glIsBufferResidentNV glIsCommandListNV glIsEnabledIndexedEXT
+               glIsImageHandleResidentARB glIsImageHandleResidentNV glIsNamedBufferResidentNV glIsNamedStringARB
+               glIsPathNV glIsPointInFillPathNV glIsPointInStrokePathNV glIsStateNV glIsTextureHandleResidentARB
+               glIsTextureHandleResidentNV glLabelObjectEXT glListDrawCommandsStatesClientNV
+               glMakeBufferNonResidentNV glMakeBufferResidentNV glMakeImageHandleNonResidentARB
+               glMakeImageHandleNonResidentNV glMakeImageHandleResidentARB glMakeImageHandleResidentNV
+               glMakeNamedBufferNonResidentNV glMakeNamedBufferResidentNV glMakeTextureHandleNonResidentARB
+               glMakeTextureHandleNonResidentNV glMakeTextureHandleResidentARB glMakeTextureHandleResidentNV
+               glMapNamedBuffer glMapNamedBufferEXT glMapNamedBufferRange glMapNamedBufferRangeEXT
+               glMatrixFrustumEXT glMatrixLoad3x2fNV glMatrixLoad3x3fNV glMatrixLoadIdentityEXT
+               glMatrixLoadTranspose3x3fNV glMatrixLoadTransposedEXT glMatrixLoadTransposefEXT glMatrixLoaddEXT
+               glMatrixLoadfEXT glMatrixMult3x2fNV glMatrixMult3x3fNV glMatrixMultTranspose3x3fNV
+               glMatrixMultTransposedEXT glMatrixMultTransposefEXT glMatrixMultdEXT glMatrixMultfEXT
+               glMatrixOrthoEXT glMatrixPopEXT glMatrixPushEXT glMatrixRotatedEXT glMatrixRotatefEXT
+               glMatrixScaledEXT glMatrixScalefEXT glMatrixTranslatedEXT glMatrixTranslatefEXT
+               glMaxShaderCompilerThreadsARB glMaxShaderCompilerThreadsKHR glMemoryBarrierByRegion
+               glMinSampleShadingARB glMultiDrawArraysIndirectBindlessCountNV glMultiDrawArraysIndirectBindlessNV
+               glMultiDrawArraysIndirectCount glMultiDrawArraysIndirectCountARB
+               glMultiDrawElementsIndirectBindlessCountNV glMultiDrawElementsIndirectBindlessNV
+               glMultiDrawElementsIndirectCount glMultiDrawElementsIndirectCountARB
+               glMultiDrawMeshTasksIndirectCountNV glMultiDrawMeshTasksIndirectNV glMultiTexBufferEXT
+               glMultiTexCoordPointerEXT glMultiTexEnvfEXT glMultiTexEnvfvEXT glMultiTexEnviEXT glMultiTexEnvivEXT
+               glMultiTexGendEXT glMultiTexGendvEXT glMultiTexGenfEXT glMultiTexGenfvEXT glMultiTexGeniEXT
+               glMultiTexGenivEXT glMultiTexImage1DEXT glMultiTexImage2DEXT glMultiTexImage3DEXT
+               glMultiTexParameterIivEXT glMultiTexParameterIuivEXT glMultiTexParameterfEXT
+               glMultiTexParameterfvEXT glMultiTexParameteriEXT glMultiTexParameterivEXT glMultiTexRenderbufferEXT
+               glMultiTexSubImage1DEXT glMultiTexSubImage2DEXT glMultiTexSubImage3DEXT glNamedBufferAttachMemoryNV
+               glNamedBufferData glNamedBufferDataEXT glNamedBufferPageCommitmentARB
+               glNamedBufferPageCommitmentEXT glNamedBufferStorage glNamedBufferStorageEXT glNamedBufferSubData
+               glNamedBufferSubDataEXT glNamedCopyBufferSubDataEXT glNamedFramebufferDrawBuffer
+               glNamedFramebufferDrawBuffers glNamedFramebufferParameteri glNamedFramebufferParameteriEXT
+               glNamedFramebufferReadBuffer glNamedFramebufferRenderbuffer glNamedFramebufferRenderbufferEXT
+               glNamedFramebufferSampleLocationsfvARB glNamedFramebufferSampleLocationsfvNV
+               glNamedFramebufferTexture glNamedFramebufferTexture1DEXT glNamedFramebufferTexture2DEXT
+               glNamedFramebufferTexture3DEXT glNamedFramebufferTextureEXT glNamedFramebufferTextureFaceEXT
+               glNamedFramebufferTextureLayer glNamedFramebufferTextureLayerEXT glNamedProgramLocalParameter4dEXT
+               glNamedProgramLocalParameter4dvEXT glNamedProgramLocalParameter4fEXT
+               glNamedProgramLocalParameter4fvEXT glNamedProgramLocalParameterI4iEXT
+               glNamedProgramLocalParameterI4ivEXT glNamedProgramLocalParameterI4uiEXT
+               glNamedProgramLocalParameterI4uivEXT glNamedProgramLocalParameters4fvEXT
+               glNamedProgramLocalParametersI4ivEXT glNamedProgramLocalParametersI4uivEXT glNamedProgramStringEXT
+               glNamedRenderbufferStorage glNamedRenderbufferStorageEXT glNamedRenderbufferStorageMultisample
+               glNamedRenderbufferStorageMultisampleAdvancedAMD glNamedRenderbufferStorageMultisampleCoverageEXT
+               glNamedRenderbufferStorageMultisampleEXT glNamedStringARB glNormalFormatNV glPathCommandsNV
+               glPathCoordsNV glPathCoverDepthFuncNV glPathDashArrayNV glPathGlyphIndexArrayNV
+               glPathGlyphIndexRangeNV glPathGlyphRangeNV glPathGlyphsNV glPathMemoryGlyphIndexArrayNV
+               glPathParameterfNV glPathParameterfvNV glPathParameteriNV glPathParameterivNV
+               glPathStencilDepthOffsetNV glPathStencilFuncNV glPathStringNV glPathSubCommandsNV glPathSubCoordsNV
+               glPointAlongPathNV glPolygonOffsetClamp glPolygonOffsetClampEXT glPopGroupMarkerEXT
+               glPrimitiveBoundingBoxARB glProgramParameteriARB glProgramPathFragmentInputGenNV
+               glProgramUniform1dEXT glProgramUniform1dvEXT glProgramUniform1fEXT glProgramUniform1fvEXT
+               glProgramUniform1i64ARB glProgramUniform1i64NV glProgramUniform1i64vARB glProgramUniform1i64vNV
+               glProgramUniform1iEXT glProgramUniform1ivEXT glProgramUniform1ui64ARB glProgramUniform1ui64NV
+               glProgramUniform1ui64vARB glProgramUniform1ui64vNV glProgramUniform1uiEXT glProgramUniform1uivEXT
+               glProgramUniform2dEXT glProgramUniform2dvEXT glProgramUniform2fEXT glProgramUniform2fvEXT
+               glProgramUniform2i64ARB glProgramUniform2i64NV glProgramUniform2i64vARB glProgramUniform2i64vNV
+               glProgramUniform2iEXT glProgramUniform2ivEXT glProgramUniform2ui64ARB glProgramUniform2ui64NV
+               glProgramUniform2ui64vARB glProgramUniform2ui64vNV glProgramUniform2uiEXT glProgramUniform2uivEXT
+               glProgramUniform3dEXT glProgramUniform3dvEXT glProgramUniform3fEXT glProgramUniform3fvEXT
+               glProgramUniform3i64ARB glProgramUniform3i64NV glProgramUniform3i64vARB glProgramUniform3i64vNV
+               glProgramUniform3iEXT glProgramUniform3ivEXT glProgramUniform3ui64ARB glProgramUniform3ui64NV
+               glProgramUniform3ui64vARB glProgramUniform3ui64vNV glProgramUniform3uiEXT glProgramUniform3uivEXT
+               glProgramUniform4dEXT glProgramUniform4dvEXT glProgramUniform4fEXT glProgramUniform4fvEXT
+               glProgramUniform4i64ARB glProgramUniform4i64NV glProgramUniform4i64vARB glProgramUniform4i64vNV
+               glProgramUniform4iEXT glProgramUniform4ivEXT glProgramUniform4ui64ARB glProgramUniform4ui64NV
+               glProgramUniform4ui64vARB glProgramUniform4ui64vNV glProgramUniform4uiEXT glProgramUniform4uivEXT
+               glProgramUniformHandleui64ARB glProgramUniformHandleui64NV glProgramUniformHandleui64vARB
+               glProgramUniformHandleui64vNV glProgramUniformMatrix2dvEXT glProgramUniformMatrix2fvEXT
+               glProgramUniformMatrix2x3dvEXT glProgramUniformMatrix2x3fvEXT glProgramUniformMatrix2x4dvEXT
+               glProgramUniformMatrix2x4fvEXT glProgramUniformMatrix3dvEXT glProgramUniformMatrix3fvEXT
+               glProgramUniformMatrix3x2dvEXT glProgramUniformMatrix3x2fvEXT glProgramUniformMatrix3x4dvEXT
+               glProgramUniformMatrix3x4fvEXT glProgramUniformMatrix4dvEXT glProgramUniformMatrix4fvEXT
+               glProgramUniformMatrix4x2dvEXT glProgramUniformMatrix4x2fvEXT glProgramUniformMatrix4x3dvEXT
+               glProgramUniformMatrix4x3fvEXT glProgramUniformui64NV glProgramUniformui64vNV
+               glPushClientAttribDefaultEXT glPushGroupMarkerEXT glRasterSamplesEXT glReadnPixels glReadnPixelsARB
+               glRenderbufferStorageMultisampleAdvancedAMD glRenderbufferStorageMultisampleCoverageNV
+               glResetMemoryObjectParameterNV glResolveDepthValuesNV glScissorExclusiveArrayvNV
+               glScissorExclusiveNV glSecondaryColorFormatNV glSelectPerfMonitorCountersAMD
+               glShadingRateImageBarrierNV glShadingRateImagePaletteNV glShadingRateSampleOrderCustomNV
+               glShadingRateSampleOrderNV glSignalVkFenceNV glSignalVkSemaphoreNV glSpecializeShader
+               glSpecializeShaderARB glStateCaptureNV glStencilFillPathInstancedNV glStencilFillPathNV
+               glStencilStrokePathInstancedNV glStencilStrokePathNV glStencilThenCoverFillPathInstancedNV
+               glStencilThenCoverFillPathNV glStencilThenCoverStrokePathInstancedNV glStencilThenCoverStrokePathNV
+               glSubpixelPrecisionBiasNV glTexAttachMemoryNV glTexBufferARB glTexCoordFormatNV
+               glTexPageCommitmentARB glTexStorage1DEXT glTexStorage2DEXT glTexStorage3DEXT
+               glTextureAttachMemoryNV glTextureBarrier glTextureBarrierNV glTextureBuffer glTextureBufferEXT
+               glTextureBufferRange glTextureBufferRangeEXT glTextureImage1DEXT glTextureImage2DEXT
+               glTextureImage3DEXT glTexturePageCommitmentEXT glTextureParameterIiv glTextureParameterIivEXT
+               glTextureParameterIuiv glTextureParameterIuivEXT glTextureParameterf glTextureParameterfEXT
+               glTextureParameterfv glTextureParameterfvEXT glTextureParameteri glTextureParameteriEXT
+               glTextureParameteriv glTextureParameterivEXT glTextureRenderbufferEXT glTextureStorage1D
+               glTextureStorage1DEXT glTextureStorage2D glTextureStorage2DEXT glTextureStorage2DMultisample
+               glTextureStorage2DMultisampleEXT glTextureStorage3D glTextureStorage3DEXT
+               glTextureStorage3DMultisample glTextureStorage3DMultisampleEXT glTextureSubImage1D
+               glTextureSubImage1DEXT glTextureSubImage2D glTextureSubImage2DEXT glTextureSubImage3D
+               glTextureSubImage3DEXT glTransformFeedbackBufferBase glTransformFeedbackBufferRange
+               glTransformPathNV glUniform1i64ARB glUniform1i64NV glUniform1i64vARB glUniform1i64vNV
+               glUniform1ui64ARB glUniform1ui64NV glUniform1ui64vARB glUniform1ui64vNV glUniform2i64ARB
+               glUniform2i64NV glUniform2i64vARB glUniform2i64vNV glUniform2ui64ARB glUniform2ui64NV
+               glUniform2ui64vARB glUniform2ui64vNV glUniform3i64ARB glUniform3i64NV glUniform3i64vARB
+               glUniform3i64vNV glUniform3ui64ARB glUniform3ui64NV glUniform3ui64vARB glUniform3ui64vNV
+               glUniform4i64ARB glUniform4i64NV glUniform4i64vARB glUniform4i64vNV glUniform4ui64ARB
+               glUniform4ui64NV glUniform4ui64vARB glUniform4ui64vNV glUniformHandleui64ARB glUniformHandleui64NV
+               glUniformHandleui64vARB glUniformHandleui64vNV glUniformui64NV glUniformui64vNV glUnmapNamedBuffer
+               glUnmapNamedBufferEXT glUseShaderProgramEXT glVertexArrayAttribBinding glVertexArrayAttribFormat
+               glVertexArrayAttribIFormat glVertexArrayAttribLFormat glVertexArrayBindVertexBufferEXT
+               glVertexArrayBindingDivisor glVertexArrayColorOffsetEXT glVertexArrayEdgeFlagOffsetEXT
+               glVertexArrayElementBuffer glVertexArrayFogCoordOffsetEXT glVertexArrayIndexOffsetEXT
+               glVertexArrayMultiTexCoordOffsetEXT glVertexArrayNormalOffsetEXT
+               glVertexArraySecondaryColorOffsetEXT glVertexArrayTexCoordOffsetEXT
+               glVertexArrayVertexAttribBindingEXT glVertexArrayVertexAttribDivisorEXT
+               glVertexArrayVertexAttribFormatEXT glVertexArrayVertexAttribIFormatEXT
+               glVertexArrayVertexAttribIOffsetEXT glVertexArrayVertexAttribLFormatEXT
+               glVertexArrayVertexAttribLOffsetEXT glVertexArrayVertexAttribOffsetEXT
+               glVertexArrayVertexBindingDivisorEXT glVertexArrayVertexBuffer glVertexArrayVertexBuffers
+               glVertexArrayVertexOffsetEXT glVertexAttribDivisorARB glVertexAttribFormatNV
+               glVertexAttribIFormatNV glVertexAttribL1i64NV glVertexAttribL1i64vNV glVertexAttribL1ui64ARB
+               glVertexAttribL1ui64NV glVertexAttribL1ui64vARB glVertexAttribL1ui64vNV glVertexAttribL2i64NV
+               glVertexAttribL2i64vNV glVertexAttribL2ui64NV glVertexAttribL2ui64vNV glVertexAttribL3i64NV
+               glVertexAttribL3i64vNV glVertexAttribL3ui64NV glVertexAttribL3ui64vNV glVertexAttribL4i64NV
+               glVertexAttribL4i64vNV glVertexAttribL4ui64NV glVertexAttribL4ui64vNV glVertexAttribLFormatNV
+               glVertexFormatNV glViewportPositionWScaleNV glViewportSwizzleNV glWaitVkSemaphoreNV glWeightPathsNV
+               glWindowRectanglesEXT
+])

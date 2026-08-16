@@ -1,0 +1,50 @@
+;; `string-to-i32`/`string-to-i64`/`string-to-u32`/`string-to-u64`/
+;; `string-to-f32`/`string-to-f64`: string-to-number parsing, Odin-style
+;; `(bool T)` result (see the multi-return feature) rather than a silent
+;; 0/garbage fallback -- `ok` is false for anything malformed (empty
+;; input, a bare sign, trailing garbage like "12abc", or an out-of-range
+;; magnitude), never a partial parse. Number-to-string already works via
+;; the existing `str`/`print` builtins (`(str a n)`); this is specifically
+;; the missing OTHER direction.
+(package string-parsing)
+
+(fn main [] i32
+  (var ok bool true)
+
+  (let [[valid n] (string-to-i32 "42")]
+    (println "'42' as i32 -> ok={} n={}" valid n)
+    (when (not (and valid (= n 42))) (set ok false)))
+
+  (let [[valid n] (string-to-i32 "-17")]
+    (println "'-17' as i32 -> ok={} n={}" valid n)
+    (when (not (and valid (= n -17))) (set ok false)))
+
+  (let [[valid n] (string-to-i32 "12abc")]
+    (println "'12abc' as i32 -> ok={} n={} (trailing garbage rejected)" valid n)
+    (when valid (set ok false)))
+
+  (let [[valid n] (string-to-i32 "9999999999999")]
+    (println "'9999999999999' as i32 -> ok={} n={} (out of range rejected)" valid n)
+    (when valid (set ok false)))
+
+  (let [[valid n] (string-to-u32 "-5")]
+    (println "'-5' as u32 -> ok={} n={} (unsigned rejects a sign)" valid n)
+    (when valid (set ok false)))
+
+  (let [[valid n] (string-to-u64 "12345678901234567890")]
+    (println "'12345678901234567890' as u64 -> ok={} n={}" valid n)
+    (when (not valid) (set ok false)))
+
+  (let [[valid n] (string-to-f64 "3.14159")]
+    (println "'3.14159' as f64 -> ok={} n={}" valid n)
+    (when (not valid) (set ok false)))
+
+  (let [[valid n] (string-to-f32 "not-a-float")]
+    (println "'not-a-float' as f32 -> ok={} n={}" valid n)
+    (when valid (set ok false)))
+
+  (let [[valid n] (string-to-f64 "")]
+    (println "'' as f64 -> ok={} n={} (empty input rejected)" valid n)
+    (when valid (set ok false)))
+
+  (if ok 0 1))

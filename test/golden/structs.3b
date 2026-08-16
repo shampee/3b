@@ -1,0 +1,19 @@
+;; Struct declaration, literal construction with designated initializers, and
+;; field reads through `.` and `get-in`.
+(package golden)
+
+(struct Inner
+  [depth i32])
+
+(struct Outer
+  [name  string
+   inner Inner])
+
+(fn make [] Outer
+  (Outer {:name "leaf" :inner (Inner {:depth 3})}))
+
+(fn depth-of [o Outer] i32
+  (get-in o [inner depth]))
+
+(fn main [] i32
+  (depth-of (make)))

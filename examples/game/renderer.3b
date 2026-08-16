@@ -1,0 +1,372 @@
+(package game)
+(import sdl)
+(import gl)
+
+(private
+  (val renderer-max-quads     u32 65536u32)
+  (val renderer-max-vertices  u32 (* renderer-max-quads 4u32))
+  (val renderer-max-indices   u32 (* renderer-max-quads 6u32))
+  (val renderer-max-textures  u32 512u32)
+  (val renderer-max-meshes    u32 512u32)
+  (val renderer-max-clips     u32 128u32)
+  (val renderer-max-commands  u32 16384u32)
+  (val vert-src char*
+    (cstring "#version 330 core\nlayout(location = 0) in vec2  a_pos;\nlayout(location = 1) in vec2  a_uv;\nlayout(location = 2) in vec4  a_color;\nuniform mat4 u_proj;\nout vec2 v_uv;\nout vec4 v_color;\nvoid main() {\n  gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);\n  v_uv    = a_uv;\n  v_color = a_color;\n}\n"))
+
+  (val frag-src char*
+    (cstring "#version 330 core\nin vec2 v_uv;\nin vec4 v_color;\nuniform sampler2D u_tex;\nout vec4 frag_color;\nvoid main() {\n  frag_color = texture(u_tex, v_uv) * v_color;\n}\n")))
+
+(struct Renderer
+  [window         any
+   gl-ctx         sdl/GLContext
+   window-w       i32
+   window-h       i32
+
+   ;; gl objects
+   vao            u32
+   vbo            u32
+   ibo            u32
+   default-shader u32
+
+   ;; cached uniform locations
+   u-proj-loc     i32
+   u-tex-loc      i32
+
+   ;; projection
+   proj           Mat4
+
+   ;; white texture
+   white-texture  Texture^
+
+   ;; timing
+   last-tick      u64
+   dt             f32
+   time           f32
+
+   ;; asset
+   asset-arena    arena
+
+   ;; frame
+   frame-arena    arena
+   vertices       Vertex2D*
+   vertex-count   u32
+   commands       DrawCommand*
+   command-count  u32
+   clip-stack     Rng2*
+   clip-count     u32
+   blend-mode     BlendMode
+
+   initialized    bool])
+
+(struct DrawCommand
+  [texture-id    u32
+   vertex-offset u32
+   vertex-count  u32
+   blend-mode    BlendMode
+   layer         u32
+   clip          Rng2])
+
+(private
+  (fn fill-quad-indices [indices u32* quad-count u32] void
+    (for [i 0u32 quad-count]
+      (let [v (* i 4u32)
+            i (* i 6u32)]
+        (set (nth indices (+ i 0u32)) (+ v 0u32))
+        (set (nth indices (+ i 1u32)) (+ v 1u32))
+        (set (nth indices (+ i 2u32)) (+ v 2u32))
+        (set (nth indices (+ i 3u32)) (+ v 2u32))
+        (set (nth indices (+ i 4u32)) (+ v 3u32))
+        (set (nth indices (+ i 5u32)) (+ v 0u32))))))
+
+(fn make-renderer [w i32 h i32] Renderer
+  (sdl/init sdl/INIT_VIDEO)
+  (sdl/gl-set-attribute sdl/GLAttr/ContextMajorVersion 3)
+  (sdl/gl-set-attribute sdl/GLAttr/ContextMinorVersion 3)
+  (sdl/gl-set-attribute sdl/GLAttr/ContextProfileMask (cast i32 sdl/GL_CONTEXT_PROFILE_CORE))
+  (sdl/gl-set-attribute sdl/GLAttr/Doublebuffer 1)
+  (let [window (sdl/create-window
+                 (cstring "game") w h
+                 (cast u64 (bit-or sdl/WINDOW_OPENGL sdl/WINDOW_RESIZABLE)))
+        context (sdl/gl-create-context window)
+        asset-arena (create)
+        frame-arena (create)
+        tick (sdl/get-ticks)]
+    (sdl/gl-make-current window context)
+    (sdl/gl-set-swap-interval 1) ; vsync
+    (when (not (gl/glad-load)) (print "glad-load: failed to load GL function pointers") (return (zero Renderer)))
+
+    (let [vert (compile-shader gl/VERTEX_SHADER vert-src)
+          frag (compile-shader gl/FRAGMENT_SHADER frag-src)
+          default-shader (link-shader vert frag)
+          proj-loc (gl/get-uniform-location default-shader (cstring "u_proj"))
+          tex-loc (gl/get-uniform-location default-shader (cstring "u_tex"))
+          vao 0u32
+          vbo 0u32
+          ibo 0u32]
+
+      (when (or (not vert) (not frag)) (print "failed to compile default shader") (return (zero Renderer)))
+      (handle-pool-init Texture renderer-max-textures asset-arena)
+      (handle-pool-init Mesh renderer-max-meshes asset-arena)
+
+      (gl/delete-shader vert)
+      (gl/delete-shader frag)
+
+      (gl/gen-vertex-arrays 1 (addr vao))
+      (gl/gen-buffers 1 (addr vbo))
+      (gl/gen-buffers 1 (addr ibo))
+
+      (gl/bind-vertex-array vao)
+      (gl/bind-buffer gl/ELEMENT_ARRAY_BUFFER ibo)
+      (scratch [t]
+        (let [indices (push t u32 renderer-max-indices)]
+          (fill-quad-indices indices renderer-max-quads)
+          (gl/buffer-data gl/ELEMENT_ARRAY_BUFFER
+            (cast i64 (* (cast u32 (sizeof u32)) renderer-max-indices)) (cast any indices) gl/STATIC_DRAW)))
+
+      (gl/bind-buffer gl/ARRAY_BUFFER vbo)
+      (gl/buffer-data gl/ARRAY_BUFFER
+        (cast i64 (* (cast u32 (sizeof Vertex2D)) renderer-max-vertices)) (cast any nil) gl/DYNAMIC_DRAW)
+
+      (gl/enable-vertex-attrib-array 0u32)
+      (gl/vertex-attrib-pointer
+        0u32 2i32 gl/FLOAT false (cast i32 (sizeof Vertex2D)) (cast any (member-offset Vertex2D pos)))
+      (gl/enable-vertex-attrib-array 1u32)
+      (gl/vertex-attrib-pointer
+        1u32 2i32 gl/FLOAT false (cast i32 (sizeof Vertex2D)) (cast any (member-offset Vertex2D uv)))
+      (gl/enable-vertex-attrib-array 2u32)
+      (gl/vertex-attrib-pointer
+        2u32 4i32 gl/UNSIGNED_BYTE true (cast i32 (sizeof Vertex2D)) (cast any (member-offset Vertex2D color)))
+      (gl/enable-vertex-attrib-array 0u32)
+
+      (let [white-pixel 0xffffffffu32
+            tex (gl/gen-textures asset-arena 1)
+            tex-handle (handle-alloc Texture)]
+        (gl/bind-texture gl/TEXTURE_2D (deref tex))
+        (gl/tex-image2d gl/TEXTURE_2D 0 (cast i32 gl/RGBA) 1 1 0 gl/RGBA gl/UNSIGNED_BYTE (cast any (addr white-pixel)))
+        (set (deref (handle-deref tex-handle)) (Texture (deref tex) w h))
+        (gl/enable gl/BLEND)
+        (gl/blend-func gl/SRC_ALPHA gl/ONE_MINUS_SRC_ALPHA)
+        (gl/disable gl/DEPTH_TEST)
+        (gl/disable gl/CULL_FACE)
+
+        (Renderer {:window window
+                   :gl-ctx context
+                   :window-w w
+                   :window-h h
+                   :vao vao
+                   :vbo vbo
+                   :ibo ibo
+                   :default-shader default-shader
+                   :u-proj-loc proj-loc
+                   :u-tex-loc tex-loc
+                   :proj (mat4 1.0)
+                   :white-texture tex-handle
+                   :last-tick tick
+                   :dt 0.0
+                   :time 0.0
+                   :asset-arena asset-arena
+                   :frame-arena frame-arena
+                   :vertices (push asset-arena Vertex2D renderer-max-vertices)
+                   :vertex-count 0u32
+                   :commands (push asset-arena DrawCommand renderer-max-commands)
+                   :command-count 0u32
+                   :clip-stack (push asset-arena Rng2 renderer-max-clips)
+                   :clip-count 0u32
+                   :blend-mode BlendMode/Normal
+                   :initialized true})))))
+
+(fn destroy-renderer [renderer Renderer*] void
+  (let [{window gl-ctx frame-arena} (deref renderer)]
+    (destroy frame-arena)
+    (sdl/gl-destroy-context gl-ctx)
+    (sdl/destroy-window window)
+    (sdl/quit)
+    (mem-zero renderer (sizeof Renderer))))
+
+(private (fn make-screen-proj [w i32 h i32] Mat4 (make-orthographic-mat4 0.0 (cast f32 w) (cast f32 h) 0.0 -1.0 1.0)))
+
+(fn push-blend [renderer Renderer* blend-mode BlendMode] void
+  (set (. renderer blend-mode) blend-mode))
+
+(fn pop-blend [renderer Renderer*] void
+  (set (. renderer blend-mode) BlendMode/Normal))
+
+(private (fn frame-clip [renderer Renderer*] Rng2
+           (let [{:window-w w :window-h h :clip-stack stack :clip-count count} (deref renderer)]
+             (when (> count 0u32) (return (nth stack (- count 1u32))))
+             (rng2p 0.0 0.0 (cast f32 w) (cast f32 h)))))
+
+(fn push-quad
+  [renderer Renderer*
+   pos Rng2
+   uv Rng2
+   color Rgba8
+   tex-id u32] void
+  (when (> (+ (. renderer vertex-count) 4u32) renderer-max-vertices)
+    (println "push-quad: vertex buffer is full")
+    (return))
+  (let [clip (frame-clip renderer)
+        {:blend-mode blend :command-count cmd-count} (deref renderer)
+        extend false]
+    (when (> cmd-count 0u32)
+      (let [last (addr (nth (. renderer commands) (- cmd-count 1u32)))]
+        (set extend
+          (and
+            (= (. last texture-id) tex-id)
+            (= (. last blend-mode) blend)
+            (= (. last clip x0) (. clip x0))
+            (= (. last clip y0) (. clip y0))
+            (= (. last clip x1) (. clip x1))
+            (= (. last clip y1) (. clip y1))))))
+    (if extend
+      (void (+= (. (nth (. renderer commands) (- cmd-count 1u32)) vertex-count) 4u32))
+      (let [cmd (DrawCommand {:texture-id tex-id
+                              :vertex-offset (. renderer vertex-count)
+                              :vertex-count 4u32
+                              :blend-mode blend
+                              :layer 0u32
+                              :clip clip})
+            verts [Vertex2D 4]
+            [(vert2 (. pos min) (. uv min) color)
+             (vert2p (. pos x1) (. pos y0) (. uv x1) (. uv y0) color)
+             (vert2 (. pos max) (. uv max) color)
+             (vert2p (. pos x0) (. pos y1) (. uv x0) (. uv y1) color)]]
+        (alloc-cmd renderer (addr cmd))
+        (for [i 0 4] (alloc-vert renderer (addr (nth verts i))))))))
+
+(fn draw-rect [renderer Renderer* rect Rng2 color Rgba8] void
+  (let [t (handle-deref (. renderer white-texture))]
+    (when (not t)
+      (println "draw-rect: white texture is nil")
+      (return))
+    (push-quad renderer rect (rng2p 0.0 0.0 1.0 1.0) color (. t id))))
+
+(fn draw-image-sub
+  [renderer Renderer*
+   dst Rng2
+   tex Texture^
+   src-px Rng2
+   tint Rgba8] void
+  (let [t (handle-deref tex)]
+    (when (not t) (return))
+    (let [iw (/ 1.0 (cast f32 (. t width)))
+          ih (/ 1.0 (cast f32 (. t height)))
+          x (* (. src-px x0) iw)
+          y (* (. src-px y0) ih)
+          w (* (. src-px x1) iw)
+          h (* (. src-px y1) ih)
+          uv (rng2p x y w h)]
+      (push-quad renderer dst uv tint (. t id)))))
+
+(fn draw-image-rect
+  [renderer Renderer*
+   dst Rng2
+   tex Texture^
+   tint Rgba8] void
+  (let [t (handle-deref tex)]
+    (when (not t) (return))
+    (let [src (rng2p 0.0 0.0 (cast f32 (. t width)) (cast f32 (. t height)))]
+      (draw-image-sub renderer dst tex src tint))))
+
+(fn draw-image
+  [renderer Renderer*
+   pos Vec2
+   tex Texture^
+   tint Rgba8] void
+  (let [t (handle-deref tex)]
+    (when (not t) (return))
+    (let [dst (rng2 pos (vec2 (+ (. pos x) (cast f32 (. t width))) (+ (. pos y) (cast f32 (. t height)))))
+          src (rng2p 0.0 0.0 (cast f32 (. t width)) (cast f32 (. t height)))]
+      (draw-image-sub renderer dst tex src tint))))
+
+(private
+  (fn alloc-cmd [renderer Renderer* cmd DrawCommand*] void
+    (let [count (. renderer command-count)]
+      (when (>= count renderer-max-commands)
+        (println "alloc-cmd: command list full")
+        (return))
+      (set (nth (. renderer commands) count) (deref cmd))
+      (++ (. renderer command-count))))
+  (fn alloc-vert [renderer Renderer* vert Vertex2D*] void
+    (let [count (. renderer vertex-count)]
+      (when (>= count renderer-max-vertices)
+        (println "alloc-vert: vertex list full")
+        (return))
+      (set (nth (. renderer vertices) count) (deref vert))
+      (++ (. renderer vertex-count)))))
+
+(fn frame-begin [renderer Renderer* clear-color Vec4] void
+  (reset (. renderer frame-arena))
+  (let [now (sdl/get-ticks)]
+    (set (. renderer dt) (clamp (* (cast f32 (- now (. renderer last-tick))) 0.001) 0.0 0.1))
+    (set (. renderer last-tick) now)
+    (+= (. renderer time) (. renderer dt)))
+  (set (. renderer vertex-count) 0u32)
+  (set (. renderer command-count) 0u32)
+  (set (. renderer clip-count) 0u32)
+  (set (. renderer blend-mode) BlendMode/Normal)
+  (let [{:window window :window-w (addr wptr) :window-h (addr hptr)} (deref renderer)
+        w (deref wptr)
+        h (deref hptr)
+        {:r r :g g :b b :a a} clear-color]
+    (sdl/get-window-size-in-pixels window wptr hptr)
+    (set (. renderer proj) (make-screen-proj w h))
+    (gl/viewport 0 0 w h)
+    (gl/enable gl/SCISSOR_TEST)
+    (gl/scissor 0 0 w h)
+    (gl/clear-color r g b a)
+    (gl/clear gl/COLOR_BUFFER_BIT)))
+
+(fn frame-end [renderer Renderer*] void
+  (let [vert-count (. renderer vertex-count)
+        cmd-count (. renderer command-count)
+        {u-proj-loc u-tex-loc proj default-shader vao vbo ibo} (deref renderer)]
+    (when (or (= vert-count 0u32) (= cmd-count 0u32))
+      (sdl/gl-swap-window (. renderer window))
+      (return))
+
+    (gl/bind-buffer gl/ARRAY_BUFFER vbo)
+    (gl/buffer-data gl/ARRAY_BUFFER
+      (cast i64 (* (cast u32 (sizeof Vertex2D)) renderer-max-vertices)) (cast any nil) gl/DYNAMIC_DRAW)
+    (gl/buffer-sub-data
+      gl/ARRAY_BUFFER
+      0i64
+      (cast i64 (* (cast u32 (sizeof Vertex2D)) vert-count))
+      (cast any (. renderer vertices)))
+
+    (gl/use-program default-shader)
+    (gl/uniform-matrix4fv u-proj-loc 1 false (. proj v))
+    (gl/uniform1i u-tex-loc 0)
+    (gl/active-texture gl/TEXTURE0)
+
+    (gl/bind-vertex-array vao)
+    (gl/bind-buffer gl/ELEMENT_ARRAY_BUFFER ibo)
+
+    (let [last-blend (cast BlendMode (bit-not 0u32))
+          last-tex-id (bit-not 0u32)]
+      (for [i 0u32 cmd-count]
+        (let [cmd (addr (nth (. renderer commands) i))
+              {:x0 x0 :y0 y0 :x1 x1 :y1 y1} (. cmd clip)
+              sx (cast i32 x0)
+              sy (cast i32 y0)
+              sw (cast i32 x1)
+              sh (cast i32 y1)
+              first-index (* (/ (. cmd vertex-offset) 4u32) 6u32)
+              index-count (* (/ (. cmd vertex-count)  4u32) 6u32)]
+          (when (!= (. cmd blend-mode) last-blend)
+            (match (. cmd blend-mode)
+              [BlendMode/Normal   (gl/blend-func gl/SRC_ALPHA (cast u32 gl/ONE_MINUS_SRC_ALPHA))
+               BlendMode/Additive (gl/blend-func gl/SRC_ALPHA (cast u32 gl/ONE))
+               BlendMode/Multiply (gl/blend-func gl/SRC_ALPHA (cast u32 gl/ZERO))])
+            (set last-blend (. cmd blend-mode)))
+          (gl/scissor sx sy sw sh)
+          (when (!= (. cmd texture-id) last-tex-id)
+            (gl/bind-texture gl/TEXTURE_2D (. cmd texture-id))
+            (set last-tex-id (. cmd texture-id)))
+          (gl/draw-elements
+            gl/TRIANGLES
+            (cast i32 index-count)
+            gl/UNSIGNED_INT
+            (cast any (cast u64 (* first-index (cast u32 (sizeof u32)))))))))
+    (gl/bind-vertex-array 0u32)
+    (sdl/gl-swap-window (. renderer window))))

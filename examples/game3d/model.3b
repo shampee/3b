@@ -1,0 +1,413 @@
+(package game3d)
+(import gltf)
+
+;; A glTF 2.0 model, flattened at load time into exactly what the renderer
+;; draws: one GPU mesh per primitive, each with the base-colour texture its
+;; material pointed at. Everything cgltf hands back is copied out into 3b
+;; arenas / GL objects here, so `gltf/free` can run before load-model
+;; returns and nothing downstream ever holds a cgltf pointer.
+;;
+;; A primitive carrying JOINTS_0/WEIGHTS_0 becomes a skin.3b SkinnedMesh
+;; instead of a plain Mesh (see build-primitive); the model's overall
+;; Skeleton and (if the file has one) its first AnimationClip are built
+;; the same way, from skin.3b's load-skeleton/load-animation-clip.
+;;
+;; Deliberately NOT handled yet: morph targets, more than one animation
+;; per model, and every PBR channel except base colour.
+
+(private
+  ;; libc. 3b emits a real prototype for each of these, so there's no
+  ;; implicit-declaration warning and no need to pull in <string.h>.
+  (extern
+    (fn strlen [s (const char*)] u64)
+    (fn strchr [s (const char*) c i32] char*))
+
+  (val base64-pad i32 61)  ; '='
+  (val uri-comma  i32 44)  ; ','
+
+  ;; Keyed by path -- this demo never re-adds the same model, but a
+  ;; scene that DOES (many instances of one asset) gets one real GPU
+  ;; upload instead of one per add-model call for free.
+  (var model-cache {string Model}))
+
+(struct ModelPrimitive
+  [mesh         Mesh^          ; valid when NOT skinned
+   skinned-mesh SkinnedMesh^   ; valid when skinned
+   skinned      bool
+   texture-id   u32            ; 0 = untextured, same convention GL itself uses
+   base-color   Vec3])
+
+(struct Model
+  [prims         ModelPrimitive*
+   prim-count    u32
+   bounds-min    Vec3
+   bounds-max    Vec3
+   skeleton      Skeleton
+   has-skeleton  bool
+   clip          AnimationClip
+   has-clip      bool
+   valid         bool])
+
+;; The real parse -- always a fresh GPU upload, NEVER consulting or
+;; updating model-cache itself (that's load-model's own job, right below).
+;; Split out specifically so assets.3b's poll-asset-reloads can force a
+;; genuine re-parse of an ALREADY-cached path -- load-model's own cache-
+;; hit shortcut would otherwise just hand back the stale copy instead of
+;; ever reading the file again.
+(fn load-model-uncached [arena arena path string] (bool Model)
+  (let [options (zero gltf/options)
+        data (cast gltf/data* nil)
+        model (zero Model)
+        parsed (gltf/parse-file (addr options) (cstring path) (addr data))]
+    (when (!= parsed gltf/result/Success)
+      (println "[model] {}: parse failed (cgltf result {})" path (cast i32 parsed))
+      (return false model))
+    ;; Resolves external .bin files AND decodes `data:...;base64,` buffer
+    ;; URIs -- this model is entirely self-contained in the latter form.
+    (let [loaded (gltf/load-buffers (addr options) data (cstring path))]
+      (when (!= loaded gltf/result/Success)
+        (println "[model] {}: could not load buffers (cgltf result {})" path (cast i32 loaded))
+        (gltf/free data)
+        (return false model)))
+
+    (let [image-count (cast u32 (. data images-count))
+          image-textures (push0 arena u32 (max image-count 1u32))
+          prim-total 0u32]
+
+      ;; Images first, so several primitives sharing a texture upload it once.
+      (for [i 0u32 image-count]
+        (set (nth image-textures i) (load-gltf-image (addr options) (addr (nth (. data images) i)))))
+
+      (for [mi 0u64 (. data meshes-count)]
+        (+= prim-total (cast u32 (. (nth (. data meshes) mi) primitives-count))))
+
+      ;; One Skeleton for the whole model, built from whichever node is
+      ;; the first to carry both a mesh and a skin. Every skinned
+      ;; primitive in this asset shares the identical 71-joint list
+      ;; (checked directly against the file before writing this), so one
+      ;; Skeleton is enough -- a model whose skinned meshes use genuinely
+      ;; DIFFERENT skins would need one per skin instead.
+      (let [skin-node (find-skinned-node data)]
+        (when skin-node
+          (set (. model skeleton) (load-skeleton arena (. skin-node skin) skin-node))
+          (set (. model has-skeleton) true)
+          ;; Only the FIRST animation -- this loader doesn't have a
+          ;; notion of picking a clip by name/index yet, and neither
+          ;; asset this was built against needs one (RiggedFigure and
+          ;; CesiumMan carry exactly one clip each).
+          (when (> (. data animations-count) 0u64)
+            (set (. model clip) (load-animation-clip arena data (. skin-node skin) (& model skeleton) 0u32))
+            (set (. model has-clip) true))))
+
+      (set (. model prims) (push0 arena ModelPrimitive (max prim-total 1u32)))
+      ;; Sentinels the first real accessor min/max is guaranteed to beat.
+      ;; 3b's lexer has no exponent notation, and a plain literal this size
+      ;; is already far past any sane model extent anyway.
+      (set (. model bounds-min) (vec3  1000000.0  1000000.0  1000000.0))
+      (set (. model bounds-max) (vec3 -1000000.0 -1000000.0 -1000000.0))
+
+      (for [mi 0u64 (. data meshes-count)]
+        (let [mesh (addr (nth (. data meshes) mi))]
+          (for [pi 0u64 (. mesh primitives-count)]
+            (let [prim (addr (nth (. mesh primitives) pi))]
+              (when (= (. prim type) gltf/primitive_type/primitive_type_triangles)
+                (accumulate-bounds (addr model) (find-attribute prim gltf/attribute_type/Position 0))
+                (let [built (build-primitive (addr model) prim data image-textures)]
+                  (when built (++ (. model prim-count)))))))))
+
+      (gltf/free data)
+      (set (. model valid) (> (. model prim-count) 0u32))
+      (println "[model] {}: {} primitive(s), {} image(s)" path (. model prim-count) image-count)
+      (return (. model valid) model))))
+
+;; Cache-checked entry point -- every ordinary caller (add-model, add-prop,
+;; ...) uses this, never load-model-uncached directly. A cache hit is
+;; free (no stat, no re-parse); only assets.3b's poll-asset-reloads ever
+;; forces a fresh load-model-uncached call for a path already in the
+;; cache. Registers `path` with assets.3b's watch-model on a genuine
+;; cache MISS only (never on a hit -- placing five instances of the same
+;; model would otherwise register it five times over).
+(fn load-model [arena arena path string] (bool Model)
+  (let [cached (map-get model-cache path)]
+    (when cached (return true (deref cached))))
+  (let [[ok model] (load-model-uncached arena path)]
+    (when ok
+      (map-set arena model-cache path model)
+      (watch-model arena path))
+    (return ok model)))
+
+;; Frees every GPU object a Model owns -- called only on a SUPERSEDED
+;; Model (assets.3b's poll-asset-reloads, right before overwriting its
+;; own model-cache slot), never on one still live in the cache/referenced
+;; by a Thing. De-duplicates texture-ids by scanning EARLIER primitives for
+;; the same one before destroying (load-model-uncached's own comment:
+;; "several primitives sharing a texture upload it once" -- destroying
+;; the same GL id twice would, on the second call, delete whatever
+;; UNRELATED texture the driver happened to recycle that id into) --
+;; every primitive's own mesh/skinned-mesh, by contrast, is always
+;; unique to it, no dedup needed.
+(fn destroy-model [model Model*] void
+  (for [i 0u32 (. model prim-count)]
+    (let [prim (addr (nth (. model prims) i))
+          tex (. prim texture-id)]
+      (when (!= tex 0u32)
+        (var already-destroyed bool false)
+        (for [j 0u32 i] (when (= (. (nth (. model prims) j) texture-id) tex) (set already-destroyed true)))
+        (when (not already-destroyed) (destroy-texture tex)))
+      (if (. prim skinned)
+        (destroy-skinned-mesh (. prim skinned-mesh))
+        (destroy-mesh (. prim mesh)))))
+  (set (. model valid) false))
+
+(private
+  (fn find-attribute [prim gltf/primitive* type gltf/attribute_type index i32] gltf/accessor*
+    (for [i 0u64 (. prim attributes-count)]
+      (let [attr (addr (nth (. prim attributes) i))]
+        (when (and (= (. attr type) type) (= (. attr index) index))
+          (return (. attr data)))))
+    (cast gltf/accessor* nil))
+
+  (fn find-skinned-node [data gltf/data*] gltf/node*
+    (for [i 0u64 (. data nodes-count)]
+      (let [node (addr (nth (. data nodes) i))]
+        (when (and (. node mesh) (. node skin)) (return node))))
+    (cast gltf/node* nil))
+
+  ;; glTF accessors carry the primitive's own AABB, so the bounds come
+  ;; straight out of the header rather than from a pass over every vertex.
+  (fn accumulate-bounds [model Model* position gltf/accessor*] void
+    (when (or (not position) (not (. position has-min)) (not (. position has-max))) (return))
+    (let [lo (vec3 (nth (. position min) 0) (nth (. position min) 1) (nth (. position min) 2))
+          hi (vec3 (nth (. position max) 0) (nth (. position max) 1) (nth (. position max) 2))]
+      (set (. model bounds-min)
+        (vec3 (min (. model bounds-min x) (. lo x))
+              (min (. model bounds-min y) (. lo y))
+              (min (. model bounds-min z) (. lo z))))
+      (set (. model bounds-max)
+        (vec3 (max (. model bounds-max x) (. hi x))
+              (max (. model bounds-max y) (. hi y))
+              (max (. model bounds-max z) (. hi z))))))
+
+  (fn build-primitive [model Model* prim gltf/primitive* data gltf/data* image-textures u32*] bool
+    (let [position (find-attribute prim gltf/attribute_type/Position 0)
+          normal   (find-attribute prim gltf/attribute_type/Normal 0)
+          texcoord (find-attribute prim gltf/attribute_type/Texcoord 0)
+          joints   (find-attribute prim gltf/attribute_type/Joints 0)
+          weights  (find-attribute prim gltf/attribute_type/Weights 0)
+          indices  (. prim indices)]
+      (when (or (not position) (not indices)) (return false))
+
+      (let [vertex-count (cast u32 (. position count))
+            index-count  (cast u32 (. indices count))]
+        (when (or (= vertex-count 0u32) (= index-count 0u32)) (return false))
+
+        (scratch [t]
+          (let [positions (push t f32 (* vertex-count 3u32))
+                normals   (push0 t f32 (* vertex-count 3u32))
+                uvs       (push0 t f32 (* vertex-count 2u32))
+                idx       (push t u32 index-count)]
+
+            ;; unpack-floats converts from whatever component type and
+            ;; stride the file used into tightly-packed f32 -- normalized
+            ;; integer attributes and interleaved buffer views included.
+            ;; JOINTS_0 (u16, non-normalized in this asset) comes through
+            ;; the SAME call: cgltf widens a non-normalized integer
+            ;; accessor to its exact float value, so an index like 45
+            ;; round-trips as 45.0f with no precision loss.
+            (gltf/accessor-unpack-floats position positions (cast u64 (* vertex-count 3u32)))
+            (when normal
+              (gltf/accessor-unpack-floats normal normals (cast u64 (* vertex-count 3u32))))
+            (when texcoord
+              (gltf/accessor-unpack-floats texcoord uvs (cast u64 (* vertex-count 2u32))))
+            (gltf/accessor-unpack-indices indices (cast any idx) 4u64 (cast u64 index-count))
+
+            (let [slot (addr (nth (. model prims) (. model prim-count)))]
+              (if (and joints weights)
+                (void
+                  (let [joint-idx (push0 t f32 (* vertex-count 4u32))
+                        weight    (push0 t f32 (* vertex-count 4u32))
+                        vertices  (push t SkinnedVertex3D vertex-count)]
+                    (gltf/accessor-unpack-floats joints joint-idx (cast u64 (* vertex-count 4u32)))
+                    (gltf/accessor-unpack-floats weights weight (cast u64 (* vertex-count 4u32)))
+                    (for [i 0u32 vertex-count]
+                      (let [p (* i 3u32)
+                            u (* i 2u32)
+                            j (* i 4u32)]
+                        (set (nth vertices i)
+                          (SkinnedVertex3D
+                            (vec3 (nth positions p) (nth positions (+ p 1u32)) (nth positions (+ p 2u32)))
+                            (vec3 (nth normals p) (nth normals (+ p 1u32)) (nth normals (+ p 2u32)))
+                            (vec2 (nth uvs u) (nth uvs (+ u 1u32)))
+                            [(nth joint-idx j) (nth joint-idx (+ j 1u32)) (nth joint-idx (+ j 2u32)) (nth joint-idx (+ j 3u32))]
+                            [(nth weight j) (nth weight (+ j 1u32)) (nth weight (+ j 2u32)) (nth weight (+ j 3u32))]))))
+                    (set (. slot skinned) true)
+                    (set (. slot skinned-mesh) (make-skinned-mesh vertices vertex-count idx index-count))))
+                (void
+                  (let [vertices (push t Vertex3D vertex-count)]
+                    (for [i 0u32 vertex-count]
+                      (let [p (* i 3u32)
+                            u (* i 2u32)]
+                        (set (nth vertices i)
+                          (Vertex3D
+                            (vec3 (nth positions p) (nth positions (+ p 1u32)) (nth positions (+ p 2u32)))
+                            (vec3 (nth normals p) (nth normals (+ p 1u32)) (nth normals (+ p 2u32)))
+                            (vec2 (nth uvs u) (nth uvs (+ u 1u32)))))))
+                    (set (. slot skinned) false)
+                    (set (. slot mesh) (make-mesh vertices vertex-count idx index-count)))))
+              (set (. slot base-color) (vec3 1.0 1.0 1.0))
+              (set (. slot texture-id) 0u32)
+              (apply-material slot (. prim material) data image-textures))))
+        true)))
+
+  (fn apply-material [slot ModelPrimitive* mat gltf/material* data gltf/data* image-textures u32*] void
+    (when (not mat) (return))
+    (when (not (. mat has-pbr-metallic-roughness)) (return))
+    (let [pbr (& mat pbr-metallic-roughness)
+          factor (. pbr base-color-factor)]
+      (set (. slot base-color) (vec3 (nth factor 0) (nth factor 1) (nth factor 2)))
+      (let [tex (. pbr base-color-texture texture)]
+        (when (not tex) (return))
+        (let [img (. tex image)]
+          (when (not img) (return))
+          ;; cgltf hands back a pointer INTO data->images; recovering the
+          ;; index by identity scan avoids doing pointer arithmetic on it.
+          (for [i 0u32 (cast u32 (. data images-count))]
+            (when (= (addr (nth (. data images) i)) img)
+              (set (. slot texture-id) (nth image-textures i))
+              (return)))))))
+
+  ;; Handles both shapes a glTF image can take: a `data:...;base64,` URI
+  ;; (what a self-contained .gltf uses) and a buffer view (what .glb uses).
+  ;; External image files are NOT handled -- nothing needs them yet.
+  (fn load-gltf-image [options gltf/options* img gltf/image*] u32
+    (let [view (. img buffer-view)]
+      (when view
+        (let [bytes (gltf/buffer-view-data view)]
+          (when bytes
+            (return (load-texture-from-memory bytes (cast i32 (. view size))))))))
+
+    (let [uri (. img uri)]
+      (when (not uri) (return 0u32))
+      (let [comma (strchr uri uri-comma)]
+        (when (not comma) (return 0u32))
+        (let [b64 (addr (nth comma 1))
+              b64-len (strlen b64)]
+          (when (< b64-len 4u64) (return 0u32))
+          ;; cgltf_load_buffer_base64 wants the DECODED size up front. A
+          ;; buffer's is declared in the JSON; an image's isn't, so it has
+          ;; to come from the encoded length: 4 base64 chars per 3 bytes,
+          ;; less one byte per trailing '='.
+          (let [pad 0u64]
+            (when (= (cast i32 (nth b64 (- b64-len 1u64))) base64-pad) (++ pad))
+            (when (= (cast i32 (nth b64 (- b64-len 2u64))) base64-pad) (++ pad))
+            (let [decoded-size (- (* (/ b64-len 4u64) 3u64) pad)
+                  out (cast any nil)
+                  res (gltf/load-buffer-base64 options decoded-size b64 (addr out))]
+              (when (or (!= res gltf/result/Success) (not out))
+                (println "[model] base64 image decode failed (cgltf result {})" (cast i32 res))
+                (return 0u32))
+              (load-texture-from-memory (cast u8* out) (cast i32 decoded-size)))))))))
+
+(private
+  (fn transform-point [m Mat4 p Vec3] Vec3
+    (let [{x y z} p]
+      (vec3 (+ (* (. m m0) x) (* (. m m1) y) (* (. m m2)  z) (. m m3))
+            (+ (* (. m m4) x) (* (. m m5) y) (* (. m m6)  z) (. m m7))
+            (+ (* (. m m8) x) (* (. m m9) y) (* (. m m10) z) (. m m11))))))
+
+;; A matrix that drops the model into the scene at a sane size: `correction`
+;; applied first, then uniformly scaled to `target-height`, centred on the
+;; origin in X/Z, and resting on y = 0.
+;;
+;; `correction` exists because glTF's "+Y is up" is a convention an exporter
+;; can and does ignore -- the model in this directory comes out head-DOWN,
+;; its head at the Y minimum and its feet at the maximum. Rather than
+;; special-case that, the AABB's eight corners are pushed through
+;; `correction` and re-fitted, so any orientation fix (or none: pass
+;; `(mat4 1.0)`) lands the result standing on the ground at the right size.
+;; It has to be a real rotation, not a `(vec3 1.0 -1.0 1.0)` scale: mirroring
+;; would reverse triangle winding and cull the model inside-out.
+(fn model-fit-matrix [model Model* correction Mat4 target-height f32] Mat4
+  (when (not (. model valid)) (return (mat4 1.0)))
+  (let [raw-lo (. model bounds-min)
+        raw-hi (. model bounds-max)
+        lo (vec3 1000000.0 1000000.0 1000000.0)
+        hi (vec3 -1000000.0 -1000000.0 -1000000.0)]
+    (for [corner 0 8]
+      (let [p (transform-point correction
+                (vec3 (if (bit-and corner 1) (. raw-hi x) (. raw-lo x))
+                      (if (bit-and corner 2) (. raw-hi y) (. raw-lo y))
+                      (if (bit-and corner 4) (. raw-hi z) (. raw-lo z))))]
+        (set lo (vec3 (min (. lo x) (. p x)) (min (. lo y) (. p y)) (min (. lo z) (. p z))))
+        (set hi (vec3 (max (. hi x) (. p x)) (max (. hi y) (. p y)) (max (. hi z) (. p z))))))
+
+    (let [height (max (- (. hi y) (. lo y)) 0.0001)
+          s (/ target-height height)]
+      (mul-mat4
+        (make-translate-mat4
+          (vec3 (* -0.5 (+ (. lo x) (. hi x)) s)
+                (* (- (. lo y)) s)
+                (* -0.5 (+ (. lo z) (. hi z)) s)))
+        (mul-mat4 (make-scale-mat4 (vec3 s s s)) correction)))))
+
+;; `joint-matrices`/`joint-count` are this frame's already-posed skinning
+;; matrices (see skin.3b's skeleton-pose, called once per frame in
+;; main.3b) -- unused if the model has no skeleton. Uploaded via
+;; bind-skinned-pose ONCE here, before the per-primitive loop, rather
+;; than once per primitive -- all of a model's skinned primitives share
+;; the exact same pose this frame, so re-uploading the whole u_joints[]
+;; palette (up to 96 mat4s) for each one was pure waste.
+(fn draw-model-instance
+  [renderer Renderer*
+   model Model*
+   transform Mat4
+   mat Material
+   joint-matrices (const Mat4*)
+   joint-count u32] void
+  (when (. model has-skeleton)
+    (bind-skinned-pose renderer joint-matrices joint-count))
+  (for [i 0u32 (. model prim-count)]
+    (let [prim (addr (nth (. model prims) i))
+          m (Material (mul-vec3 (. mat albedo) (. prim base-color))
+                      (. mat shininess) (. mat specular) (. mat emissive))]
+      (if (. prim skinned)
+        (draw-skinned-model renderer (. prim skinned-mesh) transform m (. prim texture-id))
+        (draw-textured-model renderer (. prim mesh) transform m (. prim texture-id))))))
+
+;; Depth-only counterpart to draw-model-instance, for renderer.3b's
+;; shadow pass (see begin-shadow-pass/draw-model-depth/
+;; draw-skinned-model-depth/bind-skinned-pose-depth). No material or
+;; texture -- the shadow map only ever records depth.
+(fn draw-model-instance-depth
+  [renderer Renderer*
+   model Model*
+   transform Mat4
+   joint-matrices (const Mat4*)
+   joint-count u32] void
+  (when (. model has-skeleton)
+    (bind-skinned-pose-depth renderer joint-matrices joint-count))
+  (for [i 0u32 (. model prim-count)]
+    (let [prim (addr (nth (. model prims) i))]
+      (if (. prim skinned)
+        (draw-skinned-model-depth renderer (. prim skinned-mesh) transform)
+        (draw-model-depth renderer (. prim mesh) transform)))))
+
+;; Same shape as draw-model-instance-depth, one face of a point-light
+;; shadow cubemap instead of the sun's single map (renderer.3b's
+;; begin-point-shadow-face/draw-model-point-shadow/draw-skinned-model-
+;; point-shadow/bind-skinned-pose-point-shadow) -- called once per face,
+;; same as everything else in that pass.
+(fn draw-model-instance-point-shadow
+  [renderer Renderer*
+   slot i32
+   model Model*
+   transform Mat4
+   joint-matrices (const Mat4*)
+   joint-count u32] void
+  (when (. model has-skeleton)
+    (bind-skinned-pose-point-shadow renderer slot joint-matrices joint-count))
+  (for [i 0u32 (. model prim-count)]
+    (let [prim (addr (nth (. model prims) i))]
+      (if (. prim skinned)
+        (draw-skinned-model-point-shadow renderer slot (. prim skinned-mesh) transform)
+        (draw-model-point-shadow renderer slot (. prim mesh) transform)))))

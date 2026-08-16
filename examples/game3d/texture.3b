@@ -1,0 +1,373 @@
+(package game3d)
+(import gl)
+(import stbimg)
+(import os)
+
+;; Just the GL id -- unlike examples/game/texture.3b there's no handle pool
+;; here, because nothing in this demo frees a texture independently of the
+;; model that owns it. 0 is the "no texture" id, which is also what GL
+;; itself uses, so an unset field reads correctly with no extra flag.
+
+;; The actual upload, targeting an ALREADY-EXISTING texture id -- split out
+;; of make-texture-rgba8 below so a hot-reload (reload-texture-from-file-
+;; into, further down) can re-upload fresh pixels into the SAME id instead
+;; of allocating a new one. Re-uploading into a live id is exactly what
+;; makes texture hot-reload need no propagation anywhere else in the
+;; project at all: every Brush/Model/UI draw call already just holds this
+;; same u32, never a pointer/copy of the pixel data itself, so the next
+;; frame's draw picks up the new content automatically.
+(fn upload-texture-rgba8-into [id u32 pixels (const u8*) width i32 height i32] void
+  (gl/bind-texture gl/TEXTURE_2D id)
+  (gl/tex-image2d gl/TEXTURE_2D 0 (cast i32 gl/RGBA) width height 0
+    gl/RGBA gl/UNSIGNED_BYTE (cast any pixels))
+  (gl/generate-mipmap gl/TEXTURE_2D)
+  (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR_MIPMAP_LINEAR))
+  (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+  (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_S (cast i32 gl/REPEAT))
+  (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_T (cast i32 gl/REPEAT))
+  (gl/bind-texture gl/TEXTURE_2D 0u32))
+
+(fn make-texture-rgba8 [pixels (const u8*) width i32 height i32] u32
+  (when (or (not pixels) (<= width 0) (<= height 0)) (return 0u32))
+  (scratch [t]
+    (let [ids (gl/gen-textures t 1)
+          id (deref ids)]
+      (upload-texture-rgba8-into id pixels width height)
+      id)))
+
+;; Single-channel (alpha/grayscale) upload -- text.3b's font atlas is the
+;; only caller today (stbtt/bake-font-bitmap bakes a one-byte-per-pixel
+;; coverage bitmap, not RGBA). `gl/UNPACK_ALIGNMENT 1` matters here in a
+;; way it never has for make-texture-rgba8: GL defaults row alignment to
+;; 4 bytes, which a 4-channel RGBA texture's rows always satisfy for free
+;; (width*4 is always a multiple of 4), but a 1-byte-per-pixel row of odd
+;; width isn't -- left at the default, every row past the first would
+;; read from the wrong offset, shearing the whole atlas diagonally. No
+;; mipmaps (LINEAR-only filtering) -- a UI font atlas is drawn at roughly
+;; its native baked resolution, never minified enough for mip aliasing to
+;; matter, and stb_truetype's own coverage bitmap has no natural way to
+;; downsample into a mip chain anyway.
+(fn make-texture-r8 [pixels (const u8*) width i32 height i32] u32
+  (when (or (not pixels) (<= width 0) (<= height 0)) (return 0u32))
+  (scratch [t]
+    (let [ids (gl/gen-textures t 1)
+          id (deref ids)]
+      (gl/bind-texture gl/TEXTURE_2D id)
+      (gl/pixel-storei gl/UNPACK_ALIGNMENT 1)
+      (gl/tex-image2d gl/TEXTURE_2D 0 (cast i32 gl/R8) width height 0
+        gl/RED gl/UNSIGNED_BYTE (cast any pixels))
+      (gl/pixel-storei gl/UNPACK_ALIGNMENT 4) ; restore GL's own default for every other texture upload after this
+      (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+      (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+      (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_EDGE))
+      (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_EDGE))
+      (gl/bind-texture gl/TEXTURE_2D 0u32)
+      id)))
+
+;; Decodes an encoded image (PNG/JPEG/...) sitting in memory and uploads it.
+;; Returns 0 if stb_image can't make sense of the bytes.
+(fn load-texture-from-memory [bytes (const u8*) byte-count i32] u32
+  (let [w 0 h 0 channels 0
+        pixels (stbimg/load-from-memory (cast u8* bytes) byte-count (addr w) (addr h) (addr channels) 4)]
+    (when (not pixels)
+      (println "[texture] stbimg: {}" (stbimg/failure-reason))
+      (return 0u32))
+    (let [id (make-texture-rgba8 pixels w h)]
+      (stbimg/image-free (cast any pixels))
+      id)))
+
+;; Reads `path` off disk and decodes+uploads it -- the file-based
+;; counterpart to load-texture-from-memory above, same "read the whole
+;; file, hand the bytes to stb_image" composition examples/game/
+;; texture.3b's own load-image already uses (`(cast u8* (cstring
+;; contents))` is that exact idiom -- `string` has no direct raw-pointer
+;; access, `cstring` is the sanctioned way to get one, see text.3b's own
+;; draw-text for another caller of it). Returns 0 on either a missing
+;; file (os/read-file's own "empty means failure" convention) or a decode
+;; failure (load-texture-from-memory's own). `scratch` rather than a
+;; caller-supplied arena -- `contents` is only ever needed transiently,
+;; for the one decode call right below, never past this function
+;; returning, so there's no reason to make every caller (scene.3b's
+;; make-scene included) thread one through just for this.
+(fn load-texture-from-file [path string] u32
+  (scratch [t]
+    (let [contents (os/read-file t path)]
+      (when (<= (len contents) 0u64)
+        (println "load-texture-from-file: {} not found or empty" path)
+        (return 0u32))
+      (load-texture-from-memory (cast u8* (cstring contents)) (cast i32 (len contents))))))
+
+;; Re-decodes `path` and re-uploads it into the ALREADY-EXISTING `id` --
+;; false on either a missing file or a decode failure, same two failure
+;; modes load-texture-from-file/load-texture-from-memory already report,
+;; just without touching `id` at all on failure (a mid-write save that
+;; briefly reads as empty/corrupt leaves the last-good content on screen
+;; rather than flashing to blank). assets.3b's own poll-asset-reloads is
+;; the only caller -- see that file for the actual watch registry/poll
+;; loop, unified across textures/models/scripts.
+(fn reload-texture-from-file-into [id u32 path string] bool
+  (scratch [t]
+    (let [contents (os/read-file t path)]
+      (when (<= (len contents) 0u64) (return false))
+      (let [w 0 h 0 channels 0
+            pixels (stbimg/load-from-memory (cast u8* (cstring contents)) (cast i32 (len contents))
+                     (addr w) (addr h) (addr channels) 4)]
+        (when (not pixels)
+          (println "[texture] stbimg: {}" (stbimg/failure-reason))
+          (return false))
+        (upload-texture-rgba8-into id pixels w h)
+        (stbimg/image-free (cast any pixels))
+        true))))
+
+;; ~~ Cubemaps -- sky.3b's own load-skybox-from-files is the only caller
+;; today, but this is generic (not sky-specific) the same way
+;; make-texture-rgba8 above isn't specific to any one 2D use either.
+
+;; Uploads 6 already-decoded RGBA8 face buffers as one cubemap texture --
+;; the cubemap counterpart to make-texture-rgba8, same LINEAR/CLAMP_TO_
+;; EDGE filtering (a skybox is sampled by direction, never tiled, so
+;; REPEAT would be meaningless -- CLAMP_TO_EDGE on all three axes,
+;; including R, is the one new wrinkle a 2D texture never needed).
+;; Face order matches GL's own TEXTURE_CUBE_MAP_POSITIVE_X.. enum
+;; sequence (+X -X +Y -Y +Z -Z), same as math.3b's cubemap-face-dir.
+(fn make-cubemap-rgba8
+  [px (const u8*) nx (const u8*) py (const u8*) ny (const u8*) pz (const u8*) nz (const u8*)
+   size i32] u32
+  (when (or (not px) (not nx) (not py) (not ny) (not pz) (not nz) (<= size 0)) (return 0u32))
+  (scratch [t]
+    (let [tex-ids (gl/gen-textures t 1)
+          id (deref tex-ids)]
+      (gl/bind-texture gl/TEXTURE_CUBE_MAP id)
+      (gl/tex-image2d gl/TEXTURE_CUBE_MAP_POSITIVE_X 0 (cast i32 gl/RGBA) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any px))
+      (gl/tex-image2d gl/TEXTURE_CUBE_MAP_NEGATIVE_X 0 (cast i32 gl/RGBA) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any nx))
+      (gl/tex-image2d gl/TEXTURE_CUBE_MAP_POSITIVE_Y 0 (cast i32 gl/RGBA) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any py))
+      (gl/tex-image2d gl/TEXTURE_CUBE_MAP_NEGATIVE_Y 0 (cast i32 gl/RGBA) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any ny))
+      (gl/tex-image2d gl/TEXTURE_CUBE_MAP_POSITIVE_Z 0 (cast i32 gl/RGBA) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any pz))
+      (gl/tex-image2d gl/TEXTURE_CUBE_MAP_NEGATIVE_Z 0 (cast i32 gl/RGBA) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any nz))
+      (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+      (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+      (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_EDGE))
+      (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_EDGE))
+      (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_R (cast i32 gl/CLAMP_TO_EDGE))
+      (gl/bind-texture gl/TEXTURE_CUBE_MAP 0u32)
+      id)))
+
+;; One face's worth of decode-cube-face -- reads `path`, decodes it, and
+;; rejects anything not a square matching `expected-size` (0 means "first
+;; face, whatever size it turns out to be" -- load-cubemap-from-files
+;; passes the FIRST face's own decoded size as every later face's
+;; `expected-size`, so a cubemap can never end up with mismatched faces).
+;; `ok` false means the OTHER two returns are meaningless -- no pixels to
+;; free, load-cubemap-from-files doesn't need to clean anything up for a
+;; face that never successfully decoded.
+(fn decode-cube-face [t arena path string expected-size i32] (bool u8* i32)
+  (let [contents (os/read-file t path)]
+    (when (<= (len contents) 0u64)
+      (println "load-cubemap-from-files: {} not found or empty" path)
+      (return false (cast u8* nil) 0))
+    (let [w 0 h 0 channels 0
+          pixels (stbimg/load-from-memory (cast u8* (cstring contents)) (cast i32 (len contents))
+                   (addr w) (addr h) (addr channels) 4)]
+      (when (not pixels)
+        (println "load-cubemap-from-files: {} : {}" path (stbimg/failure-reason))
+        (return false (cast u8* nil) 0))
+      (when (or (!= w h) (and (> expected-size 0) (!= w expected-size)))
+        (println "load-cubemap-from-files: {} is {}x{}, every face must be the same square size" path w h)
+        (stbimg/image-free (cast any pixels))
+        (return false (cast u8* nil) 0))
+      (return true pixels w))))
+
+;; Decodes 6 separate image files (one per cube face, +X/-X/+Y/-Y/+Z/-Z
+;; order matching make-cubemap-rgba8 above) and uploads them as one
+;; cubemap -- the real-art counterpart to sky.3b's generate-skybox-
+;; gradient. A failure partway through (decode-cube-face's own comment)
+;; just frees whatever THIS function already decoded and returns 0 --
+;; a broken skybox asset is a config-time error, not a hot path, so the
+;; simplicity of "bail out, minor one-time leak of an already-freed-by-
+;; decode-cube-face-on-ITS-OWN-failure path" is an acceptable tradeoff
+;; over threading cleanup through 6 levels of sequential early-return.
+(fn load-cubemap-from-files
+  [px string nx string py string ny string pz string nz string] u32
+  (scratch [t]
+    (let [[ok0 px-pix size] (decode-cube-face t px 0)]
+      (when (not ok0) (return 0u32))
+      (let [[ok1 nx-pix s1] (decode-cube-face t nx size)]
+        (when (not ok1) (stbimg/image-free (cast any px-pix)) (return 0u32))
+        (let [[ok2 py-pix s2] (decode-cube-face t py size)]
+          (when (not ok2)
+            (stbimg/image-free (cast any px-pix)) (stbimg/image-free (cast any nx-pix))
+            (return 0u32))
+          (let [[ok3 ny-pix s3] (decode-cube-face t ny size)]
+            (when (not ok3)
+              (stbimg/image-free (cast any px-pix)) (stbimg/image-free (cast any nx-pix))
+              (stbimg/image-free (cast any py-pix))
+              (return 0u32))
+            (let [[ok4 pz-pix s4] (decode-cube-face t pz size)]
+              (when (not ok4)
+                (stbimg/image-free (cast any px-pix)) (stbimg/image-free (cast any nx-pix))
+                (stbimg/image-free (cast any py-pix)) (stbimg/image-free (cast any ny-pix))
+                (return 0u32))
+              (let [[ok5 nz-pix s5] (decode-cube-face t nz size)]
+                (when (not ok5)
+                  (stbimg/image-free (cast any px-pix)) (stbimg/image-free (cast any nx-pix))
+                  (stbimg/image-free (cast any py-pix)) (stbimg/image-free (cast any ny-pix))
+                  (stbimg/image-free (cast any pz-pix))
+                  (return 0u32))
+                (let [cubemap (make-cubemap-rgba8 px-pix nx-pix py-pix ny-pix pz-pix nz-pix size)]
+                  (stbimg/image-free (cast any px-pix)) (stbimg/image-free (cast any nx-pix))
+                  (stbimg/image-free (cast any py-pix)) (stbimg/image-free (cast any ny-pix))
+                  (stbimg/image-free (cast any pz-pix)) (stbimg/image-free (cast any nz-pix))
+                  cubemap)))))))))
+
+;; ~~ Procedural placeholder textures -- draw-textured-model/the whole
+;; u_base_color/u_has_base_color shader path (renderer.3b) was already
+;; built and working for glTF models (model.3b's per-primitive
+;; texture-id); scene.3b's brushes just never passed anything but 0
+;; (untextured) through it. Two of the three textures scene.3b bakes for
+;; brushes to cycle through (editor.3b's `U`) are generated straight into
+;; an RGBA8 buffer rather than loaded from a file -- no real, clearly-
+;; licensed tileable image asset existed anywhere in this project to
+;; reuse, and a checkerboard is proof enough on its own that a BRUSH can
+;; carry a real texture end to end, same spirit as pose-hand-wiggle
+;; proving skinning deforms a mesh with no baked animation clip to sample
+;; instead. The third (dots.png, load-texture-from-file above) IS a real
+;; file on disk -- small enough to have been generated directly for this
+;; project (a plain script, not a downloaded/third-party asset, so no
+;; LICENSE-*.md needed the way CesiumMan/DejaVuSans have one) specifically
+;; so the file-loading path itself gets exercised too, not just the
+;; in-memory one every other texture here already covered.
+
+(val checker-tex-size u32 64u32) ; texels per side
+
+;; `cell-px`-texel squares alternating `color-a`/`color-b`. One shared
+;; generator (not "a checker fn" and "a brick fn") since both of scene.3b's
+;; two placeholder textures are really the same pattern at a different
+;; cell size/palette -- see make-scene's own two calls.
+(fn make-checker-texture [color-a Vec3 color-b Vec3 cell-px u32] u32
+  ;; checker-tex-size^2 * 4 channels -- 3b array sizes must be a literal
+  ;; (see mesh.3b's own sphere-vertex-count comment), so this can't be
+  ;; written in terms of checker-tex-size itself.
+  (var pixels [u8 16384])
+  (for [y 0u32 checker-tex-size]
+    (for [x 0u32 checker-tex-size]
+      (let [cx (/ x cell-px)
+            cy (/ y cell-px)
+            even (= (% (+ cx cy) 2u32) 0u32)
+            c (if even color-a color-b)
+            idx (* (+ (* y checker-tex-size) x) 4u32)]
+        (set (nth pixels idx)          (cast u8 (* (. c x) 255.0)))
+        (set (nth pixels (+ idx 1u32)) (cast u8 (* (. c y) 255.0)))
+        (set (nth pixels (+ idx 2u32)) (cast u8 (* (. c z) 255.0)))
+        (set (nth pixels (+ idx 3u32)) 255u8))))
+  (make-texture-rgba8 pixels (cast i32 checker-tex-size) (cast i32 checker-tex-size)))
+
+;; A solid white circle (RGB always 255, alpha 255 inside the radius, 0
+;; outside) -- scene.3b's draw-scene-billboards tints it via each point
+;; light's own color (the billboard shader's u_color multiplies it), same
+;; "plain white so a caller's own tint is the only color" convention
+;; text.3b's font atlas already relies on (there, via the R-channel-as-
+;; alpha path instead of real RGBA, since that's a coverage bitmap, not
+;; an icon). Hard-edged (no soft falloff) -- simplest thing that still
+;; reads as "a dot, not a square" through the billboard shader's own
+;; alpha-cutout discard, same tradeoff every alpha-cutout texture in this
+;; project already makes over real blending.
+(fn make-circle-texture [] u32
+  (var pixels [u8 16384])
+  (let [center (* 0.5 (cast f32 checker-tex-size))
+        radius (- center 4.0)] ; a few texels of margin so the edge never clips the atlas bounds
+    (for [y 0u32 checker-tex-size]
+      (for [x 0u32 checker-tex-size]
+        (let [dx (- (cast f32 x) center)
+              dy (- (cast f32 y) center)
+              dist (sqrt (+ (* dx dx) (* dy dy)))
+              inside (<= dist radius)
+              idx (* (+ (* y checker-tex-size) x) 4u32)]
+          (set (nth pixels idx)          255u8)
+          (set (nth pixels (+ idx 1u32)) 255u8)
+          (set (nth pixels (+ idx 2u32)) 255u8)
+          (set (nth pixels (+ idx 3u32)) (if inside 255u8 0u8))))))
+  (make-texture-rgba8 pixels (cast i32 checker-tex-size) (cast i32 checker-tex-size)))
+
+;; ~~ HSV<->RGB + baked gradient textures -- editor.3b's light/brush color
+;; picker panel is the one caller today, but there's nothing color-picker-
+;; specific about the conversion itself, same "generic, not tied to one
+;; use" spirit as make-texture-rgba8 above -- and it has to live somewhere
+;; both editor.3b (reads a selection's current color back to hue/sat/value
+;; for the picker's own sliders) AND make-hue-strip-texture/make-sv-square-
+;; texture below (bake a gradient FROM hue/sat/value) can reach.
+
+;; h/s/v and r/g/b all 0..1 -- h wraps via clamp rather than a real mod
+;; since every caller already clamps h to 0..1 itself (ui-slider-1d's own
+;; return range, or a texel-index fraction below).
+(fn hsv-to-rgb [h f32 s f32 v f32] Vec3
+  (let [hh (* (clamp h 0.0 0.999999) 6.0)
+        i (cast i32 (floor hh))
+        f (- hh (cast f32 i))
+        p (* v (- 1.0 s))
+        q (* v (- 1.0 (* s f)))
+        t (* v (- 1.0 (* s (- 1.0 f))))]
+    (match i
+      [0 (vec3 v t p)
+       1 (vec3 q v p)
+       2 (vec3 p v t)
+       3 (vec3 p q v)
+       4 (vec3 t p v)
+       else (vec3 v p q)])))
+
+(fn rgb-to-hsv [c Vec3] Vec3
+  (let [r (. c x) g (. c y) b (. c z)
+        maxc (max r (max g b))
+        minc (min r (min g b))
+        delta (- maxc minc)
+        s (if (<= maxc 0.00001) 0.0 (/ delta maxc))
+        h-raw (if (<= delta 0.00001) 0.0
+                (if (= maxc r)
+                  (/ (- g b) delta)
+                  (if (= maxc g)
+                    (+ (/ (- b r) delta) 2.0)
+                    (+ (/ (- r g) delta) 4.0))))
+        h-wrapped (if (< h-raw 0.0) (+ h-raw 6.0) h-raw)]
+    (vec3 (/ h-wrapped 6.0) s maxc)))
+
+(val hue-strip-tex-w u32 256u32) ; texels -- 1 texel tall, stretched by LINEAR filtering onto
+                                  ; whatever screen-pixel-wide rect the caller draws it at
+(val sv-square-tex-size u32 64u32) ; texels per side, same resolution as checker-tex-size above
+
+;; Full hue range at max saturation/value, one texel wide-strip row --
+;; baked ONCE (a hue strip never changes), unlike make-sv-square-texture
+;; below which depends on `hue` and has to be re-baked whenever that does.
+(fn make-hue-strip-texture [] u32
+  (var pixels [u8 1024]) ; hue-strip-tex-w * 1 * 4
+  (for [x 0u32 hue-strip-tex-w]
+    (let [hue (/ (cast f32 x) (cast f32 hue-strip-tex-w))
+          col (hsv-to-rgb hue 1.0 1.0)
+          idx (* x 4u32)]
+      (set (nth pixels idx)          (cast u8 (* (. col x) 255.0)))
+      (set (nth pixels (+ idx 1u32)) (cast u8 (* (. col y) 255.0)))
+      (set (nth pixels (+ idx 2u32)) (cast u8 (* (. col z) 255.0)))
+      (set (nth pixels (+ idx 3u32)) 255u8)))
+  (make-texture-rgba8 pixels (cast i32 hue-strip-tex-w) 1))
+
+;; Saturation left->right, value bottom->top (texel y=0 is the texture's
+;; OWN top row -- draw-ui-quad/ui-rect's uv convention already matches
+;; screen Y-down, so texel y=0 = value 1.0 lands at the visual top with no
+;; extra flip needed here) at a FIXED `hue` -- editor.3b's draw-color-
+;; picker re-bakes this (destroy-texture the old one, bake a new one)
+;; only when the selection's hue actually changes, not every frame.
+(fn make-sv-square-texture [hue f32] u32
+  (var pixels [u8 16384]) ; sv-square-tex-size^2 * 4
+  (for [y 0u32 sv-square-tex-size]
+    (for [x 0u32 sv-square-tex-size]
+      (let [s (/ (cast f32 x) (cast f32 sv-square-tex-size))
+            v (- 1.0 (/ (cast f32 y) (cast f32 sv-square-tex-size)))
+            col (hsv-to-rgb hue s v)
+            idx (* (+ (* y sv-square-tex-size) x) 4u32)]
+        (set (nth pixels idx)          (cast u8 (* (. col x) 255.0)))
+        (set (nth pixels (+ idx 1u32)) (cast u8 (* (. col y) 255.0)))
+        (set (nth pixels (+ idx 2u32)) (cast u8 (* (. col z) 255.0)))
+        (set (nth pixels (+ idx 3u32)) 255u8))))
+  (make-texture-rgba8 pixels (cast i32 sv-square-tex-size) (cast i32 sv-square-tex-size)))
+
+(fn destroy-texture [id u32] void
+  (when (= id 0u32) (return))
+  (gl/delete-textures 1 (addr id)))

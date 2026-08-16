@@ -1,0 +1,204 @@
+(package game3d)
+
+;; An orbit camera: it always looks at `target`, and `yaw`/`pitch`/
+;; `distance` say where around that point the eye sits. Drag-to-orbit and
+;; wheel-to-zoom in input.3b write straight into these three fields.
+
+(val tau f32 6.28318548)
+(val camera-min-pitch f32 -1.5)
+(val camera-max-pitch f32  1.5)
+(val camera-min-distance f32 1.5)
+(val camera-max-distance f32 40.0)
+
+(fn radians [degrees f32] f32 (* degrees (/ tau 360.0)))
+
+(struct Camera
+  [target   Vec3
+   distance f32
+   yaw      f32   ; radians, around +Y
+   pitch    f32   ; radians, 0 = level with the target
+   fov      f32   ; radians, horizontal
+   near-z   f32
+   far-z    f32])
+
+(fn make-camera [target Vec3 distance f32] Camera
+  (Camera {:target target
+           :distance distance
+           :yaw (radians 35.0)
+           :pitch (radians 22.0)
+           :fov (radians 60.0)
+           :near-z 0.1
+           :far-z 200.0}))
+
+;; Spherical -> cartesian, relative to the target. At yaw 0 / pitch 0 the
+;; eye sits on +Z looking back down the axis toward the target.
+(fn camera-eye [camera Camera*] Vec3
+  (let [{target distance yaw pitch} (deref camera)
+        horizontal (* distance (cos pitch))]
+    (add-vec3 target
+      (vec3 (* horizontal (sin yaw))
+            (* distance (sin pitch))
+            (* horizontal (cos yaw))))))
+
+(fn camera-view [camera Camera*] Mat4
+  (make-look-at-mat4 (camera-eye camera) (. camera target) (vec3 0.0 1.0 0.0)))
+
+(fn camera-proj [camera Camera* width i32 height i32] Mat4
+  (let [aspect (if (> height 0) (/ (cast f32 width) (cast f32 height)) 1.0)]
+    (make-perspective-mat4 (. camera fov) aspect (. camera near-z) (. camera far-z))))
+
+;; camera-proj*camera-view combined -- same expression renderer.3b's own
+;; set-frame-uniforms already builds inline for the lit shader's own
+;; u_view_proj; exposed here too so a caller that needs it OUTSIDE that
+;; (main.3b's Play-mode draw-scene-billboards call, which draws through a
+;; SEPARATE shader/pass) doesn't have to duplicate it.
+(fn camera-view-proj [camera Camera* width i32 height i32] Mat4
+  (mul-mat4 (camera-proj camera width height) (camera-view camera)))
+
+(fn camera-orbit [camera Camera* delta-yaw f32 delta-pitch f32] void
+  (+= (. camera yaw) delta-yaw)
+  (set (. camera pitch) (clamp (+ (. camera pitch) delta-pitch) camera-min-pitch camera-max-pitch)))
+
+(fn camera-zoom [camera Camera* delta f32] void
+  (set (. camera distance)
+    (clamp (* (. camera distance) (+ 1.0 (* delta -0.12))) camera-min-distance camera-max-distance)))
+
+;; The ground-plane "forward"/"right" a camera-relative WASD/arrow mover
+;; wants: whatever direction this camera is currently looking/strafing,
+;; projected flat onto XZ (Y always 0) -- shared by scene.3b's
+;; controller-player and editor.3b's update-editor, both of which turn
+;; input-move-axis's raw (x, y) into world movement the same way.
+(fn camera-forward-flat [camera Camera*] Vec3
+  (vec3 (- (sin (. camera yaw))) 0.0 (- (cos (. camera yaw)))))
+
+(fn camera-right-flat [camera Camera*] Vec3
+  (vec3 (cos (. camera yaw)) 0.0 (- (sin (. camera yaw)))))
+
+;; This camera's forward/right/up unit vectors, world-space -- shared by
+;; camera-ray below (screen-ray construction) and editor.3b's face-drag
+;; resizing (projecting 2D mouse motion onto a dragged face's own 3D
+;; outward normal).
+(fn camera-basis [camera Camera*] (Vec3 Vec3 Vec3)
+  (let [eye (camera-eye camera)
+        forward (normalize-vec3 (sub-vec3 (. camera target) eye))
+        right (normalize-vec3 (cross-vec3 forward (vec3 0.0 1.0 0.0)))
+        up (cross-vec3 right forward)]
+    (return forward right up)))
+
+;; The world-space ray through pixel (screen-x, screen-y) -- screen-y down,
+;; origin top-left, same convention SDL mouse events use (renderer.3b's
+;; width/height are the pixel dimensions those coordinates are in). Used
+;; for click-to-select picking (editor.3b's update-editor); doesn't touch
+;; the camera itself.
+;;
+;; Built straight from the camera's own eye/forward/right/up and `fov`
+;; (horizontal, same as camera-proj) rather than by inverting camera-proj*
+;; camera-view -- both get to the same answer, but this way picking never
+;; has to agree with inverse-mat4 on Mat4's storage convention, and stays
+;; correct even if that convention ever changes. tan(fov/2) is the view-
+;; space half-width at one unit of depth; dividing by `aspect` (camera-
+;; proj's own width/height) converts that to the half-height, same relation
+;; camera-proj's m5 uses.
+(fn camera-ray [camera Camera* width i32 height i32 screen-x f32 screen-y f32] (Vec3 Vec3)
+  (let [eye (camera-eye camera)
+        [forward right up] (camera-basis camera)
+        aspect (if (> height 0) (/ (cast f32 width) (cast f32 height)) 1.0)
+        ndc-x (- (* 2.0 (/ screen-x (cast f32 width))) 1.0)
+        ndc-y (- 1.0 (* 2.0 (/ screen-y (cast f32 height))))
+        tan-half (tan (/ (. camera fov) 2.0))
+        dir (normalize-vec3
+              (add-vec3 forward
+                (add-vec3 (scale-vec3 right (* ndc-x tan-half))
+                          (scale-vec3 up (* ndc-y (/ tan-half aspect))))))]
+    (return eye dir)))
+
+;; ~~ Orthographic views (Top/Front/Side) -- editor.3b's 4-pane view.
+;; Deliberately a SEPARATE small set of functions, not a generalized
+;; Camera -- same "special-case a new shape rather than genericize" house
+;; style handles-design-no-generics project memory already established
+;; for Box/Ramp/Hole. Reuses the exact eye = target ∓ dir*distance +
+;; make-look-at-mat4 pattern shadow.3b's shadow-light-space-matrix already
+;; proves out for an orthographic view, plus math.3b's existing
+;; make-orthographic-mat4 -- no new math.3b functions needed at all.
+
+(enum OrthoView [Top Front Side])
+
+;; The one fixed look direction each view never changes -- Top looks
+;; straight down, Front/Side look along the world's -Z/-X axes.
+(fn ortho-view-dir [view OrthoView] Vec3
+  (match view
+    [OrthoView/Top   (vec3 0.0 -1.0 0.0)
+     OrthoView/Front (vec3 0.0 0.0 -1.0)
+     else            (vec3 -1.0 0.0 0.0)]))
+
+;; make-look-at-mat4's own `up` can never be parallel to the view
+;; direction it's paired with (the cross product degenerates to zero) --
+;; Top's straight-down view direction rules out the usual (0,1,0), so it
+;; alone uses (0,0,-1) instead; Front/Side both look horizontally, where
+;; (0,1,0) works exactly like the perspective camera's own convention.
+(fn ortho-view-up [view OrthoView] Vec3
+  (match view [OrthoView/Top (vec3 0.0 0.0 -1.0) else (vec3 0.0 1.0 0.0)]))
+
+;; Far enough that near/far clipping never clips anything this demo's
+;; scene actually contains -- ortho-proj-matrix's own near/far range below
+;; is sized relative to this same constant, so the two always agree.
+(val ortho-eye-distance f32 500.0)
+
+;; The synthetic eye ortho-view-matrix's look-at is built from -- also
+;; reused as-is for the shader's specular view-vector (editor.3b's
+;; pane-eye), since an orthographic view has no single real eye point of
+;; its own (parallel rays).
+(fn ortho-eye [view OrthoView target Vec3] Vec3
+  (sub-vec3 target (scale-vec3 (ortho-view-dir view) ortho-eye-distance)))
+
+(fn ortho-view-matrix [view OrthoView target Vec3] Mat4
+  (make-look-at-mat4 (ortho-eye view target) target (ortho-view-up view)))
+
+(fn ortho-proj-matrix [span f32 aspect f32] Mat4
+  (make-orthographic-mat4
+    (- (* span aspect)) (* span aspect) (- span) span
+    0.1 (* ortho-eye-distance 2.0)))
+
+;; Same (forward, right, up) triple camera-basis returns for the
+;; perspective camera, computed the SAME way make-look-at-mat4 itself
+;; derives its own basis (s = cross(f,up), u = cross(s,f)) -- no trig
+;; needed, an orthographic view's basis never rotates.
+(fn ortho-camera-basis [view OrthoView] (Vec3 Vec3 Vec3)
+  (let [f (ortho-view-dir view)
+        up (ortho-view-up view)
+        s (normalize-vec3 (cross-vec3 f up))
+        u (cross-vec3 s f)]
+    (return f s u)))
+
+;; Parallel-projection counterpart to camera-ray: every ray shares the
+;; same direction (the view's own fixed look direction) -- only the
+;; ORIGIN varies per pixel, offset within the view plane along (right,
+;; up) by that pixel's mapped NDC position, same screen-y-down/NDC
+;; convention camera-ray already uses (so editor.3b's pick-x/pick-y need
+;; no special-casing to feed either one).
+;;
+;; The origin starts from `ortho-eye`, NOT `target` directly -- `target`
+;; is only a point ON the view plane, at whatever depth the camera happens
+;; to be looking at (editor.3b keeps it pinned to the current selection),
+;; not a point outside the scene the way camera-ray's own `eye` always is.
+;; A ray built straight from `target` can start ALREADY INSIDE a brush
+;; that's moved off the target's own depth (e.g. a box raised in Y, picked
+;; from the Top pane, whose target is still at the box's OLD height) --
+;; math.3b's ray-aabb-hit then reports a hit with a degenerate zero normal
+;; (its own comment: "zero if origin started inside the box on every
+;; axis"), which editor-start-resize's cascading if/else silently
+;; misreads as a Z-axis resize instead of rejecting. Pulling the origin
+;; back by ortho-eye-distance first guarantees it's always outside
+;; anything the scene could contain, exactly like camera-ray's `eye`.
+(fn ortho-camera-ray
+  [view OrthoView target Vec3 span f32 width i32 height i32 screen-x f32 screen-y f32] (Vec3 Vec3)
+  (let [[dir right up] (ortho-camera-basis view)
+        aspect (if (> height 0) (/ (cast f32 width) (cast f32 height)) 1.0)
+        half-w (* span aspect)
+        half-h span
+        ndc-x (- (* 2.0 (/ screen-x (cast f32 width))) 1.0)
+        ndc-y (- 1.0 (* 2.0 (/ screen-y (cast f32 height))))
+        origin (add-vec3 (ortho-eye view target)
+                 (add-vec3 (scale-vec3 right (* ndc-x half-w))
+                           (scale-vec3 up (* ndc-y half-h))))]
+    (return origin dir)))

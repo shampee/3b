@@ -1,0 +1,51 @@
+(package game)
+
+(import stbimg)
+(import os)
+
+(private
+  (struct Image
+    [data     u8*
+     width    i32
+     height   i32
+     channels i32])
+
+  (fn load-image [arena arena path string] Image
+    (let [contents (os/read-file arena path)
+          w 0 h 0 c 0
+          bytes (stbimg/load-from-memory
+                  (cast u8* (cstring contents))
+                  (cast i32 (len contents)) (addr w) (addr h) (addr c) 4)]
+      (when (not bytes)
+        (println "load-image: {}" (stbimg/failure-reason))
+        (return (zero Image)))
+      (Image bytes w h 4)))
+
+  (fn unload-image [image Image*] void
+    (stbimg/image-free (cast any (. image data)))
+    (mem-zero image (sizeof Image))))
+
+(struct Texture
+  [id     u32
+   width  i32
+   height i32])
+
+(handle Texture)
+
+(fn load-texture [arena arena path string] Texture^
+  (let [img (load-image arena path)
+        [data w h ch] img
+        fmt (if (= ch 4) gl/RGBA gl/RGB)
+        tex (gl/gen-textures arena 1)
+        tex-handle (handle-alloc Texture)]
+    (gl/bind-texture gl/TEXTURE_2D (deref tex))
+    (gl/tex-image2d gl/TEXTURE_2D 0 (cast i32 gl/RGBA) w h 0 fmt gl/UNSIGNED_BYTE (cast any data))
+    (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+    (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+    (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_EDGE))
+    (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_EDGE))
+    (set (deref (handle-deref tex-handle)) (Texture (deref tex) w h))
+    (unload-image (addr img))
+    tex-handle))
+
+(fn unload-texture [texture Texture^] void (handle-free texture))

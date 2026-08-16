@@ -1,0 +1,26 @@
+;; Plain aliases, and the pinned-C-spelling form `3b translate` emits for
+;; bindings. A pinned alias is an ordinary integer to 3b -- it takes part in
+;; arithmetic and passes the same checks -- but its typedef names the C type
+;; verbatim, so a pointer to it is compatible with the C function's own
+;; parameter type. The pointer case below is the one that motivates the form.
+;; See cg_alias_decl.
+(package golden)
+
+(alias Plain i64)
+(alias Pinned i64 "ptrdiff_t")
+
+(fn widen [n Plain m Plain] Plain
+  (+ n m))
+
+(fn scale [n Pinned by Pinned] Pinned
+  (* n by))
+
+(fn fill [out Pinned* n Pinned by Pinned] void
+  (set (nth out 0) (scale n by)))
+
+(fn main [] i32
+  (var slot Pinned 3)
+  (var by Pinned 5)
+  (fill (addr slot) slot by)
+  (var grown Plain (widen slot slot))
+  (cast i32 (+ grown slot)))

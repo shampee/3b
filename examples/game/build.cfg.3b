@@ -1,0 +1,25 @@
+(binary "game")
+
+;; Hand-written C `3b build` can't discover on its own -- GLAD's loader
+;; body and its tiny extern shim (game/glad/), and stb_image's single TU
+;; (game/stbimg/) -- each living next to the header it's paired with, not
+;; loose at the project root.
+(c-sources ["glad/glad_impl.c" "glad/glad_shim.c" "stbimg/stbimg_impl.c"])
+
+(pkg-config ["sdl3"])
+(libs ["GL" "pthread"])
+
+;; `-include` shims specific generated packages' .c files need before
+;; compiling -- required for EVERY `private extern` binding package, not
+;; just ones with an opaque type to pre-declare: `3b build` never emits a
+;; prototype for a `private extern`'d function into the generated .c/.h
+;; at all, so without one in scope via `-include`, the C compiler falls
+;; back to an implicit declaration. That is no longer something you can
+;; get away with silently: `3b build` compiles every generated package
+;; with `-Werror=implicit-function-declaration`, so a missing or
+;; incomplete entry here is a build error naming the exact function. See
+;; game3d's own build.cfg.3b comment for what it used to cost instead.
+(include-first
+  sdl    ["SDL3/SDL.h"]
+  gl     ["glad/gl.h" "glad/glad_shim.h"]
+  stbimg ["stbimg/stb_image.h"])

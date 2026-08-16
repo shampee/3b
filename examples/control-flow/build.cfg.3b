@@ -1,0 +1,7 @@
+;; `use-c-sqrt`'s `(extern (fn sqrt ...))` declares sqrt's signature to 3b's
+;; own type checker, but doesn't emit a real #include -- the generated C
+;; just calls sqrt() and relies on the platform's own libc declaration
+;; being visible. Without <math.h> included, that's an implicit
+;; declaration, which newer GCC (14+, including current mingw-w64 builds)
+;; treats as a hard error rather than a warning.
+(include-first control-flow ["math.h"])

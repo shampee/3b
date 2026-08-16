@@ -1,0 +1,136 @@
+;; Vector<T>: a growable array. Compiles straight to a plain, dyn-push-grown
+;; `T*` (see TypeKind_Vector's own comment in 3b.h) -- `vector-push` is just
+;; the discoverable name for the exact same operation `dyn-push` already
+;; provides, and `len`/`nth`/`for` all treat a Vector the same way they
+;; already treat a fixed-size array.
+;;
+;; `vector-clear`/`vector-swap-remove`/`vector-remove-at`/`vector-contains?`/
+;; `vector-index-of` round out the API with the removal/search operations
+;; `push`/`nth`/`len` alone don't cover -- `vector-`-prefixed since (unlike
+;; `len`/`nth`, generic over Array AND Vector) they only ever apply to a
+;; Vector, matching `map-contains?`/`set-contains?`'s own naming.
+;; `vector-swap-remove`/`vector-remove-at` are both CHECKED (bool result, no
+;; mutation on an out-of-range index) rather than trusting like `nth` --
+;; `vector-contains?`/`vector-index-of` work on any comparable element type
+;; (scalar, string, or a comparable struct), same gate `=`/`!=` use.
+(package vector)
+
+(struct Point [x i32 y i32])
+
+(fn build-vector [a arena] (Vector i32)
+  (var v (Vector i32))
+  (for [i 0 5]
+    (vector-push a v i))
+  v)
+
+(fn main [] i32
+  (var ok bool true)
+  (val a arena (create))
+
+  (val v (Vector i32) (build-vector a))
+  (println "len(v) = {} (expect 5)" (len v))
+  (when (not (= (len v) 5u64)) (set ok false))
+
+  (println "v[3] = {} (expect 3)" (nth v 3))
+  (when (not (= (nth v 3) 3)) (set ok false))
+
+  (var sum i32 0)
+  (for [x v] (set sum (+ sum x)))
+  (println "sum(v) = {} (expect 10, 0+1+2+3+4)" sum)
+  (when (not (= sum 10)) (set ok false))
+
+  (var idx-sum u64 0u64)
+  (for [[i x] v] (set idx-sum (+ idx-sum i)))
+  (println "idx-sum(v) = {} (expect 10, 0+1+2+3+4)" idx-sum)
+  (when (not (= idx-sum 10u64)) (set ok false))
+
+  ;; A default-initialized (zero) Vector is a valid, empty one -- no crash,
+  ;; `len` reads 0, iterating it runs zero times.
+  (var empty (Vector i32))
+  (println "len(empty) = {} (expect 0)" (len empty))
+  (when (not (= (len empty) 0u64)) (set ok false))
+  (var empty-iters i32 0)
+  (for [x empty] (set empty-iters (+ empty-iters 1)))
+  (when (not (= empty-iters 0)) (set ok false))
+
+  ;; vector-swap-remove: O(1), reorders -- the last element moves into the
+  ;; removed slot instead of shifting everything down.
+  (var sv [i32])
+  (for [i 0 5] (vector-push a sv i)) ;; [0 1 2 3 4]
+  (val removed1 bool (vector-swap-remove sv 1))
+  (println "vector-swap-remove sv 1 -> ok={} sv=[{} {} {} {}] (expect true, [0 4 2 3])"
+           removed1 (nth sv 0) (nth sv 1) (nth sv 2) (nth sv 3))
+  (when (not removed1) (set ok false))
+  (when (not (= (len sv) 4u64)) (set ok false))
+  (when (not (= (nth sv 1) 4)) (set ok false))
+  (val swap-oob bool (vector-swap-remove sv 99))
+  (println "vector-swap-remove sv 99 (out of range) -> {} (expect false)" swap-oob)
+  (when swap-oob (set ok false))
+  (when (not (= (len sv) 4u64)) (set ok false)) ;; unchanged
+
+  ;; vector-remove-at: order-preserving, shifts every following element down
+  ;; by one.
+  (var ra [i32])
+  (for [i 0 5] (vector-push a ra i)) ;; [0 1 2 3 4]
+  (val removed2 bool (vector-remove-at ra 1))
+  (println "vector-remove-at ra 1 -> ok={} ra=[{} {} {} {}] (expect true, [0 2 3 4])"
+           removed2 (nth ra 0) (nth ra 1) (nth ra 2) (nth ra 3))
+  (when (not removed2) (set ok false))
+  (when (not (= (len ra) 4u64)) (set ok false))
+  (when (not (= (nth ra 1) 2)) (set ok false))
+  (when (not (= (nth ra 3) 4)) (set ok false))
+  (val remove-oob bool (vector-remove-at ra 99))
+  (println "vector-remove-at ra 99 (out of range) -> {} (expect false)" remove-oob)
+  (when remove-oob (set ok false))
+
+  ;; vector-clear
+  (vector-clear ra)
+  (println "len(ra) after vector-clear = {} (expect 0)" (len ra))
+  (when (not (= (len ra) 0u64)) (set ok false))
+  (vector-push a ra 42)
+  (println "ra[0] after clear+push = {} (expect 42)" (nth ra 0))
+  (when (not (= (nth ra 0) 42)) (set ok false))
+
+  ;; vector-contains?/vector-index-of on a scalar element type
+  (var nums [i32])
+  (for [i 0 5] (vector-push a nums (* i 10))) ;; [0 10 20 30 40]
+  (println "vector-contains? nums 20 = {} (expect true)" (vector-contains? nums 20))
+  (when (not (vector-contains? nums 20)) (set ok false))
+  (println "vector-contains? nums 99 = {} (expect false)" (vector-contains? nums 99))
+  (when (vector-contains? nums 99) (set ok false))
+  (let [[found idx] (vector-index-of nums 30)]
+    (println "vector-index-of nums 30 -> {} {} (expect true 3)" found idx)
+    (when (not found) (set ok false))
+    (when (not (= idx 3u64)) (set ok false)))
+  (let [[found idx] (vector-index-of nums 999)]
+    (println "vector-index-of nums 999 -> {} (expect false)" found)
+    (when found (set ok false)))
+
+  ;; vector-contains?/vector-index-of on `string` -- routes through bbb_str8_match
+  (var names [string])
+  (vector-push a names "alice")
+  (vector-push a names "bob")
+  (vector-push a names "carol")
+  (println "vector-contains? names 'bob' = {} (expect true)" (vector-contains? names "bob"))
+  (when (not (vector-contains? names "bob")) (set ok false))
+  (let [[found idx] (vector-index-of names "carol")]
+    (println "vector-index-of names 'carol' -> {} {} (expect true 2)" found idx)
+    (when (not found) (set ok false))
+    (when (not (= idx 2u64)) (set ok false)))
+
+  ;; vector-contains?/vector-index-of on a comparable struct -- routes
+  ;; through Point's own synthesized `_eq`
+  (var pts [Point])
+  (val pt1 Point (Point {:x 1 :y 1}))
+  (val pt2 Point (Point {:x 2 :y 2}))
+  (vector-push a pts pt1)
+  (vector-push a pts pt2)
+  (val target Point (Point {:x 2 :y 2}))
+  (println "vector-contains? pts (2,2) = {} (expect true)" (vector-contains? pts target))
+  (when (not (vector-contains? pts target)) (set ok false))
+  (val missing Point (Point {:x 9 :y 9}))
+  (println "vector-contains? pts (9,9) = {} (expect false)" (vector-contains? pts missing))
+  (when (vector-contains? pts missing) (set ok false))
+
+  (destroy a)
+  (if ok 0 1))

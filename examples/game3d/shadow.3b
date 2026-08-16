@@ -1,0 +1,311 @@
+(package game3d)
+(import gl)
+
+;; A single directional-light shadow map: one depth-only texture rendered
+;; from the sun's point of view, sampled back in renderer.3b's lit
+;; fragment shader as a sampler2DShadow. TEXTURE_COMPARE_MODE below turns
+;; every texture() sample of it into a hardware depth comparison (with
+;; GL_LINEAR filtering that's already a free 2x2 PCF box), and the lit
+;; shader adds a small PCF loop of ITS OWN on top of that for a softer edge
+;; -- see renderer.3b's frag-src.
+;;
+;; Two depth-only shaders exist for the same reason renderer.3b keeps two
+;; lit ones: a skinned mesh's vertices move in the vertex shader (via the
+;; joint palette), so the depth pass has to skin them too, or a moving
+;; character would cast its BIND pose's shadow instead of its current one.
+
+(private
+  (val depth-vert-src char* (cstring "#version 330 core
+layout(location = 0) in vec3 a_pos;
+
+uniform mat4 u_model;
+uniform mat4 u_light_space;
+
+void main() {
+  gl_Position = u_light_space * u_model * vec4(a_pos, 1.0);
+}
+"))
+
+  (val skinned-depth-vert-src char* (cstring "#version 330 core
+#define MAX_JOINTS 96 // must match skin.3b's max-joints
+
+layout(location = 0) in vec3 a_pos;
+layout(location = 3) in vec4 a_joints;
+layout(location = 4) in vec4 a_weights;
+
+uniform mat4 u_model;
+uniform mat4 u_light_space;
+uniform mat4 u_joints[MAX_JOINTS];
+
+void main() {
+  ivec4 joint = ivec4(a_joints);
+  mat4 skin =
+    a_weights.x * u_joints[joint.x] +
+    a_weights.y * u_joints[joint.y] +
+    a_weights.z * u_joints[joint.z] +
+    a_weights.w * u_joints[joint.w];
+  gl_Position = u_light_space * u_model * (skin * vec4(a_pos, 1.0));
+}
+"))
+
+  ;; No color output at all -- begin-frame's shadow pass points the FBO at
+  ;; DRAW_BUFFER/READ_BUFFER = NONE, so only gl_Position (i.e. depth)
+  ;; matters.
+  (val depth-frag-src char* (cstring "#version 330 core
+void main() { }
+")))
+
+(struct ShadowMap
+  [fbo            u32
+   depth-texture  u32
+   shader         Shader
+   skinned-shader Shader
+   size           i32
+   valid          bool])
+
+(fn make-shadow-map [size i32] ShadowMap
+  (let [shader (make-shader depth-vert-src depth-frag-src)
+        skinned-shader (make-shader skinned-depth-vert-src depth-frag-src)]
+    (when (or (not (. shader valid)) (not (. skinned-shader valid)))
+      (println "make-shadow-map: could not build the depth-only shader(s)")
+      (destroy-shader (addr shader))
+      (destroy-shader (addr skinned-shader))
+      (return (zero ShadowMap)))
+
+    ;; The texture setup runs inside `scratch` only for the one throwaway
+    ;; gl/gen-textures out-buffer -- everything that can fail (and might
+    ;; `return` early) happens below, OUTSIDE the scratch block.
+    (let [depth-texture
+          (scratch [t]
+            (let [tex-ids (gl/gen-textures t 1)
+                  id (deref tex-ids)
+                  border [f32 4] [1.0 1.0 1.0 1.0]]
+              (gl/bind-texture gl/TEXTURE_2D id)
+              (gl/tex-image2d gl/TEXTURE_2D 0 (cast i32 gl/DEPTH_COMPONENT24) size size 0
+                gl/DEPTH_COMPONENT gl/FLOAT (cast any nil))
+              (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+              (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+              (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_BORDER))
+              (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_BORDER))
+              (gl/tex-parameterfv gl/TEXTURE_2D gl/TEXTURE_BORDER_COLOR border)
+              ;; Outside the light's frustum (past CLAMP_TO_BORDER) reads
+              ;; back as depth 1.0 with a LEQUAL compare, i.e. "always
+              ;; lit" -- exactly the right fallback for geometry the ortho
+              ;; box doesn't cover.
+              (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_COMPARE_MODE (cast i32 gl/COMPARE_REF_TO_TEXTURE))
+              (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_COMPARE_FUNC (cast i32 gl/LEQUAL))
+              (gl/bind-texture gl/TEXTURE_2D 0u32)
+              id))
+          fbo 0u32]
+
+      (gl/gen-framebuffers 1 (addr fbo))
+      (gl/bind-framebuffer gl/FRAMEBUFFER fbo)
+      (gl/framebuffer-texture2d gl/FRAMEBUFFER gl/DEPTH_ATTACHMENT gl/TEXTURE_2D depth-texture 0)
+      (gl/draw-buffer (cast u32 gl/NONE))
+      (gl/read-buffer (cast u32 gl/NONE))
+      (let [status (gl/check-framebuffer-status gl/FRAMEBUFFER)]
+        (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+        (when (!= status gl/FRAMEBUFFER_COMPLETE)
+          (println "make-shadow-map: framebuffer incomplete (status {})" status)
+          (destroy-shader (addr shader))
+          (destroy-shader (addr skinned-shader))
+          (gl/delete-textures 1 (addr depth-texture))
+          (gl/delete-framebuffers 1 (addr fbo))
+          (return (zero ShadowMap))))
+
+      (ShadowMap {:fbo fbo :depth-texture depth-texture :shader shader
+                  :skinned-shader skinned-shader :size size :valid true}))))
+
+(fn destroy-shadow-map [shadow ShadowMap*] void
+  (destroy-shader (& shadow shader))
+  (destroy-shader (& shadow skinned-shader))
+  (when (. shadow depth-texture) (gl/delete-textures 1 (& shadow depth-texture)))
+  (when (. shadow fbo) (gl/delete-framebuffers 1 (& shadow fbo)))
+  (mem-zero shadow (sizeof ShadowMap)))
+
+;; The sun's view-projection: an orthographic box `half-extent` wide/tall/
+;; deep, centred on `center` and looking along -sun-dir (sun-dir already
+;; points surface -> light, see light.3b). `half-extent` needs to be at
+;; least the scene's bounding radius as seen from the light, since unlike
+;; a perspective frustum an ortho box doesn't grow with distance -- see
+;; scene.3b's shadow-half-extent for this demo's own margin.
+(fn shadow-light-space-matrix [sun-dir Vec3 center Vec3 half-extent f32] Mat4
+  (let [eye (add-vec3 center (scale-vec3 sun-dir (* half-extent 2.0)))
+        view (make-look-at-mat4 eye center (vec3 0.0 1.0 0.0))
+        proj (make-orthographic-mat4
+               (- half-extent) half-extent (- half-extent) half-extent
+               0.1 (* half-extent 5.0))]
+    (mul-mat4 proj view)))
+
+;; ~~ Point-light shadow -- one omnidirectional shadow, budgeted the same
+;; way the sun's own single shadow map is (renderer.3b picks at most ONE
+;; shadow-casting point light per frame, light.3b's find-shadow-point-
+;; light) rather than one cubemap per light: 4 point lights' worth of
+;; 6-face cubemaps every frame would be a lot of render passes for a
+;; feature this demo only needs to prove out, not ship at scale.
+;;
+;; Unlike the sun's map (a real depth texture, sampled as
+;; sampler2DShadow), this stores LINEAR DISTANCE from the light in an R32F
+;; COLOR texture -- the standard trick for a cubemap shadow: GL's own
+;; depth buffer is per-face and non-linear (each face has its own
+;; near/far-relative depth curve), so comparing "this face's raw depth"
+;; across two potentially different faces (the depth pass's face at BAKE
+;; time vs whichever face the shading pass's own to-light vector happens
+;; to sample) isn't meaningful. A plain world-space distance IS directly
+;; comparable regardless of which face it came from -- renderer.3b's own
+;; frag-src just does `length(fragPos - lightPos) > sampled_distance`.
+;; The real GL depth buffer (depth-rbo below) still exists and still does
+;; real depth TESTING during each face's render (so occlusion between
+;; objects within that face is still correct) -- it's just never sampled
+;; back afterward, only the distance color output is.
+
+(private
+  ;; Same v_world_pos-emitting shape as renderer.3b's own vert-src/
+  ;; skinned-vert-src, just projected through THIS FACE's view-proj
+  ;; (uniform, re-set once per face by begin-point-shadow-face) instead
+  ;; of the main camera's.
+  (val point-depth-vert-src char* (cstring "#version 330 core
+layout(location = 0) in vec3 a_pos;
+
+uniform mat4 u_model;
+uniform mat4 u_light_space;
+
+out vec3 v_world_pos;
+
+void main() {
+  vec4 world = u_model * vec4(a_pos, 1.0);
+  v_world_pos = world.xyz;
+  gl_Position = u_light_space * world;
+}
+"))
+
+  (val point-skinned-depth-vert-src char* (cstring "#version 330 core
+#define MAX_JOINTS 96 // must match skin.3b's max-joints
+
+layout(location = 0) in vec3 a_pos;
+layout(location = 3) in vec4 a_joints;
+layout(location = 4) in vec4 a_weights;
+
+uniform mat4 u_model;
+uniform mat4 u_light_space;
+uniform mat4 u_joints[MAX_JOINTS];
+
+out vec3 v_world_pos;
+
+void main() {
+  ivec4 joint = ivec4(a_joints);
+  mat4 skin =
+    a_weights.x * u_joints[joint.x] +
+    a_weights.y * u_joints[joint.y] +
+    a_weights.z * u_joints[joint.z] +
+    a_weights.w * u_joints[joint.w];
+  vec4 world = u_model * (skin * vec4(a_pos, 1.0));
+  v_world_pos = world.xyz;
+  gl_Position = u_light_space * world;
+}
+"))
+
+  ;; Shared by both vertex shaders above, same "lighting doesn't change"
+  ;; reasoning renderer.3b's own frag-src being skinned/static-agnostic
+  ;; already relies on.
+  (val point-depth-frag-src char* (cstring "#version 330 core
+in vec3 v_world_pos;
+
+uniform vec3 u_light_pos;
+
+out vec4 frag_color;
+
+void main() {
+  frag_color = vec4(length(v_world_pos - u_light_pos), 0.0, 0.0, 1.0);
+}
+")))
+
+(struct PointShadowMap
+  [fbo            u32
+   cube           u32 ; samplerCube, R32F distance
+   depth-rbo      u32 ; real GL depth buffer for correct per-face occlusion -- never sampled back, see this file's own header comment
+   shader         Shader
+   skinned-shader Shader
+   size           i32
+   valid          bool])
+
+(fn make-point-shadow-map [size i32] PointShadowMap
+  (let [shader (make-shader point-depth-vert-src point-depth-frag-src)
+        skinned-shader (make-shader point-skinned-depth-vert-src point-depth-frag-src)]
+    (when (or (not (. shader valid)) (not (. skinned-shader valid)))
+      (println "make-point-shadow-map: could not build the depth-only shader(s)")
+      (destroy-shader (addr shader))
+      (destroy-shader (addr skinned-shader))
+      (return (zero PointShadowMap)))
+
+    (let [cube
+          (scratch [t]
+            (let [tex-ids (gl/gen-textures t 1)
+                  id (deref tex-ids)]
+              (gl/bind-texture gl/TEXTURE_CUBE_MAP id)
+              (for [face 0u32 6u32]
+                (gl/tex-image2d (+ gl/TEXTURE_CUBE_MAP_POSITIVE_X face) 0 (cast i32 gl/R32F)
+                  size size 0 gl/RED gl/FLOAT (cast any nil)))
+              (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+              (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+              (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_EDGE))
+              (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_EDGE))
+              (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_R (cast i32 gl/CLAMP_TO_EDGE))
+              (gl/bind-texture gl/TEXTURE_CUBE_MAP 0u32)
+              id))
+          depth-rbo 0u32
+          fbo 0u32]
+
+      (gl/gen-renderbuffers 1 (addr depth-rbo))
+      (gl/bind-renderbuffer gl/RENDERBUFFER depth-rbo)
+      (gl/renderbuffer-storage gl/RENDERBUFFER gl/DEPTH_COMPONENT24 size size)
+      (gl/bind-renderbuffer gl/RENDERBUFFER 0u32)
+
+      (gl/gen-framebuffers 1 (addr fbo))
+      (gl/bind-framebuffer gl/FRAMEBUFFER fbo)
+      ;; Face 0 (+X) just to check completeness -- begin-point-shadow-face
+      ;; re-attaches whichever face is actually being rendered every call,
+      ;; every other face shares the exact same format so completeness
+      ;; here is representative of all six.
+      (gl/framebuffer-texture2d gl/FRAMEBUFFER gl/COLOR_ATTACHMENT0 gl/TEXTURE_CUBE_MAP_POSITIVE_X cube 0)
+      (gl/framebuffer-renderbuffer gl/FRAMEBUFFER gl/DEPTH_ATTACHMENT gl/RENDERBUFFER depth-rbo)
+      (let [status (gl/check-framebuffer-status gl/FRAMEBUFFER)]
+        (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+        (when (!= status gl/FRAMEBUFFER_COMPLETE)
+          (println "make-point-shadow-map: framebuffer incomplete (status {})" status)
+          (destroy-shader (addr shader))
+          (destroy-shader (addr skinned-shader))
+          (gl/delete-textures 1 (addr cube))
+          (gl/delete-renderbuffers 1 (addr depth-rbo))
+          (gl/delete-framebuffers 1 (addr fbo))
+          (return (zero PointShadowMap))))
+
+      (PointShadowMap {:fbo fbo :cube cube :depth-rbo depth-rbo :shader shader
+                        :skinned-shader skinned-shader :size size :valid true}))))
+
+(fn destroy-point-shadow-map [ps PointShadowMap*] void
+  (destroy-shader (& ps shader))
+  (destroy-shader (& ps skinned-shader))
+  (when (. ps cube) (gl/delete-textures 1 (& ps cube)))
+  (when (. ps depth-rbo) (gl/delete-renderbuffers 1 (& ps depth-rbo)))
+  (when (. ps fbo) (gl/delete-framebuffers 1 (& ps fbo)))
+  (mem-zero ps (sizeof PointShadowMap)))
+
+;; This face's full 90-degree-FOV (a cube face covers exactly a quarter
+;; turn) view-projection from `light-pos` -- `point-shadow-far` (below)
+;; both here and as point-shadow-factor's own falloff-independent world-
+;; distance cutoff doesn't need to be precise, just comfortably past
+;; light.3b's own light-radius-max (editor.3b), past which a point light
+;; contributes nothing anyway. math.3b's cubemap-face-dir/cubemap-face-up
+;; are the shared (view-direction, up) basis every cube-face renderer or
+;; sampler in this project uses -- not shadow-specific despite living
+;; here originally, see their own comment.
+(val point-shadow-near f32 0.05)
+(val point-shadow-far  f32 40.0)
+
+(fn point-shadow-face-view-proj [light-pos Vec3 face i32] Mat4
+  (let [dir (cubemap-face-dir face)
+        up (cubemap-face-up face)
+        proj (make-perspective-mat4 (radians 90.0) 1.0 point-shadow-near point-shadow-far)
+        view (make-look-at-mat4 light-pos (add-vec3 light-pos dir) up)]
+    (mul-mat4 proj view)))

@@ -1,0 +1,61 @@
+(package orbiter)
+
+;; A minimal hot-reloadable gameplay script -- proof that scene.3b's
+;; Thing/ControllerKind/Scripted mechanism (see scene.3b's own top-of-
+;; file note) actually works end-to-end: this Thing has no model of its
+;; own (added via add-scripted-thing, main.3b), and every frame's motion
+;; comes entirely from THIS file calling back into scene.3b's generic
+;; thing/get + thing/set host callbacks (registered once at startup,
+;; scene.3b's register-thing-callbacks) -- edit orbit-radius/orbit-speed
+;; below while the game is running and vm/poll-reload (main.3b, if wired
+;; to poll) picks it up with no restart, same as hotreload-demo/
+;; fireball.3bs.
+(private (extern (fn thing/get [h u64] u32)))
+(private (extern (fn thing/set [h u64 bits u32] void)))
+
+;; Packs (idx field) into the single u64 thing/get/thing/set can carry --
+;; scene.3b's own thing-get-field/thing-set-field decode this identically
+;; (its own top-of-file comment on why get/set are down to just these two
+;; names now, and why this packing has to be copied here rather than
+;; shared). Only the field ids THIS script actually uses need copying,
+;; not scene.3b's whole thing-field-* list.
+(val field-offset-x  u32 0u32)
+(val field-offset-z  u32 2u32)
+(val field-anim-time u32 5u32)
+(fn thing-handle [idx u64 field u32] u64
+  (bit-or (bit-shl idx 8u64) (cast u64 field)))
+
+;; Same raw bit-pattern reinterpret trick scene.3b's f32-to-bits/bits-to-
+;; f32 use -- this boundary is integer-only (Direct-mode host imports,
+;; see script_native.h), so both sides have to agree on this convention
+;; independently; each side keeps its own copy since a script and its
+;; host are separately compiled.
+(fn f32-to-bits [v f32] u32
+  (deref (cast u32* (addr v))))
+(fn bits-to-f32 [b u32] f32
+  (deref (cast f32* (addr b))))
+
+;; `sin`/`cos` now work here too -- checker.c's generic libm-builtin Call
+;; handling was previously native-codegen-only; bcgen.c (the bytecode VM
+;; this script actually compiles through) gained real BcOp_Sin/BcOp_Cos
+;; opcodes (bytecode.h/bcvm.c) specifically so a script like this one
+;; could do real trig, not just arithmetic worked around without it.
+(val orbit-radius f32 2.0)
+(val orbit-speed  f32 1.2) ; radians/sec
+
+;; Called every frame as (self dt-bits) -- see scene.3b's update-scene.
+;; Orbits around world-origin X/Z at whatever Y this Thing was placed at
+;; -- Y is simply never touched here, unlike before this generic thing/
+;; get+thing/set API existed, when even an unrelated-axis setter
+;; (thing/set-offset) demanded all of x/y/z every call, forcing a
+;; read-back of Y just to pass it through unchanged. `anim-time`
+;; (field-anim-time) IS this Thing's own orbit-phase clock -- the same
+;; field pose-hand-wiggle/pose-clip would use for animation, repurposed
+;; here since this Thing has no model to pose.
+(fn on-update [self i64 dt-bits i64] void
+  (let [idx (cast u64 self)
+        dt  (bits-to-f32 (cast u32 dt-bits))
+        t   (+ (bits-to-f32 (thing/get (thing-handle idx field-anim-time))) (* dt orbit-speed))]
+    (thing/set (thing-handle idx field-anim-time) (f32-to-bits t))
+    (thing/set (thing-handle idx field-offset-x) (f32-to-bits (* orbit-radius (cos t))))
+    (thing/set (thing-handle idx field-offset-z) (f32-to-bits (* orbit-radius (sin t))))))

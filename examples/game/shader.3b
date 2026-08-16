@@ -1,0 +1,120 @@
+(package game)
+
+(import gl)
+(import os)
+
+(struct Shader
+  [name      string
+   program   u32
+   vert-path string
+   frag-path string
+   valid     bool])
+
+(enum AttribKind
+  [Float])
+
+(struct AttribDesc
+  [location   u32
+   count      u32
+   kind       AttribKind
+   stride     u32
+   offset     u32])
+
+(fn make-shader
+  [arena     arena
+   name      string
+   vert-path string
+   frag-path string] Shader
+  (let [shader (zero Shader)]
+    (scratch [t]
+      (let [vert-src (cstring (os/read-file t vert-path))
+            frag-src (cstring (os/read-file t frag-path))]
+        (when (not (load-shader-src (addr shader) vert-src frag-src))
+          (println "[shader] failed to load"))))
+    (set (. shader vert-path) vert-path)
+    (set (. shader frag-path) frag-path)
+    (set (. shader name) name)
+    shader))
+
+(fn load-shader-src
+  [shader    Shader*
+   vert-src  (const char*)
+   frag-src  (const char*)] bool
+  (let [vert (compile-shader gl/VERTEX_SHADER vert-src)
+        frag (compile-shader gl/FRAGMENT_SHADER frag-src)]
+    (when (or (not vert) (not frag))
+      (when vert (gl/delete-shader vert))
+      (when frag (gl/delete-shader frag))
+      (return false))
+    (let [program (link-shader vert frag)]
+      (gl/delete-shader vert)
+      (gl/delete-shader frag)
+      (when (not program) (return false))
+      (when (. shader program) (gl/delete-program (. shader program)))
+      (set (. shader program) program)
+      (set (. shader valid) true))))
+
+(fn compile-shader [type u32 src (const char*)] u32
+  (let [id (gl/create-shader type)]
+    (gl/shader-source id 1 (cast char** (addr src)) nil)
+    (gl/compile-shader id)
+    (let [compile-ok 0]
+      (gl/get-shaderiv id gl/COMPILE_STATUS (addr compile-ok))
+      (when (not compile-ok)
+        (println "[shader] failed to compile shader")
+        (gl/delete-shader id)
+        (return 0u32)))
+    id))
+
+(fn link-shader [vert u32 frag u32] u32
+  (let [id (gl/create-program)]
+    (gl/attach-shader id vert)
+    (gl/attach-shader id frag)
+    (gl/link-program id)
+
+    (let [link-ok 0]
+      (gl/get-programiv id gl/LINK_STATUS (addr link-ok))
+      (when (not link-ok)
+        (println "[shader] failed to link shader")
+        (gl/delete-program id)
+        (return 0u32)))
+    id))
+
+(fn destroy-shader [shader Shader*] void
+  (let [program (. shader program)]
+    (when program (gl/delete-program program)))
+  (mem-zero shader (sizeof Shader)))
+
+(fn bind-shader   [shader Shader*] void (gl/use-program (. shader program)))
+(fn unbind-shader [shader Shader*] void (gl/use-program 0u32))
+
+(fn set-i32 [shader Shader* name (const char*) v i32] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0) (gl/uniform1i loc v))))
+
+(fn set-f32 [shader Shader* name (const char*) v f32] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0) (gl/uniform1f loc v))))
+
+(fn set-vec2 [shader Shader* name (const char*) v Vec2] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0) (gl/uniform2f loc (. v x) (. v y)))))
+
+(fn set-vec3 [shader Shader* name (const char*) v Vec3] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0) (gl/uniform3f loc (. v x) (. v y) (. v z)))))
+
+(fn set-vec4 [shader Shader* name (const char*) v Vec4] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0) (gl/uniform4f loc (. v x) (. v y) (. v z) (. v w)))))
+
+(fn set-mat4 [shader Shader* name (const char*) m Mat4] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0) (gl/uniform-matrix4fv loc 1 false (. m v)))))
+
+(fn set-tex [shader Shader* name (const char*) tex-id u32 slot u32] void
+  (let [loc (gl/get-uniform-location (. shader program) name)]
+    (when (>= loc 0)
+      (gl/active-texture (+ (cast u32 gl/TEXTURE0) slot))
+      (gl/bind-texture gl/TEXTURE_2D tex-id)
+      (gl/uniform1i loc (cast i32 slot)))))

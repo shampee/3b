@@ -1,0 +1,36 @@
+;; A minimal end-to-end demo of vm.3b (see native_pkgs/vm/vm.3b): a
+;; NATIVELY-COMPILED 3b program that loads a `.3bs` gameplay script, calls
+;; a function in it, and hot-reloads it after an on-disk edit -- all
+;; through script_native.h/.c (part of liblib3b.a, auto-linked in by
+;; build.c since this project imports `vm` -- see that file's own note).
+(package hotreload-demo)
+(import vm)
+(import os)
+
+(fn main [] i32
+  (var engine any (vm/create))
+  (var ok bool true)
+
+  (let [[loaded handle] (vm/load engine "fireball.3bs")]
+    (if (not loaded)
+      (void (set ok false))
+      (do
+        (let [[has-value value] (vm/call1 engine handle "on-cast" 7i64)]
+          (println "on-cast(7) = {} (has-value={}, expect 21/true)" value has-value)
+          (when (not (and has-value (= value 21i64))) (set ok false)))
+
+        (let [reloaded (vm/poll-reload engine handle)]
+          (println "poll-reload with no edit -> {} (expect false)" reloaded)
+          (when reloaded (set ok false)))
+
+        (println "sleeping 3s -- edit fireball.3bs now to test hot-reload...")
+        (os/sleep 3u32)
+
+        (let [reloaded (vm/poll-reload engine handle)]
+          (println "poll-reload after external edit -> {} (expect true)" reloaded))
+
+        (let [[has-value value] (vm/call1 engine handle "on-cast" 7i64)]
+          (println "on-cast(7) = {} (has-value={}) -- SAME handle, after reload" value has-value)))))
+
+  (vm/destroy engine)
+  (if ok 0 1))

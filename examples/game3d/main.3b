@@ -1,0 +1,412 @@
+(package game3d)
+(import sdl)
+(import gl)
+(import vm)
+
+;; Two glTF models and a few brushes (two ramps, one box platform, plus
+;; whatever sphere props/lights you add live) on a ground slab, under one
+;; directional "sun" and a few coloured point lights (freely spawnable/
+;; movable/deletable in edit mode -- L to add one, see editor.3b's own
+;; header comment), plus a sun shadow map (shadow.3b). scene.3b owns the
+;; mechanism (a model instance's fit/pose/movement/draw, and each
+;; brush's own terrain-height); everything here is this demo's own
+;; content -- which paths to load, this scene's particular light
+;; choreography, the brushes' placement, and the two models' own
+;; placement/motion:
+;;   RiggedFigure.gltf  a skinned character posed WITHOUT sampling a clip --
+;;                      its bind pose with one joint hand-wiggled on top
+;;                      (pose-hand-wiggle); stands in place
+;;                      (controller-idle). The file does carry an animation
+;;                      of its own; this demo deliberately ignores it, so
+;;                      that skinning-deforms-the-mesh is shown separately
+;;                      from clip playback below
+;;   CesiumMan.gltf     the same, one stage further on: a real walk-cycle
+;;                      clip, sampled and looped (pose-clip), and player-
+;;                      controlled (controller-player): WASD/arrows walk it
+;;                      around, camera-relative, and the camera follows it
+;;
+;;   wasd / arrows     walk (edit mode: move selected brush / cursor -- or,
+;;                     while holding mouse2 over the Perspective pane, fly
+;;                     the camera instead, see editor.3b's own comment)
+;;   hold mouse2       free-look / orbit the camera
+;;   click/drag mouse1 edit mode: pick/select the brush under the cursor;
+;;                     dragging a face resizes it, dragging one of the
+;;                     selection's RGB gizmo arms moves it along just
+;;                     that axis (editor.3b's own header comment)
+;;   drag mouse3       edit mode: pan whichever ortho pane (Top/Front/
+;;                     Side) is hovered
+;;   wheel             zoom
+;;   space             pause
+;;   tab               wireframe
+;;   f1                toggle editor mode -- freezes the world and switches
+;;                     to a 4-pane Perspective/Top/Front/Side view (the 3
+;;                     ortho panes draw a world-space reference grid); see
+;;                     editor.3b's own header comment for its controls
+;;                     (q/e raise-lower, z/x rotate, b/r/h/o new box/ramp/
+;;                     hole/sphere, l new point light, [/] cycle selection
+;;                     (brushes then lights), delete/backspace remove,
+;;                     g toggle grid snapping, t toggle cast-shadow on the
+;;                     selected light (or the sun, nothing/a brush
+;;                     selected), v toggle the selected light (or the
+;;                     sun) on/off, ,/. shrink/grow the selected light's
+;;                     radius, u cycle the selected brush's texture
+;;                     (none/checker/brick/dots), f5/f9 save/load the
+;;                     level -- brushes+lights+camera+ambient+sun
+;;                     (level.3b's default-level-path), k toggle the sky
+;;                     between its live gradient and a baked cubemap
+;;                     snapshot of it (either mode, not editor-only),
+;;                     y open/close the texture picker panel (click a
+;;                     swatch to set the selected brush's texture), n
+;;                     open/close the color picker, m open/close the
+;;                     light-properties panel (type/intensity/radius/
+;;                     cone/shadow/enabled -- or the sun's intensity plus
+;;                     scene.lights.ambient with nothing selected); a
+;;                     selected Spot light is aimed with z/x (yaw its
+;;                     beam through the X-Y plane) same as a brush's own
+;;                     z/x rotate; p open/close the model browser (every
+;;                     .gltf/.glb file in this directory -- click one to
+;;                     place it at the cursor as a new, selected prop);
+;;                     a selected prop moves/rotates/deletes exactly like
+;;                     a brush (gizmo drag, z/x, delete) and resizes with
+;;                     a single uniform scale (drag any face) instead of
+;;                     per-axis half-extents
+;;   escape            quit
+
+(private
+  (val point-light-count u32 3u32)
+  (val point-light-orbit-radius f32 3.2)
+  (val point-light-height f32 1.6)
+  (val ground-half Vec3 (Vec3 {:x 12.0 :y 0.25 :z 12.0}))
+  (val model-path string "RiggedFigure.gltf")
+
+  ;; Stage 3: a REAL animation clip, sampled instead of hand-wiggled.
+  ;; CesiumMan.gltf is a Khronos glTF sample asset (CC-BY, see
+  ;; LICENSE-cesium.md) with one real walk-cycle clip, fetched
+  ;; specifically to have real keyframe data to build stage 3 against.
+  (val cesium-path string "CesiumMan.gltf")
+
+  ;; Stage-2 proof that skinning actually deforms the mesh, kept
+  ;; deliberately independent of stage 3: rather than sampling a clip,
+  ;; this joint's bind-pose local rotation gets a hand-driven sine wiggle
+  ;; added on top every frame (scene.3b's pose-hand-wiggle). RiggedFigure
+  ;; DOES ship an animation -- pose-hand-wiggle simply never looks at it,
+  ;; which is the point: the deformation you see here comes from the skin
+  ;; matrices alone.
+  ;;
+  ;; 9 is `arm_joint_L_3`, the far end of the left arm, so the wiggle
+  ;; swings a whole limb and is obvious on screen. This asset names its
+  ;; joints, so the index came from skin.3b's load-skeleton println
+  ;; (which dumps each joint's name and bind-pose Y) reading straight
+  ;; across to a name, rather than having to be guessed from position.
+  (val wiggle-joint i32 9)
+
+  (val light-colors [Vec3 3]
+    [(Vec3 {:x 1.0 :y 0.35 :z 0.2})    ; warm
+     (Vec3 {:x 0.25 :y 0.5 :z 1.0})    ; cool
+     (Vec3 {:x 0.4 :y 1.0 :z 0.45})])  ; green
+
+  ;; The three starting point lights sit around a shared circle at
+  ;; different phases, so they light the box's faces from different
+  ;; angles -- a fixed initial layout, NOT a live per-frame animation:
+  ;; this used to re-derive every light's position from `scene.time`
+  ;; and rebuild the whole `lights.points` array from scratch every
+  ;; single frame, which is fundamentally incompatible with the editor
+  ;; being able to add/move/delete individual lights in that same
+  ;; fixed-4-slot array -- any editor edit would've been silently
+  ;; overwritten the very next frame. Called ONCE at startup now (main,
+  ;; below), same as every other piece of this demo's starting content
+  ;; (add-box-brush/add-ramp-brush/etc) -- after that, editor.3b's own
+  ;; editor-spawn-light/editor-delete-selected/WASD-move own these
+  ;; lights exactly like it owns brushes.
+  (fn seed-lights [lights Lights*] void
+    (for [i 0u32 point-light-count]
+      (let [phase (* (cast f32 i) (/ 6.28318548 (cast f32 point-light-count)))
+            pos (vec3 (* point-light-orbit-radius (cos phase))
+                      point-light-height
+                      (* point-light-orbit-radius (sin phase)))]
+        ;; No shadow map exists for point lights yet -- cast-shadow false
+        ;; (editor.3b's `T` CAN still flip this per-light, it just won't
+        ;; visibly do anything until a real point-light shadow pass
+        ;; exists -- see light.3b's own cast-shadow comment).
+        (add-point-light lights (point-light pos (nth light-colors i) 6.0 9.0 false))))))
+
+(fn main [argc i32 argv string*] i32
+  (let [renderer (make-renderer "3b -- glTF model" 1280 720)]
+    (when (not (. renderer initialized)) (return 1))
+
+    (let [scene (make-scene
+                  (make-camera (vec3 0.0 0.6 0.0) 7.0)
+                  ground-half
+                  (material (vec3 0.16 0.17 0.2) 8.0 0.05)
+                  (vec3 0.08 0.08 0.08)
+                  (vec3 0.05 0.055 0.07)
+                  (dir-light (normalize-vec3 (vec3 -0.4 1.0 0.35))
+                             (vec3 1.0 0.97 0.9) 0.9 true))
+          ;; Groundwork for menus/error messages (text.3b) -- baked once
+          ;; here, same "load at startup, arena owns it" convention every
+          ;; other asset (add-model/add-*-brush) already uses. 20px is
+          ;; plenty readable for the FPS counter below and any near-term
+          ;; HUD/menu text; nothing stops a LATER caller baking a second,
+          ;; bigger Font for e.g. a title screen.
+          font (load-font (. renderer asset-arena) "DejaVuSans.ttf" 20.0)
+          input (zero Input)
+          event (zero sdl/Event)
+          script-engine (vm/create)]
+      (when (not (. font valid))
+        (println "main: text.3b's DejaVuSans.ttf failed to load -- the FPS counter/any future UI text won't render"))
+
+      ;; g-active-scene backs the thing-get-*/thing-set-* host callbacks
+      ;; below (scene.3b) -- must be set before any Scripted Thing's
+      ;; script runs, and before register-thing-callbacks so a script
+      ;; loaded even on the very first frame can already call back in.
+      (set g-active-scene (addr scene))
+      (register-thing-callbacks script-engine)
+
+      ;; assets.3b's own watch-texture -- scene.texture-dots was already
+      ;; loaded (unwatched) by make-scene itself, which has no arena of
+      ;; its own to register a watch with; a real one (renderer.asset-
+      ;; arena) is in scope here instead. See that fn's own comment.
+      (watch-texture (. renderer asset-arena) "dots.png" (. scene texture-dots))
+
+      ;; A pure-logic Thing (no model -- add-scripted-thing's own
+      ;; comment) proving ControllerKind/Scripted actually works end to
+      ;; end: every frame's motion comes entirely from orbiter.3bs
+      ;; calling BACK into the thing/get-*/thing/set-* host callbacks
+      ;; above, not from any native code here. Edit orbiter.3bs's
+      ;; orbit-radius/orbit-speed while this is running -- the loop
+      ;; below polls for exactly this (assets.3b's watch-script/
+      ;; poll-asset-reloads, throttled via reload-poll-timer) and picks
+      ;; it up with no restart.
+      (let [[loaded orbiter-index] (add-scripted-thing (addr scene) (. renderer asset-arena)
+                                      (vec3 0.0 1.5 0.0) 0.0 script-engine "orbiter.3bs" "on-update")]
+        (when (not loaded) (println "orbiter.3bs failed to load -- see stderr")))
+
+      ;; Authored Z-up in its raw vertex data, exactly like CesiumMan below
+      ;; (both carry a `Z_UP` root node that the loader doesn't apply, so
+      ;; the fit matrix is what compensates -- see model-fit-matrix): a
+      ;; quarter turn about X brings +Z to +Y. Stands in place -- joint 9's
+      ;; own wiggle is motion enough. collision-radius 0.4 (roughly its
+      ;; shoulder width at target-height 2.2) so the player can't walk
+      ;; through it.
+      (add-model (addr scene) (. renderer asset-arena) model-path
+        (make-rotate-mat4 (vec3 1.0 0.0 0.0) (- (/ tau 4.0))) 2.2
+        (material (vec3 1.0 1.0 1.0) 32.0 0.15)
+        (vec3 0.0 0.0 0.0) wiggle-joint 0.4 pose-hand-wiggle controller-idle)
+
+      ;; CesiumMan's raw vertex data is authored Z-up (height runs along
+      ;; +Z, not +Y) -- a quarter turn about X brings +Z to +Y. Player-
+      ;; controlled (controller-player): walks its real walk cycle when
+      ;; WASD/arrows are held, holds its last pose when they're not, and
+      ;; can't walk through the RiggedFigure above or off the ground slab
+      ;; (collision-radius 0.35, controller-player's own
+      ;; resolve-collisions/clamp-to-ground).
+      (add-model (addr scene) (. renderer asset-arena) cesium-path
+        (make-rotate-mat4 (vec3 1.0 0.0 0.0) (- (/ tau 4.0))) 1.8
+        (material (vec3 1.0 1.0 1.0) 32.0 0.15)
+        (vec3 -4.5 0.0 0.0) -1 0.35 pose-clip controller-player)
+      ;; A gentle ramp (1.3 world units of rise over a 5-unit run, about
+      ;; 15 degrees) off to the side of both characters' starting spots --
+      ;; terrain-height (scene.3b) is what actually makes controller-
+      ;; player's Y follow it while walking up/down.
+      (add-ramp-brush (addr scene) (. renderer asset-arena) 1.5 2.5 1.3
+        (material (vec3 0.22 0.2 0.18) 6.0 0.05) 0u32
+        (vec3 4.5 0.0 3.0) 0.0)
+
+      ;; A second, steeper ramp facing the opposite way -- proof scene.3b
+      ;; actually supports more than one (add-ramp-brush's own comment).
+      (add-ramp-brush (addr scene) (. renderer asset-arena) 1.0 2.0 1.8
+        (material (vec3 0.2 0.18 0.22) 6.0 0.05) 0u32
+        (vec3 0.0 0.0 -6.0) (/ tau 2.0))
+
+      ;; A flat-topped box brush -- the OTHER BrushKind, proof terrain-
+      ;; height treats it uniformly with the ramps above (walk up onto it
+      ;; from any side and it's solid, same player-max-step wall check).
+      ;; Textured (scene.texture-checker) rather than flat-colour -- proof
+      ;; draw-textured-model's pipeline works on a procedurally-generated
+      ;; brush mesh, not just a loaded glTF model (see texture.3b's own
+      ;; make-checker-texture comment).
+      (add-box-brush (addr scene) (. renderer asset-arena) 1.2 0.4 1.2
+        (material (vec3 1.0 1.0 1.0) 6.0 0.05) (. scene texture-checker)
+        (vec3 -3.0 0.0 4.0) 0.0)
+
+      (seed-lights (& scene lights))
+
+      (var editor EditorState (make-editor))
+      ;; assets.3b's own poll-asset-reloads comment: throttled, not every
+      ;; frame -- ticks on real wall-clock dt (renderer.dt), not the
+      ;; possibly-zeroed `dt` below, so a script/texture/model edit still
+      ;; picks up even while paused or in editor mode.
+      (var reload-poll-timer f32 0.0)
+
+      (while (not (. input quit))
+        (input-begin-frame (addr input))
+        (while (sdl/poll-event (addr event))
+          (input-handle-event (addr input) (addr event)))
+        ;; edit-mode routes orbit/zoom through whichever of the 4 panes is
+        ;; hovered (editor.3b's apply-input-editor) instead of always the
+        ;; perspective camera -- Play mode's single fullscreen view keeps
+        ;; using plain apply-input, unchanged.
+        (if (. input edit-mode)
+          (apply-input-editor (addr input) (addr scene) (addr editor) (. renderer width) (. renderer height))
+          (apply-input (addr input) (& scene camera)))
+
+        ;; Space AND editor mode both pause everything time-based: every
+        ;; scene object's own controller/animation clock (dt = 0 freezes
+        ;; controller-player's movement and every pose function's
+        ;; sampling alike). Editor mode additionally skips update-scene
+        ;; entirely rather than just zeroing its dt -- controller-player
+        ;; would otherwise still overwrite camera.target every frame from
+        ;; the player's (frozen) position, fighting update-editor's own
+        ;; target-follows-selection below.
+        (let [editing (. input edit-mode)
+              dt (if (or (. input paused) editing) 0.0 (. renderer dt))]
+          (+= (. scene time) dt)
+          (if editing
+            (update-editor (addr editor) (addr scene) (. renderer asset-arena) (addr input) (. renderer dt)
+              (. renderer width) (. renderer height))
+            (update-scene (addr scene) (addr input) dt)))
+
+        (+= reload-poll-timer (. renderer dt))
+        (when (>= reload-poll-timer 1.0)
+          (set reload-poll-timer 0.0)
+          (let [changed-models (poll-asset-reloads (. renderer asset-arena))]
+            (reload-changed-things (addr scene) (. renderer asset-arena) changed-models)))
+
+        ;; K: sky.3b's own toggle between the live per-frame gradient
+        ;; (scene.sky-cubemap 0, the default) and a real BAKED cubemap of
+        ;; that exact same gradient (renderer.3b's sky-horizon-color/
+        ;; sky-zenith-color -- the same constants draw-sky's own live
+        ;; path already uses) -- proof generate-skybox-gradient/clear-
+        ;; skybox and the shader's u_use_cubemap branch actually work,
+        ;; not just declared. Works in either Play or edit mode, unlike
+        ;; every brush/light key -- this is a renderer-wide setting, not
+        ;; scene content, so it doesn't go through editor.3b at all.
+        (when (. input toggle-skybox)
+          (if (= (. scene sky-cubemap) 0u32)
+            (generate-skybox-gradient (addr renderer) (addr scene) sky-horizon-color sky-zenith-color 256)
+            (clear-skybox (addr scene))))
+
+        (let [light-space (scene-light-space-matrix (addr scene))
+              ;; light.3b's find-shadow-point-lights -- up to 3 point/spot
+              ;; lights' shadows are live per frame (shadow.3b's own
+              ;; PointShadowMap header comment explains why 3, not one per
+              ;; light), so this is what picks which ones (`picks.count`
+              ;; may be 0) get the real cubemap renders below.
+              picks (find-shadow-point-lights (& scene lights))
+              ;; Only while editor.3b actually has an edit in progress on
+              ;; a BRUSH selection specifically (resize, gizmo-drag, WASD/
+              ;; arrow move, Q/E raise/lower, Z/X rotate -- editor.was-
+              ;; editing already tracks exactly this, see its own
+              ;; comment) -- never in Play mode, and never while a LIGHT
+              ;; is selected (editor.selected is an index into a
+              ;; DIFFERENT array then -- see EditorState.selected-kind's
+              ;; own comment -- so passing it through here unchanged
+              ;; could tell draw-scene to skip some unrelated BRUSH that
+              ;; just happens to share that same numeric index). A wall's
+              ;; hole-punch can go stale relative to a Hole that's
+              ;; mid-move just as easily as its own resize going stale,
+              ;; so this covers every edit uniformly, not just resize.
+              ghost-index (if (and (. input edit-mode) (. editor was-editing)
+                                   (= (. editor selected-kind) SelectedKind/Brush))
+                            (. editor selected) -1)]
+          ;; The shadow pass always renders filled, regardless of the
+          ;; wireframe toggle -- gaps between wireframe lines would let
+          ;; light leak through the depth map in ways that have nothing
+          ;; to do with what wireframe mode is actually for.
+          (gl/polygon-mode gl/FRONT_AND_BACK gl/FILL)
+          (begin-shadow-pass (addr renderer) light-space)
+          (draw-scene-depth (addr renderer) (addr scene) ghost-index)
+          (end-shadow-pass (addr renderer))
+
+          ;; Six-face cubemap render per shadow slot, skipped entirely
+          ;; when `picks.count` is 0 (cheap: the common case -- every
+          ;; editor-spawned point light starts with cast-shadow off, see
+          ;; main.3b's own seed-lights) unless find-shadow-point-lights
+          ;; above actually found some.
+          (for [slot 0 (. picks count)]
+            (let [pick (nth (. picks items) slot)]
+              (for [face 0 6]
+                (void (begin-point-shadow-face (addr renderer) slot (. pick pos) face))
+                (draw-scene-point-shadow (addr renderer) slot (addr scene) ghost-index))
+              (end-point-shadow-pass (addr renderer))))
+
+          (gl/polygon-mode gl/FRONT_AND_BACK (if (. input wireframe) gl/LINE gl/FILL))
+          ;; Play mode: today's single fullscreen perspective view,
+          ;; unchanged. Edit mode: 4 panes (Perspective/Top/Front/Side,
+          ;; editor.3b's pane-viewport-rect/pane-view-proj/pane-eye), one
+          ;; whole-window clear up front (begin-frame-clear) then each
+          ;; pane's own gl/viewport sub-rect + view-proj (renderer.3b's
+          ;; viewport-frame-uniforms) -- draw-scene/draw-editor-gizmo are
+          ;; both already camera-agnostic, so the SAME calls that draw the
+          ;; single Play-mode view just run once per pane here.
+          (if (. input edit-mode)
+            (do
+              (begin-frame-clear (addr renderer) (vec3 0.02 0.025 0.035))
+              (for [pane 0 4]
+                (let [[x y w h] (pane-viewport-rect (. renderer width) (. renderer height) pane)
+                      view-proj (pane-view-proj (addr editor) (addr scene) pane w h)
+                      eye (pane-eye (addr editor) (addr scene) pane)]
+                  (viewport-frame-uniforms (addr renderer) x y w h view-proj eye (& scene lights) light-space
+                    picks)
+                  ;; Sky only for the Perspective pane -- see draw-sky's
+                  ;; own comment for why an orthographic pane has nothing
+                  ;; for this technique to draw.
+                  (when (= pane 0) (draw-sky (addr renderer) (addr scene) w h))
+                  (draw-scene (addr renderer) (addr scene) ghost-index)
+                  (let [[pane-forward pane-right pane-up] (pane-camera-basis (addr editor) (addr scene) pane)]
+                    (draw-scene-billboards (addr renderer) (addr scene) view-proj pane-right pane-up))
+                  (draw-editor-grid (addr renderer) (addr scene) (addr editor) (addr input) pane)
+                  (draw-editor-gizmo (addr renderer) (addr scene) (addr editor)))))
+            (do
+              (begin-frame (addr renderer) (& scene camera) (& scene lights) (vec3 0.02 0.025 0.035) light-space
+                picks)
+              (draw-sky (addr renderer) (addr scene) (. renderer width) (. renderer height))
+              (draw-scene (addr renderer) (addr scene) ghost-index)
+              (let [[cam-forward cam-right cam-up] (camera-basis (& scene camera))
+                    view-proj (camera-view-proj (& scene camera) (. renderer width) (. renderer height))]
+                (draw-scene-billboards (addr renderer) (addr scene) view-proj cam-right cam-up))))
+
+          ;; A live FPS + memory counter -- proof text.3b's font-atlas/
+          ;; draw-text pipeline actually works end to end (a fresh string
+          ;; baked into quads EVERY frame, not a static label), and useful
+          ;; groundwork in its own right for whatever HUD/menu/error text
+          ;; comes next. MEM is meminfo.3b's process-rss-mb -- CURRENT
+          ;; resident memory, not a lifetime peak, so it should visibly
+          ;; move if a scene ever grows/shrinks its own asset-arena usage.
+          ;; gl/viewport reset to the FULL window first: edit mode's pane
+          ;; loop just above left it at whichever quarter-rect pane 3 (Side)
+          ;; used last, and text.3b's begin-ui doesn't touch viewport
+          ;; itself (it only owns depth/cull/blend state) -- without this,
+          ;; the text would draw squeezed into that last pane's own rect
+          ;; instead of the whole screen.
+          (gl/viewport 0 0 (. renderer width) (. renderer height))
+          (scratch [t]
+            (draw-text (addr renderer) (addr font)
+              (str t "FPS: " (cast i32 (round (/ 1.0 (max (. renderer dt) 0.0001))))
+                   "  MEM: " (cast i32 (round (process-rss-mb))) " MB")
+              10.0 (+ 10.0 (. font ascent)) (vec4 1.0 1.0 1.0 1.0)))
+
+          ;; ui.3b panels -- full-window screen-space overlays, drawn
+          ;; once here (not per-pane, unlike draw-scene/draw-scene-
+          ;; billboards above) for the same reason the FPS counter just
+          ;; above already resets gl/viewport first: they'd otherwise
+          ;; draw squeezed into whichever pane's quarter-rect the edit-
+          ;; mode loop left bound. Edit-mode only -- they act on brush/
+          ;; light selection, which Play mode doesn't have.
+          (when (. input edit-mode)
+            (draw-texture-picker (addr renderer) (addr scene) (addr editor) (addr input)
+              (. renderer width) (. renderer height))
+            (draw-color-picker (addr renderer) (addr scene) (addr editor) (addr input) (addr font)
+              (. renderer width) (. renderer height))
+            (draw-light-panel (addr renderer) (addr scene) (addr editor) (addr input) (addr font)
+              (. renderer width) (. renderer height))
+            (draw-model-browser (addr renderer) (addr scene) (addr editor) (addr input) (addr font)
+              (. renderer asset-arena) (. renderer width) (. renderer height)))
+
+          (end-frame (addr renderer))))
+
+      (vm/destroy script-engine)
+      (destroy-scene (addr scene)))
+
+    (destroy-renderer (addr renderer)))
+  0)

@@ -1,0 +1,32 @@
+---
+BasedOnStyle: GNU
+AlignConsecutiveAssignments:
+  Enabled: true
+  PadOperators: true
+AlignConsecutiveBitFields:
+  Enabled: true
+AlignConsecutiveDeclarations:
+  Enabled: true
+AlignConsecutiveMacros:
+  Enabled: true
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AlignCaseArrows: true
+  AlignCaseColons: true
+AlignConsecutiveTableGenBreakingDAGArgColons:
+  Enabled: true
+AlignConsecutiveTableGenCondOperatorColons:
+  Enabled: true
+AlignConsecutiveTableGenDefinitionColons:
+  Enabled: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeBraces: Attach
+ColumnLimit: 100
+ContinuationIndentWidth: 2
+BracedInitializerIndentWidth: 2
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatementsExceptControlMacros

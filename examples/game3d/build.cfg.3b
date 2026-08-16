@@ -1,0 +1,48 @@
+(binary "game3d")
+
+;; Single-TU implementations of the four vendored single-header C
+;; libraries, plus GLAD's extern shim and meminfo.c (this demo's own tiny
+;; /proc/self/statm reader, see meminfo.3b) -- hand-written C that `3b
+;; build` can't discover on its own. glad/, stbimg/, and stbtt/ are
+;; symlinks to the copies in examples/game/, as are the gl/ and sdl/
+;; binding packages: they're `3b translate` output, identical for both
+;; demos, and there's no reason to carry a second copy in the tree.
+;; gltf/ (cgltf) and meminfo.c are this demo's own.
+(c-sources ["glad/glad_impl.c" "glad/glad_shim.c" "stbimg/stbimg_impl.c" "stbtt/stbtt_impl.c" "gltf/cgltf_impl.c" "meminfo.c"])
+
+(pkg-config ["sdl3"])
+(libs ["GL" "pthread"])
+
+;; `-include` shims the generated binding packages' .c files need before
+;; compiling -- turns out to be needed for EVERY `private extern` binding
+;; package, not just ones with an opaque type to pre-declare: `3b build`
+;; never emits a prototype for a `private extern`'d function into the
+;; generated .c/.h at all (only stbimg/sdl/gl/gltf's OWN wrapper functions
+;; that CALL it), so without a real declaration in scope via `-include`,
+;; the C compiler falls back to an implicit (K&R-style) declaration. For a
+;; function with a `float` parameter that is a real correctness bug: an
+;; implicitly-declared call's arguments get the usual "no prototype in
+;; scope" default promotions applied (float -> double), silently
+;; corrupting whatever bits actually reach the REAL function's `float`
+;; parameter. Caught live: stbtt's own `pixel_height` arrived as
+;; effectively garbage/~0, making stb_truetype's internal scale collapse
+;; to 0 and every baked glyph come out a degenerate zero-size box. Fixed
+;; by pointing stbtt at its own trimmed stb_truetype_baked.h (real
+;; declarations, not 3b's own emission) the same way stbimg points at the
+;; real stb_image.h.
+;;
+;; It took that long to find because C only warns. `3b build` now compiles
+;; every generated package with `-Werror=implicit-function-declaration`,
+;; so the same mistake fails the build and names the function instead.
+;; `game3d` itself needs an entry too, not just the imported binding
+;; packages -- meminfo.3b's `(private (extern (fn game3d_process_rss_bytes
+;; ...)))` lives in THIS project's own package, compiled straight into
+;; output/game3d.c, so it's just as subject to the missing-prototype gap
+;; above as any imported binding's own generated .c would be.
+(include-first
+  sdl     ["SDL3/SDL.h"]
+  gl      ["glad/gl.h" "glad/glad_shim.h"]
+  stbimg  ["stbimg/stb_image.h"]
+  stbtt   ["stbtt/stb_truetype_baked.h"]
+  gltf    ["gltf/cgltf.h"]
+  game3d  ["meminfo.h"])

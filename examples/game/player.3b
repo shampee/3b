@@ -1,0 +1,72 @@
+(package game)
+
+(private
+  (val player-walk-speed f32 60.0)
+  (val player-run-speed  f32 140.0))
+
+(struct Player
+  [pos    Vec2
+   facing f32     ; +1.0 = facing right, -1.0 = facing left -- drives draw-anim's flip-x
+   anims  CharacterAnims
+   anim   AnimPlayer])
+
+(fn make-player [anims CharacterAnims pos Vec2] Player
+  (Player pos 1.0 anims (play-anim (. anims idling))))
+
+;; Switches to `clip` only if it isn't already playing -- calling `play-anim`
+;; every frame regardless would reset frame/elapsed to 0 constantly, which
+;; looks like the animation never advances. Clips are compared by their
+;; `frames` pointer (each `make-row-clip` call gets its own arena block, so
+;; this is a reliable identity check) since AnimClip itself isn't a
+;; comparable struct type.
+(fn animate-player [player Player* clip AnimClip] void
+  (let [{frames} clip
+        {:frames current-frames} (. player anim clip)]
+    (when (!= current-frames frames)
+      (set (. player anim) (play-anim clip)))))
+
+(fn player-attacking? [player Player*] bool
+  (let [{:anim {:clip {:frames current}}
+         :anims {:sword-sweep {:frames sweep-frames}
+                 :sweep-end   {:frames sweep-end-frames}}} (deref player)]
+    (or (= current sweep-frames) (= current sweep-end-frames))))
+
+;; Jump/fall aren't wired to real vertical motion yet -- there's no
+;; gravity or ground collision in the renderer to hang them off of, so
+;; `input.jump` isn't consumed here at all yet. Attack and movement are
+;; real: sword-sweep locks out movement until it (and its sweep-end
+;; follow-through) finishes, same one-shot-chain pattern as before, just
+;; now actually driven by input instead of only described in a comment.
+(fn update-player [player Player* input Input* dt f32] void
+  (let [{idling walking sword-sweep sweep-end running} (. player anims)
+        {move-left move-right :run run-held :attack attack-held} (deref input)]
+
+    (when (player-attacking? player)
+      (let [{:clip {:frames current} playing} (. player anim)]
+        (when (not playing)
+          (if (= current (. sword-sweep frames))
+            (void (animate-player player sweep-end))
+            (void (animate-player player idling)))))
+      (anim-advance (& player anim) dt)
+      (return))
+
+    (when attack-held
+      (animate-player player sword-sweep)
+      (anim-advance (& player anim) dt)
+      (return))
+
+    (let [dir 0.0]
+      (when move-left  (set dir (- dir 1.0)))
+      (when move-right (set dir (+ dir 1.0)))
+      (if (!= dir 0.0)
+        (void
+          (let [speed (if run-held player-run-speed player-walk-speed)]
+            (set (. player facing) (if (> dir 0.0) 1.0 -1.0))
+            (+= (. player pos x) (* dir speed dt))
+            (animate-player player (if run-held running walking))))
+        (void (animate-player player idling))))
+    (anim-advance (& player anim) dt)))
+
+(fn draw-player [renderer Renderer* player Player*] void
+  (let [{:anims {sheet} anim pos facing} (deref player)]
+    (draw-anim renderer sheet anim pos (< facing 0.0) (rgba8 255u8 255u8 255u8 255u8))))

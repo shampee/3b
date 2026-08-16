@@ -1,0 +1,12 @@
+(package creatures)
+
+(fn main [argc i32 argv string*] i32
+  (let [orc (Creature CreatureKind/Orc (make-apartment) 100 20)]
+    (-> orc addr
+      (creature-set-health 80)
+      creature-heal
+      creature-heal)
+    (print "{}\n" (. orc health))
+    (print "{}\n" (. orc mana)))
+
+  0)

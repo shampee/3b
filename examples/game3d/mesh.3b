@@ -1,0 +1,445 @@
+(package game3d)
+(import gl)
+
+;; Position + normal + UV, interleaved. The generated box meshes don't
+;; really need the UV, but glTF models do, and one vertex layout for both
+;; means one shader and one attribute setup rather than two of each.
+(struct Vertex3D
+  [pos    Vec3
+   normal Vec3
+   uv     Vec2])
+
+(struct Mesh
+  [vao         u32
+   vbo         u32
+   ibo         u32
+   index-count u32])
+
+(handle Mesh)
+
+(fn make-mesh
+  [vertices     (const Vertex3D*)
+   vertex-count u32
+   indices      (const u32*)
+   index-count  u32] Mesh^
+  (let [handle (handle-alloc Mesh)
+        mesh   (handle-deref handle)]
+    (when (not mesh)
+      (println "make-mesh: mesh pool is full")
+      (return handle))
+    (mem-zero mesh (sizeof Mesh))
+    (set (. mesh index-count) index-count)
+
+    (gl/gen-vertex-arrays 1 (& mesh vao))
+    (gl/gen-buffers 1 (& mesh vbo))
+    (gl/gen-buffers 1 (& mesh ibo))
+    (gl/bind-vertex-array (. mesh vao))
+
+    (gl/bind-buffer gl/ARRAY_BUFFER (. mesh vbo))
+    (gl/buffer-data gl/ARRAY_BUFFER
+      (cast i64 (* (sizeof Vertex3D u32) vertex-count)) (cast any vertices) gl/STATIC_DRAW)
+
+    (gl/bind-buffer gl/ELEMENT_ARRAY_BUFFER (. mesh ibo))
+    (gl/buffer-data gl/ELEMENT_ARRAY_BUFFER
+      (cast i64 (* (sizeof u32 u32) index-count)) (cast any indices) gl/STATIC_DRAW)
+
+    (gl/enable-vertex-attrib-array 0u32)
+    (gl/vertex-attrib-pointer
+      0u32 3i32 gl/FLOAT false (cast i32 (sizeof Vertex3D)) (cast any (member-offset Vertex3D pos)))
+    (gl/enable-vertex-attrib-array 1u32)
+    (gl/vertex-attrib-pointer
+      1u32 3i32 gl/FLOAT false (cast i32 (sizeof Vertex3D)) (cast any (member-offset Vertex3D normal)))
+    (gl/enable-vertex-attrib-array 2u32)
+    (gl/vertex-attrib-pointer
+      2u32 2i32 gl/FLOAT false (cast i32 (sizeof Vertex3D)) (cast any (member-offset Vertex3D uv)))
+
+    (gl/bind-vertex-array 0u32)
+    handle))
+
+(fn destroy-mesh [handle Mesh^] void
+  (let [mesh (handle-deref handle)]
+    (when (not mesh) (return))
+    (when (. mesh vao) (gl/delete-vertex-arrays 1 (& mesh vao)))
+    (when (. mesh vbo) (gl/delete-buffers 1 (& mesh vbo)))
+    (when (. mesh ibo) (gl/delete-buffers 1 (& mesh ibo)))
+    (mem-zero mesh (sizeof Mesh))
+    (handle-free handle)))
+
+(fn draw-mesh [handle Mesh^] void
+  (let [mesh (handle-deref handle)]
+    (when (not mesh) (return))
+    (gl/bind-vertex-array (. mesh vao))
+    (gl/draw-elements gl/TRIANGLES (cast i32 (. mesh index-count)) gl/UNSIGNED_INT (cast any nil))
+    (gl/bind-vertex-array 0u32)))
+
+;; An axis-aligned box centred on the origin, `half` being its half-extent
+;; on each axis. 24 vertices rather than 8: every face needs its own flat
+;; normal, so no corner can be shared between faces.
+;;
+;; Each face is built from its normal `n` plus a chosen tangent `t`, with
+;; the bitangent falling out as `(cross n t)`. Emitting the four corners
+;; in -t-b, +t-b, +t+b, -t+b order then winds every face counter-clockwise
+;; as seen from outside the box, which is what the backface culling in
+;; renderer.3b expects.
+(fn make-box-mesh [half Vec3] Mesh^
+  (val normals [Vec3 6]
+    [(vec3  1.0  0.0  0.0) (vec3 -1.0  0.0  0.0)
+     (vec3  0.0  1.0  0.0) (vec3  0.0 -1.0  0.0)
+     (vec3  0.0  0.0  1.0) (vec3  0.0  0.0 -1.0)])
+  (val tangents [Vec3 6]
+    [(vec3  0.0  0.0 -1.0) (vec3  0.0  0.0  1.0)
+     (vec3  1.0  0.0  0.0) (vec3  1.0  0.0  0.0)
+     (vec3  1.0  0.0  0.0) (vec3 -1.0  0.0  0.0)])
+  (var vertices [Vertex3D 24])
+  (var indices  [u32 36])
+
+  (for [f 0u32 6u32]
+    (let [n (nth normals f)
+          t (nth tangents f)
+          b (cross-vec3 n t)
+          v (* f 4u32)
+          i (* f 6u32)]
+      (set (nth vertices (+ v 0u32)) (Vertex3D (mul-vec3 half (sub-vec3 (sub-vec3 n t) b)) n (vec2 0.0 0.0)))
+      (set (nth vertices (+ v 1u32)) (Vertex3D (mul-vec3 half (sub-vec3 (add-vec3 n t) b)) n (vec2 1.0 0.0)))
+      (set (nth vertices (+ v 2u32)) (Vertex3D (mul-vec3 half (add-vec3 (add-vec3 n t) b)) n (vec2 1.0 1.0)))
+      (set (nth vertices (+ v 3u32)) (Vertex3D (mul-vec3 half (add-vec3 (sub-vec3 n t) b)) n (vec2 0.0 1.0)))
+      (set (nth indices (+ i 0u32)) (+ v 0u32))
+      (set (nth indices (+ i 1u32)) (+ v 1u32))
+      (set (nth indices (+ i 2u32)) (+ v 2u32))
+      (set (nth indices (+ i 3u32)) (+ v 0u32))
+      (set (nth indices (+ i 4u32)) (+ v 2u32))
+      (set (nth indices (+ i 5u32)) (+ v 3u32))))
+
+  (make-mesh vertices 24u32 indices 36u32))
+
+(fn make-cube-mesh [] Mesh^ (make-box-mesh (vec3 0.5 0.5 0.5)))
+
+;; A wedge: a right-triangular prism, `half-x` wide, flat at y=0 from
+;; z=-half-z out to z=+half-z at the LOW end, rising in a straight line to
+;; y=`height` at the HIGH end (z=+half-z) -- so something walking from
+;; -z to +z across it climbs smoothly from 0 to `height`. See scene.3b's
+;; add-ramp-brush/terrain-height for how a Thing actually walks up one.
+;;
+;; 5 faces (bottom/back/slope are quads, the two z-x end caps are
+;; triangles), each with its own flat vertex normals like make-box-mesh
+;; above. Unlike make-box-mesh's 6-way-symmetric loop, a wedge has no
+;; such symmetry, so each face's vertex order is written out directly --
+;; every one was worked out by hand (cross of its first two edges must
+;; match its outward normal) to wind CCW as seen from outside, same
+;; requirement make-box-mesh's tangent/bitangent trick satisfies
+;; automatically.
+(fn make-ramp-mesh [half-x f32 half-z f32 height f32] Mesh^
+  (let [a (vec3 (- half-x) 0.0 (- half-z))  ; low,  left
+        b (vec3    half-x  0.0 (- half-z))  ; low,  right
+        c (vec3    half-x  0.0    half-z)   ; high, right, bottom
+        d (vec3 (- half-x) 0.0    half-z)   ; high, left,  bottom
+        e (vec3    half-x  height half-z)   ; high, right, top
+        f (vec3 (- half-x) height half-z)   ; high, left,  top
+        n-bottom (vec3 0.0 -1.0 0.0)
+        n-back   (vec3 0.0 0.0 1.0)
+        n-left   (vec3 -1.0 0.0 0.0)
+        n-right  (vec3 1.0 0.0 0.0)
+        n-slope  (normalize-vec3 (vec3 0.0 (* 2.0 half-z) (- height)))]
+    (var vertices [Vertex3D 18])
+    (var indices  [u32 24])
+
+    ;; Bottom (a b c d)
+    (set (nth vertices 0u32) (Vertex3D a n-bottom (vec2 0.0 0.0)))
+    (set (nth vertices 1u32) (Vertex3D b n-bottom (vec2 1.0 0.0)))
+    (set (nth vertices 2u32) (Vertex3D c n-bottom (vec2 1.0 1.0)))
+    (set (nth vertices 3u32) (Vertex3D d n-bottom (vec2 0.0 1.0)))
+    ;; Back, vertical wall at the high end (d c e f)
+    (set (nth vertices 4u32) (Vertex3D d n-back (vec2 0.0 0.0)))
+    (set (nth vertices 5u32) (Vertex3D c n-back (vec2 1.0 0.0)))
+    (set (nth vertices 6u32) (Vertex3D e n-back (vec2 1.0 1.0)))
+    (set (nth vertices 7u32) (Vertex3D f n-back (vec2 0.0 1.0)))
+    ;; Left end cap, triangle (a d f)
+    (set (nth vertices 8u32)  (Vertex3D a n-left (vec2 0.0 0.0)))
+    (set (nth vertices 9u32)  (Vertex3D d n-left (vec2 1.0 0.0)))
+    (set (nth vertices 10u32) (Vertex3D f n-left (vec2 1.0 1.0)))
+    ;; Right end cap, triangle (b e c)
+    (set (nth vertices 11u32) (Vertex3D b n-right (vec2 0.0 0.0)))
+    (set (nth vertices 12u32) (Vertex3D e n-right (vec2 1.0 0.0)))
+    (set (nth vertices 13u32) (Vertex3D c n-right (vec2 1.0 1.0)))
+    ;; Slope (a f e b)
+    (set (nth vertices 14u32) (Vertex3D a n-slope (vec2 0.0 0.0)))
+    (set (nth vertices 15u32) (Vertex3D f n-slope (vec2 0.0 1.0)))
+    (set (nth vertices 16u32) (Vertex3D e n-slope (vec2 1.0 1.0)))
+    (set (nth vertices 17u32) (Vertex3D b n-slope (vec2 1.0 0.0)))
+
+    (val quad-tris [u32 6] [0u32 1u32 2u32 0u32 2u32 3u32])
+    (for [i 0u32 6u32] (set (nth indices i) (nth quad-tris i)))              ; bottom: 0-3
+    (for [i 0u32 6u32] (set (nth indices (+ i 6u32)) (+ 4u32 (nth quad-tris i)))) ; back: 4-7
+    (set (nth indices 12u32) 8u32)  (set (nth indices 13u32) 9u32)  (set (nth indices 14u32) 10u32)  ; left
+    (set (nth indices 15u32) 11u32) (set (nth indices 16u32) 12u32) (set (nth indices 17u32) 13u32)  ; right
+    (for [i 0u32 6u32] (set (nth indices (+ i 18u32)) (+ 14u32 (nth quad-tris i)))) ; slope: 14-17
+
+    (make-mesh vertices 18u32 indices 24u32)))
+
+;; A UV sphere: `sphere-lat-segments` rings from the south pole (y=-radius)
+;; to the north pole (y=+radius), `sphere-lon-segments` columns wrapping
+;; all the way around. Vertex(i,j)'s position is already unit-length
+;; before scaling by `radius` -- for a sphere, the outward normal at any
+;; point is just its own direction from the centre, so `pos`/`radius` IS
+;; `normal`, no separate normal computation needed the way the flat-faced
+;; box/ramp meshes require.
+;;
+;; Winding: increasing `j` (theta) moves along the surface in the local
+;; "right" direction as seen from OUTSIDE at that point, and increasing
+;; `i` (phi) moves "up", for every (i,j) on this parameterization (not
+;; just verified at one spot -- follows from the derivatives d(pos)/dtheta
+;; and d(pos)/dphi always matching the camera-relative right/up basis at
+;; that point, checked by hand at two different points on the sphere
+;; before trusting it everywhere). So a quad's two triangles, in terms of
+;; corner indices a=(i,j) b=(i,j+1) c=(i+1,j) d=(i+1,j+1), are (a b d) and
+;; (a d c) -- same "a,b,d / a,d,c" shape regardless of WHERE on the sphere
+;; the quad sits, unlike make-ramp-mesh's hand-worked-out-per-face winding.
+(val sphere-lat-segments u32 10u32)
+(val sphere-lon-segments u32 16u32)
+;; Kept in sync with sphere-lat/lon-segments by hand -- 3b array-type sizes
+;; must be literal, so these can't just be computed from the segment
+;; counts above. (lat+1)*(lon+1) vertices (one full grid, poles included
+;; as degenerate rings rather than special-cased single points -- simpler
+;; code, a few redundant pole vertices is a non-issue), lat*lon*6 indices
+;; (2 triangles per quad cell).
+(val sphere-vertex-count u32 187u32) ; (10+1)*(16+1)
+(val sphere-index-count  u32 960u32) ; 10*16*6
+
+(fn make-sphere-mesh [radius f32] Mesh^
+  (var vertices [Vertex3D 187])
+  (var indices  [u32 960])
+  (let [pi 3.14159265]
+    (for [i 0u32 (+ sphere-lat-segments 1u32)]
+      (let [phi (+ (- (/ pi 2.0)) (* (cast f32 i) (/ pi (cast f32 sphere-lat-segments))))
+            cp (cos phi) sp (sin phi)]
+        (for [j 0u32 (+ sphere-lon-segments 1u32)]
+          (let [theta (* (cast f32 j) (/ (* 2.0 pi) (cast f32 sphere-lon-segments)))
+                ct (cos theta) st (sin theta)
+                dir (vec3 (* st cp) sp (* ct cp))
+                idx (+ (* i (+ sphere-lon-segments 1u32)) j)
+                u (/ (cast f32 j) (cast f32 sphere-lon-segments))
+                v (/ (cast f32 i) (cast f32 sphere-lat-segments))]
+            (set (nth vertices idx) (Vertex3D (scale-vec3 dir radius) dir (vec2 u v)))))))
+
+    (var k u32 0u32)
+    (for [i 0u32 sphere-lat-segments]
+      (for [j 0u32 sphere-lon-segments]
+        (let [a (+ (* i (+ sphere-lon-segments 1u32)) j)
+              b (+ a 1u32)
+              c (+ a (+ sphere-lon-segments 1u32))
+              d (+ c 1u32)]
+          (set (nth indices (+ k 0u32)) a)
+          (set (nth indices (+ k 1u32)) b)
+          (set (nth indices (+ k 2u32)) d)
+          (set (nth indices (+ k 3u32)) a)
+          (set (nth indices (+ k 4u32)) d)
+          (set (nth indices (+ k 5u32)) c)
+          (+= k 6u32))))
+
+    (make-mesh vertices sphere-vertex-count indices sphere-index-count)))
+
+;; ~~ Box-with-holes: doorways/windows punched straight through a wall.
+;; See scene.3b's rebuild-all-wall-meshes for how a wall's overlapping
+;; Hole brushes turn into the `holes` this takes.
+
+;; A single rectangular opening on a pierced face, in that face's own 2D
+;; in-plane frame -- `a`/`b` are whichever two of local X/Y/Z aren't
+;; `axis` (make-box-mesh-holes' own `axis` parameter), same naming
+;; axis-point below uses.
+(struct HoleRect [min-a f32 max-a f32 min-b f32 max-b f32])
+
+;; The one place axis 0 (pierce local X) and axis 2 (pierce local Z) --
+;; the only two BrushKind/Hole ever punches through, see its own comment
+;; -- differ: how a (through, in-plane-a, in-plane-b) triple maps to an
+;; actual (x, y, z) point. Axis 0: X is through, Y/Z are in-plane. Axis 2:
+;; Z is through, X/Y are in-plane. Every other function below builds
+;; geometry purely in (t, a, b) terms and calls this once per point, so
+;; the rest of make-box-mesh-holes never special-cases axis at all.
+(fn axis-point [axis i32 t f32 a f32 b f32] Vec3
+  (if (= axis 0) (vec3 t a b) (vec3 a b t)))
+
+;; True if (a, b) falls inside any of `holes` -- make-box-mesh-holes only
+;; ever samples a cell's CENTRE (never an edge), so there's no boundary-
+;; inclusivity ambiguity to worry about here.
+(fn point-in-any-hole [a f32 b f32 holes [HoleRect]] bool
+  (for [h holes]
+    (when (and (>= a (. h min-a)) (<= a (. h max-a)) (>= b (. h min-b)) (<= b (. h max-b)))
+      (return true)))
+  false)
+
+;; Inserts `v` into `cuts`, keeping it sorted ascending, skipping a near-
+;; duplicate already present (within a small epsilon -- two holes sharing
+;; an edge would otherwise produce a degenerate, near-zero-width cell).
+;; `cuts` is always tiny (a wall's own two outer bounds plus a handful of
+;; hole edges), so a plain O(n) insertion is simpler than a real sort.
+;; `[f32]` parameters are passed by reference (see 3b-vector-param-
+;; mutation-gotcha project memory / codegen.c's cg_declare_param), so
+;; `vector-push` here grows the CALLER's own Vector directly -- no return
+;; value needed, callers just call this for its side effect.
+(fn insert-cut [cuts [f32] arena arena v f32] void
+  (for [c cuts] (when (< (abs (- c v)) 0.0001) (return)))
+  (vector-push arena cuts v)
+  (var i u64 (- (len cuts) 1u64))
+  (while (and (> i 0u64) (> (nth cuts (- i 1u64)) (nth cuts i)))
+    (let [tmp (nth cuts i)]
+      (set (nth cuts i) (nth cuts (- i 1u64)))
+      (set (nth cuts (- i 1u64)) tmp))
+    (-- i)))
+
+;; Appends one CCW (as seen from the `n` side) quad, `p0 p1 p2 p3` already
+;; in winding order -- shared by every face/tunnel-wall builder below
+;; instead of each hand-rolling its own vertex+index push, same UV corner
+;; convention (0,0)-(1,0)-(1,1)-(0,1) make-box-mesh/make-ramp-mesh use.
+;; Each Vertex3D is bound to a local first, NOT constructed inline in the
+;; vector-push call -- vector-push/dyn-push is a C preprocessor MACRO
+;; (bbb_dyn_push), and the C preprocessor's macro-argument scanner (unlike
+;; real C parsing) doesn't treat `{...}` as nesting the way `(...)` does,
+;; so a multi-field struct literal's own top-level commas get misread as
+;; extra macro arguments if it's written directly inside the call.
+(fn push-quad [vertices [Vertex3D] indices [u32] arena arena
+               p0 Vec3 p1 Vec3 p2 Vec3 p3 Vec3 n Vec3] void
+  (let [base (cast u32 (len vertices))
+        v0 (Vertex3D p0 n (vec2 0.0 0.0))
+        v1 (Vertex3D p1 n (vec2 1.0 0.0))
+        v2 (Vertex3D p2 n (vec2 1.0 1.0))
+        v3 (Vertex3D p3 n (vec2 0.0 1.0))]
+    (vector-push arena vertices v0)
+    (vector-push arena vertices v1)
+    (vector-push arena vertices v2)
+    (vector-push arena vertices v3)
+    (vector-push arena indices (+ base 0u32))
+    (vector-push arena indices (+ base 1u32))
+    (vector-push arena indices (+ base 2u32))
+    (vector-push arena indices (+ base 0u32))
+    (vector-push arena indices (+ base 2u32))
+    (vector-push arena indices (+ base 3u32))))
+
+;; One full, untouched box face -- exactly make-box-mesh's own per-face
+;; math (corners at half*(n+/-t+/-b), b = cross(n,t)), just emitting through
+;; push-quad instead of writing straight into a fixed-size array. Used for
+;; the 4 faces PARALLEL to make-box-mesh-holes' pierced axis, which a hole
+;; never touches.
+(fn push-box-face [vertices [Vertex3D] indices [u32] arena arena half Vec3 n Vec3 t Vec3] void
+  (let [bt (cross-vec3 n t)]
+    (push-quad vertices indices arena
+      (mul-vec3 half (sub-vec3 (sub-vec3 n t) bt))
+      (mul-vec3 half (sub-vec3 (add-vec3 n t) bt))
+      (mul-vec3 half (add-vec3 (add-vec3 n t) bt))
+      (mul-vec3 half (add-vec3 (sub-vec3 n t) bt))
+      n)))
+
+;; A Box brush's mesh, with `holes` (each already in the pierced face's own
+;; 2D in-plane frame, see rebuild-all-wall-meshes) cut straight through it
+;; along local axis `axis` (0 = X, 2 = Z -- Y is never valid, see
+;; BrushKind/Brush's own comment). Empty `holes` is just make-box-mesh
+;; unchanged -- exact same mesh, zero regression for every ordinary wall.
+;;
+;; Otherwise: the 4 faces parallel to `axis` are untouched full quads
+;; (push-box-face). The 2 faces PERPENDICULAR to `axis` each become a
+;; rectangle-minus-rectangles cell grid: every hole's own edges plus the
+;; wall's own outer bounds become sorted cut-lines on each in-plane axis
+;; (insert-cut), forming a grid of cells; one quad is emitted per cell
+;; whose CENTRE isn't inside any hole (point-in-any-hole) -- this is the
+;; "picture frame" around the opening(s), and supports several non-
+;; overlapping holes on one face for free, since a solid cell just skips
+;; whichever ones happen to fall inside a hole. Then, per hole (looping
+;; `holes` directly, not the grid), 4 inward-facing "reveal" quads connect
+;; its front rectangle to its back rectangle across the wall's full
+;; thickness on `axis` -- this assumes holes on the same wall don't
+;; overlap each other: two overlapping Hole brushes would double up this
+;; interior tunnel geometry (visible z-fighting/overdraw, not a crash, but
+;; not something this function tries to detect or merge away).
+;;
+;; Every quad below is built in (t, a, b) terms and placed via axis-point,
+;; with each ordering separately worked out (cross-product-verified, not
+;; just eyeballed) so the emitted normal always points outward/into the
+;; hole cavity as appropriate -- see this fn's own git history/comments
+;; above for axis-point if the winding here ever needs re-deriving.
+(fn make-box-mesh-holes [half Vec3 axis i32 holes [HoleRect] arena arena] Mesh^
+  (when (= (len holes) 0u64) (return (make-box-mesh half)))
+
+  (var vertices [Vertex3D])
+  (var indices [u32])
+
+  (let [half-t (if (= axis 0) (. half x) (. half z))
+        half-a (if (= axis 0) (. half y) (. half x))
+        half-b (if (= axis 0) (. half z) (. half y))
+        t-unit (axis-point axis 1.0 0.0 0.0)
+        a-unit (axis-point axis 0.0 1.0 0.0)
+        b-unit (axis-point axis 0.0 0.0 1.0)]
+
+    ;; The 4 faces parallel to `axis` -- untouched. Normal/tangent pairs
+    ;; match make-box-mesh's own normals/tangents arrays exactly.
+    (if (= axis 0)
+      (do
+        (push-box-face vertices indices arena half (vec3 0.0 1.0 0.0) (vec3 1.0 0.0 0.0))
+        (push-box-face vertices indices arena half (vec3 0.0 -1.0 0.0) (vec3 1.0 0.0 0.0))
+        (push-box-face vertices indices arena half (vec3 0.0 0.0 1.0) (vec3 1.0 0.0 0.0))
+        (push-box-face vertices indices arena half (vec3 0.0 0.0 -1.0) (vec3 -1.0 0.0 0.0)))
+      (do
+        (push-box-face vertices indices arena half (vec3 1.0 0.0 0.0) (vec3 0.0 0.0 -1.0))
+        (push-box-face vertices indices arena half (vec3 -1.0 0.0 0.0) (vec3 0.0 0.0 1.0))
+        (push-box-face vertices indices arena half (vec3 0.0 1.0 0.0) (vec3 1.0 0.0 0.0))
+        (push-box-face vertices indices arena half (vec3 0.0 -1.0 0.0) (vec3 1.0 0.0 0.0))))
+
+    ;; The 2 pierced faces: a cut-line grid built from every hole's own
+    ;; edges plus the wall's own outer bounds.
+    (var cuts-a [f32])
+    (var cuts-b [f32])
+    (insert-cut cuts-a arena (- half-a))
+    (insert-cut cuts-a arena half-a)
+    (insert-cut cuts-b arena (- half-b))
+    (insert-cut cuts-b arena half-b)
+    (for [h holes]
+      (insert-cut cuts-a arena (. h min-a))
+      (insert-cut cuts-a arena (. h max-a))
+      (insert-cut cuts-b arena (. h min-b))
+      (insert-cut cuts-b arena (. h max-b)))
+
+    (for [ia 0u64 (- (len cuts-a) 1u64)]
+      (for [ib 0u64 (- (len cuts-b) 1u64)]
+        (let [amin (nth cuts-a ia) amax (nth cuts-a (+ ia 1u64))
+              bmin (nth cuts-b ib) bmax (nth cuts-b (+ ib 1u64))
+              mid-a (* 0.5 (+ amin amax)) mid-b (* 0.5 (+ bmin bmax))]
+          (when (not (point-in-any-hole mid-a mid-b holes))
+            (push-quad vertices indices arena
+              (axis-point axis half-t amin bmax) (axis-point axis half-t amin bmin)
+              (axis-point axis half-t amax bmin) (axis-point axis half-t amax bmax)
+              t-unit)
+            (push-quad vertices indices arena
+              (axis-point axis (- half-t) amin bmin) (axis-point axis (- half-t) amin bmax)
+              (axis-point axis (- half-t) amax bmax) (axis-point axis (- half-t) amax bmin)
+              (scale-vec3 t-unit -1.0))))))
+
+    ;; Per-hole reveal (tunnel) walls -- see this fn's own comment on the
+    ;; no-overlapping-holes assumption. Skipped on whichever side(s) ended
+    ;; up flush (or past) the wall's own bound on that axis -- gather-
+    ;; wall-holes now clamps rather than rejects a hole that reaches the
+    ;; wall's own edge (e.g. a door reaching the floor), and a flush side
+    ;; has nothing to reveal: the opening already continues out to the
+    ;; wall's true exterior face there, which is why NOT drawing a reveal
+    ;; wall in that spot avoids it z-fighting with that exterior face.
+    (for [h holes]
+      (when (> (. h min-a) (- (- half-a) 0.0001))
+        (push-quad vertices indices arena
+          (axis-point axis (- half-t) (. h min-a) (. h min-b)) (axis-point axis (- half-t) (. h min-a) (. h max-b))
+          (axis-point axis half-t (. h min-a) (. h max-b)) (axis-point axis half-t (. h min-a) (. h min-b))
+          a-unit))
+      (when (< (. h max-a) (- half-a 0.0001))
+        (push-quad vertices indices arena
+          (axis-point axis (- half-t) (. h max-a) (. h min-b)) (axis-point axis half-t (. h max-a) (. h min-b))
+          (axis-point axis half-t (. h max-a) (. h max-b)) (axis-point axis (- half-t) (. h max-a) (. h max-b))
+          (scale-vec3 a-unit -1.0)))
+      (when (> (. h min-b) (- (- half-b) 0.0001))
+        (push-quad vertices indices arena
+          (axis-point axis (- half-t) (. h min-a) (. h min-b)) (axis-point axis half-t (. h min-a) (. h min-b))
+          (axis-point axis half-t (. h max-a) (. h min-b)) (axis-point axis (- half-t) (. h max-a) (. h min-b))
+          b-unit))
+      (when (< (. h max-b) (- half-b 0.0001))
+        (push-quad vertices indices arena
+          (axis-point axis (- half-t) (. h min-a) (. h max-b)) (axis-point axis (- half-t) (. h max-a) (. h max-b))
+          (axis-point axis half-t (. h max-a) (. h max-b)) (axis-point axis half-t (. h min-a) (. h max-b))
+          (scale-vec3 b-unit -1.0))))
+
+    (make-mesh (addr (nth vertices 0u64)) (cast u32 (len vertices))
+               (addr (nth indices 0u64)) (cast u32 (len indices)))))

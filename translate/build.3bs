@@ -1,0 +1,43 @@
+(package build)
+
+;; The `build` module -- see the 3bscript-bytecode-vm-design project
+;; memory for the full design this is a first slice of. A `.3bs` script
+;; gets this via `(import build)`; the `.3bs` driver (script.c) compiles
+;; this file as its OWN, separate BcProgram (a real cross-package
+;; bytecode import, not a textual splice into the importing script's own
+;; compile unit) -- a script calls into it via a QUALIFIED name, e.g.
+;; `(build/getenv "PATH")`, matching native 3b's own package-import
+;; syntax. Whoever runs the script (currently: `run_script_cmd` in
+;; main.c) is responsible for registering the host imports `(import os)`
+;; below resolves against -- bc_register_os_primitives (bcosprims.c) is
+;; the whole set right now.
+;;
+;; `(import os)` is the GENERIC OS-facing primitives (bcosprims.c) -- not
+;; translate-specific, reusable by any `.3bs` script that imports `os`
+;; itself directly, and identical to what a natively-compiled `.3b`
+;; package gets from `(import os)` (native_pkgs/os/os.3b). `os` is a
+;; NATIVE pseudo-module (script.c splices its signatures directly from
+;; bcosprims.h's own table -- no `.3bs` source of its own, unlike
+;; `build`/`config`), so this import can't fail to compile the way a real
+;; module import could. The wrapper functions here just give the four this
+;; module cares about its own `?`-suffix naming convention; still thin
+;; passthroughs for now -- validation, looping, and platform dispatch (the
+;; actual motivating pkg-config-on-Windows use case) are later work once
+;; real config semantics get built on top of this.
+(import os)
+
+;; getenv/exec-capture take a leading `arena`, threaded straight through:
+;; both allocate the string they hand back, and everything in this
+;; language that does takes the arena to allocate it IN rather than
+;; picking one itself. `os/getenv` used to be the exception on this
+;; backend only, which made it the one `os` verb a script couldn't share
+;; with natively-compiled code.
+(fn getenv [arena arena name string] string (os/getenv arena name))
+(fn exec-capture [arena arena cmd string] string (os/exec-capture arena cmd))
+(fn file-exists? [path string] bool (os/file-exists path))
+(fn dir-exists? [path string] bool (os/dir-exists path))
+
+(fn greeting [] string "hello from the build module")
+
+(fn double-if-positive [n i32] i32
+  (if (> n 0) (* n 2) n))

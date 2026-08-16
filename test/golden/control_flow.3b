@@ -1,0 +1,88 @@
+;; `if` used as a VALUE (a GNU statement expression), `while`, a range `for`,
+;; and the three jumps -- `break`, `continue` and `return` -- including the
+;; ones that leave a `scratch` block, whose arena rewind has to be emitted
+;; ahead of the jump rather than jumped over.
+(package golden)
+
+(fn sign [n i32] i32
+  (if (< n 0) -1 (if (> n 0) 1 0)))
+
+(fn count-down [n i32] i32
+  (var acc i32 0)
+  (while (> n 0)
+    (set acc (+ acc n))
+    (set n (- n 1)))
+  acc)
+
+(fn sum-to [n i32] i32
+  (var total i32 0)
+  (for [i 0 n]
+    (set total (+ total (sign i))))
+  total)
+
+(fn first-even [n i32] i32
+  (var found i32 -1)
+  (for [i 1 n]
+    (when (= (% i 2) 1) (continue))
+    (set found i)
+    (break))
+  found)
+
+;; `break` as one arm of a VALUED `if` -- cg_if_branch has to append a typed
+;; throwaway value, or the C ternary's two arms disagree.
+(fn sum-until [n i32] i32
+  (var total i32 0)
+  (for [i 0 n]
+    (+= total (if (> i 2) (break) i)))
+  total)
+
+;; Two things at once: the captured result temp must NOT be declared when the
+;; body diverges, and the `break` has to end the ArenaTemp on its way out.
+(fn break-out-of-scratch [n i32] i32
+  (var seen i32 0)
+  (while true
+    (scratch [t]
+      (val buf u8* (push t u8 8))
+      (set seen (+ seen 1))
+      (break)))
+  seen)
+
+;; The floor rule, and the reason `break` cannot just reuse `return`'s unwind:
+;; `outer` wraps the whole loop and is still live where the `break` lands,
+;; while `inner` is opened per iteration and must be given back. The emitted C
+;; must end `_3b_scratch_temp_1` ONLY -- ending `_3b_scratch_temp_0` too would
+;; rewind `acc` out from under the read below, and run that block's own
+;; end-of-scope rewind a second time.
+(fn break-inside-outer-scratch [n i32] i32
+  (scratch [outer]
+    (var acc i32* (push outer i32))
+    (set (deref acc) 0)
+    (while true
+      (scratch [inner]
+        (val buf u8* (push inner u8 8))
+        (set (deref acc) (+ (deref acc) n))
+        (break)))
+    (deref acc)))
+
+;; `return`, by contrast, leaves the function, so it ends BOTH ArenaTemps --
+;; innermost first, and after the returned value has been computed into
+;; `_3b_ret_value`. Named temps rather than one shared `_3b_scratch_temp` are
+;; what let the inner block name the outer one here.
+(fn return-out-of-scratch [n i32] i32
+  (scratch [outer]
+    (var a i32* (push outer i32))
+    (set (deref a) n)
+    (scratch [inner]
+      (var b i32* (push inner i32))
+      (set (deref b) (* (deref a) 2))
+      (return (deref b))))
+  0)
+
+(fn main [] i32
+  (+ (count-down 3)
+     (sum-to 4)
+     (first-even 5)
+     (sum-until 6)
+     (break-out-of-scratch 1)
+     (break-inside-outer-scratch 2)
+     (return-out-of-scratch 5)))

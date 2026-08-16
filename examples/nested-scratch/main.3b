@@ -1,0 +1,306 @@
+;; Tests that `(scratch [t] ...)` nests correctly: an OUTER scratch's
+;; already-allocated data must survive an INNER nested scratch opening,
+;; doing its own work, and closing -- exactly the "outer array fully built
+;; before the inner temp opens, still readable after it closes" safe
+;; pattern verified in the compiler's own internal arena-soundness audit,
+;; now checked for the user-facing `scratch` language feature itself.
+(package nested-scratch)
+
+(struct Counter [value i32])
+
+(fn two-level [] i32
+  (scratch [outer]
+    (let [c (push outer Counter)]
+      (set (. (deref c) value) 111)
+      ;; Inner scratch opens and closes ENTIRELY while `c` (allocated via
+      ;; `outer`, before this point) is still supposed to be valid.
+      (scratch [inner]
+        (let [tmp (push inner Counter)]
+          (set (. (deref tmp) value) 222)
+          ;; also write through `tmp` a few times, to grow `inner`'s own
+          ;; arena usage past a single allocation before it closes
+          (set (. (deref tmp) value) (+ (. (deref tmp) value) 1))))
+      ;; Back in `outer`'s scope -- `c` must still read 111, untouched by
+      ;; whatever `inner` did and however `inner`'s own pop rewound things.
+      (. (deref c) value))))
+
+(fn three-level [] i32
+  (scratch [t1]
+    (let [a (push t1 Counter)]
+      (set (. (deref a) value) 1)
+      (scratch [t2]
+        (let [b (push t2 Counter)]
+          (set (. (deref b) value) 2)
+          (scratch [t3]
+            (let [c (push t3 Counter)]
+              (set (. (deref c) value) 3)))
+          ;; back in t2 -- b must still read 2 after t3 closed
+          (when (not (= (. (deref b) value) 2)) (return -1))))
+      ;; back in t1 -- a must still read 1 after t2 (and the t3 nested
+      ;; inside it) both closed
+      (. (deref a) value))))
+
+;; Sequential (sibling, not nested) scratch blocks -- confirms repeated
+;; open/close cycles on the same underlying scratch arena don't leak state
+;; from one block into the next.
+(fn siblings [] i32
+  (var total i32 0)
+  (scratch [t]
+    (let [x (push t Counter)]
+      (set (. (deref x) value) 10)
+      (set total (+ total (. (deref x) value)))))
+  (scratch [t]
+    (let [y (push t Counter)]
+      (set (. (deref y) value) 20)
+      (set total (+ total (. (deref y) value)))))
+  total)
+
+;; A scratch block whose OWN return value is a plain value (not a pointer
+;; into the scratch arena) -- the one thing you're actually meant to carry
+;; out of a scratch block.
+(fn value-out [] i32
+  (+ 1 (scratch [t]
+    (let [c (push t Counter)]
+      (set (. (deref c) value) 41)
+      (. (deref c) value)))))
+
+;; -- Early exit out of a scratch block --
+;;
+;; `(return)`, `(break)` and `(continue)` from inside `scratch` jump past the
+;; block's own rewind unless codegen puts the cleanup in front of the jump. It
+;; used to not, on either backend, so the thread-local scratch arena stayed at
+;; its high-water mark until something unrelated reset it -- a silent leak that
+;; grew with every call. The functions below are checked by comparing `probe`
+;; before and after: same address back means the arena really did rewind.
+;;
+;; `break`/`continue` differ from `return` in HOW FAR they unwind: they leave
+;; the loop, not the function, so a `scratch` wrapping the whole loop is still
+;; live afterwards and must NOT be rewound. `break-keeps-outer` below is the
+;; case that catches getting that wrong -- it reads outer-arena memory after
+;; the loop, so an over-eager unwind shows up as a wrong answer, not a leak.
+
+;; The address of a fresh allocation in a fresh scratch scope. Read as a
+;; number, never dereferenced. If a previous scratch block failed to rewind,
+;; this comes back higher than it did before that block ran.
+(fn probe [] u64
+  (scratch [t] (cast u64 (push t u8 16))))
+
+;; One level: allocate, then leave through `return` rather than off the end.
+(fn early-return [] i32
+  (scratch [t]
+    (let [p (push t u8 4096)]
+      (return 0)))
+  0)
+
+;; Two levels: the return has to rewind BOTH, innermost first.
+(fn early-return-nested [] i32
+  (scratch [outer]
+    (let [a (push outer u8 4096)]
+      (scratch [inner]
+        (let [b (push inner u8 4096)]
+          (return 0)))))
+  0)
+
+;; The returned value is computed OUT of the scratch arena, so it has to be
+;; read before the rewind, not after.
+(fn early-return-value [] u8
+  (scratch [t]
+    (let [p (push0 t u8 64)]
+      (set (nth p 7) (cast u8 99))
+      (return (nth p 7))))
+  0)
+
+;; Bare `(return)` in a void fn. Its own wrinkle: a `scratch` body whose last
+;; statement is a `return` has no type, and codegen used to try to capture a
+;; value from it anyway.
+(fn early-return-void [] void
+  (scratch [t]
+    (let [p (push t u8 4096)]
+      (return))))
+
+;; `(break)` out of a scratch opened inside the loop.
+(fn early-break [] void
+  (while true
+    (scratch [t]
+      (let [p (push t u8 4096)]
+        (break)))))
+
+;; `(continue)` runs the leak several times over if it doesn't rewind, so this
+;; is the shape where a missed cleanup compounds fastest.
+(fn early-continue [] void
+  (for [i 0 8]
+    (scratch [t]
+      (let [p (push t u8 4096)]
+        (continue)))))
+
+;; The floor rule. `outer` wraps the loop and holds `total`, which is read
+;; AFTER the loop; `inner` is per-iteration and must be given back by the
+;; `break`. Rewinding `outer` here would hand back memory still in use, so a
+;; wrong answer -- not just a leak -- is what a bad floor produces.
+(fn break-keeps-outer [] i32
+  (scratch [outer]
+    (let [total (push0 outer i32)]
+      (for [i 1 5]
+        (scratch [inner]
+          (let [tmp (push inner i32)]
+            (set (deref tmp) i)
+            (set (deref total) (+ (deref total) (deref tmp)))
+            (when (= i 3) (break)))))
+      (deref total))))
+
+;; The floor rule seen from the other side. `break-keeps-outer` above puts the
+;; surviving scratch OUTSIDE the loop; here it is opened by the ENCLOSING
+;; loop's body and the jump is in an INNER loop, so the floor has to be the
+;; inner loop's, not the function's. `acc` is written through after the inner
+;; `break` lands, so unwinding too far corrupts a live allocation.
+(fn inner-break-keeps-body-scratch [] i32
+  (var total i32 0)
+  (for [i 0 4]
+    (scratch [t]
+      (let [acc (push0 t i32)]
+        (set (deref acc) 100)
+        (for [j 0 8]
+          (when (= j 2) (break))
+          (set (deref acc) (+ (deref acc) 1)))
+        (set (deref acc) (+ (deref acc) 1)) ;; through `acc` AFTER the break
+        (set total (+ total (deref acc))))))
+  total)
+
+;; Two SEQUENTIAL loops, each with its own scratch and its own `break`. The
+;; floor is per-loop state, so it has to be RESTORED when a loop ends and not
+;; merely set when one begins -- otherwise the second loop's `break` still
+;; carries the first's floor and stops unwinding short. Nested loops are the
+;; obvious case; sibling loops are the one that actually regressed.
+(fn sequential-loops [] i32
+  (var n i32 0)
+  (for [i 0 4]
+    (scratch [t]
+      (let [p (push t u8 4096)]
+        (set n (+ n 1))
+        (break))))
+  (for [i 0 4]
+    (scratch [t]
+      (let [p (push t u8 4096)]
+        (set n (+ n 10))
+        (break))))
+  n)
+
+;; One `break` leaving TWO scratch scopes at once: both are rewound, innermost
+;; first, which is what keeps each ArenaTemp balanced rather than just landing
+;; the arena on the right offset.
+(fn break-two-levels [] i32
+  (var n i32 0)
+  (while true
+    (scratch [a]
+      (let [pa (push a u8 4096)]
+        (scratch [b]
+          (let [pb (push b u8 4096)]
+            (set n 7)
+            (break))))))
+  n)
+
+;; `continue` out of a scratch inside a `for` over a collection. The range
+;; `for` above lands its `continue` on the counter's `+=`; a foreach lands on
+;; the index bump instead, so it is a separate path through the same rewind.
+(fn foreach-continue [a arena] i32
+  (var v [i32])
+  (for [i 1 5] (vector-push a v i))
+  (var n i32 0)
+  (for [x v]
+    (scratch [t]
+      (let [p (push t u8 4096)]
+        (set n (+ n x))
+        (continue))))
+  n)
+
+(fn main [] i32
+  (var ok bool true)
+  (val a arena (create))
+
+  (val r1 i32 (two-level))
+  (println "two-level = {} (expect 111)" r1)
+  (when (not (= r1 111)) (set ok false))
+
+  (val r2 i32 (three-level))
+  (println "three-level = {} (expect 1)" r2)
+  (when (not (= r2 1)) (set ok false))
+
+  (val r3 i32 (siblings))
+  (println "siblings = {} (expect 30)" r3)
+  (when (not (= r3 30)) (set ok false))
+
+  (val r4 i32 (value-out))
+  (println "value-out = {} (expect 42)" r4)
+  (when (not (= r4 42)) (set ok false))
+
+  ;; All four probes are taken BEFORE anything is printed: `println` is free
+  ;; to use the scratch arena itself, which would move the mark being
+  ;; compared and make these pass or fail for the wrong reason.
+  (val base u64 (probe))
+  (early-return)
+  (val after-return u64 (probe))
+  (early-return-nested)
+  (val after-nested u64 (probe))
+  (early-return-void)
+  (val after-void u64 (probe))
+  (early-break)
+  (val after-break u64 (probe))
+  (early-continue)
+  (val after-continue u64 (probe))
+  (val r5 u8 (early-return-value))
+  (val r6 i32 (break-keeps-outer))
+  (val r7 i32 (inner-break-keeps-body-scratch))
+  (val after-inner-break u64 (probe))
+  (val r8 i32 (sequential-loops))
+  (val after-sequential u64 (probe))
+  (val r9 i32 (break-two-levels))
+  (val after-two-levels u64 (probe))
+  (val r10 i32 (foreach-continue a))
+  (val after-foreach u64 (probe))
+
+  (println "early return rewound = {} (expect true)" (= base after-return))
+  (when (not (= base after-return)) (set ok false))
+
+  (println "early nested return rewound = {} (expect true)" (= base after-nested))
+  (when (not (= base after-nested)) (set ok false))
+
+  (println "early void return rewound = {} (expect true)" (= base after-void))
+  (when (not (= base after-void)) (set ok false))
+
+  (println "early break rewound = {} (expect true)" (= base after-break))
+  (when (not (= base after-break)) (set ok false))
+
+  (println "early continue rewound = {} (expect true)" (= base after-continue))
+  (when (not (= base after-continue)) (set ok false))
+
+  (println "early-return-value = {} (expect 99)" r5)
+  (when (not (= r5 (cast u8 99))) (set ok false))
+
+  ;; 1+2+3, the `break` firing on the third iteration -- and read out of the
+  ;; OUTER scratch after the loop, which only holds if `break` left it alone.
+  (println "break-keeps-outer = {} (expect 6)" r6)
+  (when (not (= r6 6)) (set ok false))
+
+  ;; 4 iterations of (100 + 2 + 1). A `break` that rewound past the inner
+  ;; loop's floor would hand `acc` back before the last two writes.
+  (println "inner-break-keeps-body-scratch = {} (expect 412)" r7)
+  (when (not (= r7 412)) (set ok false))
+  (println "inner break rewound = {} (expect true)" (= base after-inner-break))
+  (when (not (= base after-inner-break)) (set ok false))
+
+  (println "sequential-loops = {} (expect 11)" r8)
+  (when (not (= r8 11)) (set ok false))
+  (println "sequential loops rewound = {} (expect true)" (= base after-sequential))
+  (when (not (= base after-sequential)) (set ok false))
+
+  (println "break-two-levels = {} (expect 7)" r9)
+  (when (not (= r9 7)) (set ok false))
+  (println "two-level break rewound = {} (expect true)" (= base after-two-levels))
+  (when (not (= base after-two-levels)) (set ok false))
+
+  (println "foreach-continue = {} (expect 10)" r10)
+  (when (not (= r10 10)) (set ok false))
+  (println "foreach continue rewound = {} (expect true)" (= base after-foreach))
+  (when (not (= base after-foreach)) (set ok false))
+
+  (if ok 0 1))

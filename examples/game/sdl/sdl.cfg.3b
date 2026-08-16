@@ -1,0 +1,105 @@
+(package sdl)
+(headers
+  ["SDL3/SDL.h"
+   "SDL3/SDL_init.h"
+   "SDL3/SDL_video.h"
+   "SDL3/SDL_events.h"
+   "SDL3/SDL_keycode.h"
+   "SDL3/SDL_error.h"
+   "SDL3/SDL_timer.h"])
+
+(strip-const-prefix "SDL_")
+(strip-struct-prefix "SDL_")
+(strip-func-prefix "SDL_")
+
+;; glibc's size_t is `unsigned long`; 3b's u64 is `unsigned long long`. Same
+;; width, but a distinct C type, so `u64*` against SDL_GetWindowICCProfile's
+;; `size_t*` is a pointer-incompatibility warning. `pin-type` keeps u64 on the
+;; 3b side and emits `typedef size_t sdl_size_t;`, which is transparently the
+;; same type C wants. `type-map size_t u64` cannot do this -- it substitutes the
+;; primitive at the use site, which is exactly what loses the C name.
+;;
+;; intptr_t is the same story one level down, for SDL_EGLAttribArrayCallback:
+;; it returns `SDL_EGLAttrib*`, and SDL_EGLAttrib is a typedef of intptr_t.
+;; Pinning the <stdint.h> leaf is enough -- typedefs are transparent, so
+;; `typedef intptr_t sdl_intptr_t; typedef sdl_intptr_t sdl_EGLAttrib;` makes
+;; the emitted callback type match EGL's own.
+;;
+;; Uint64 is the same problem again, for SDL_NSTimerCallback -- but pinning the
+;; leaf is NOT enough there, because Uint64 has to stay out of `type-map` below
+;; for the pin to reach it at all, and dropping it means Uint64 is the name the
+;; binding has to resolve. So the entry pins Uint64 itself and names the leaf
+;; explicitly: the 3b side reads `Uint64`, the emitted C is `typedef uint64_t
+;; sdl_Uint64;`, and the header can see uint64_t even though it never sees SDL.
+;; This is why every `timestamp` field below reads Uint64 rather than u64 --
+;; transparently the same type, and only the callback actually needed it.
+(pin-type
+  [size_t   u64
+   intptr_t i64
+   Uint64   u64 "uint64_t"])
+
+(type-map
+  [Uint8  u8
+   Uint16 u16
+   Uint32 u32
+   Sint8  i8
+   Sint16 i16
+   Sint32 i32
+   Sint64 i64
+
+   SDL_KeyboardID          u32
+   SDL_MouseID             u32
+   SDL_MouseButtonFlags    u32
+   SDL_JoystickID          u32
+   SDL_PenID               u32
+   SDL_PenInputFlags       u32
+   SDL_SensorID            u32
+   SDL_CameraID            u32
+   SDL_AudioDeviceID       u32
+   SDL_TouchID             u64
+   SDL_FingerID            u64
+   SDL_PixelFormat         i32
+   SDL_Scancode            i32
+   SDL_MouseWheelDirection i32
+   SDL_PowerState          i32
+   SDL_PenAxis             i32])
+
+(rename-const-pattern "^ORIENTATION_(.*)$"          "{1:pascal}")
+(rename-const-pattern "^FLASH_(.*)$"                "{1:pascal}")
+(rename-const-pattern "^HITTEST_(.*)$"              "{1:pascal}")
+(rename-const-pattern "^EVENT_(.*)$"                "{1:pascal}")
+(rename-const-pattern "^APP_(.*)$"                  "{1:pascal}")
+(rename-const-pattern "^TEXTUREACCESS_(.*)$"        "{1:pascal}")
+(rename-const-pattern "^LOGICAL_PRESENTATION_(.*)$" "{1:pascal}")
+(rename-const
+  [GL_RED_SIZE                   RedSize
+   GL_GREEN_SIZE                 GreenSize
+   GL_BLUE_SIZE                  BlueSize
+   GL_ALPHA_SIZE                 AlphaSize
+   GL_BUFFER_SIZE                BufferSize
+   GL_DOUBLEBUFFER               Doublebuffer
+   GL_DEPTH_SIZE                 DepthSize
+   GL_STENCIL_SIZE               StencilSize
+   GL_ACCUM_RED_SIZE             AccumRedSize
+   GL_ACCUM_GREEN_SIZE           AccumGreenSize
+   GL_ACCUM_BLUE_SIZE            AccumBlueSize
+   GL_ACCUM_ALPHA_SIZE           AccumAlphaSize
+   GL_STEREO                     Stereo
+   GL_MULTISAMPLEBUFFERS         Multisamplebuffers
+   GL_MULTISAMPLESAMPLES         Multisamplesamples
+   GL_ACCELERATED_VISUAL         AcceleratedVisual
+   GL_RETAINED_BACKING           RetainedBacking
+   GL_CONTEXT_MAJOR_VERSION      ContextMajorVersion
+   GL_CONTEXT_MINOR_VERSION      ContextMinorVersion
+   GL_CONTEXT_FLAGS              ContextFlags
+   GL_CONTEXT_PROFILE_MASK       ContextProfileMask
+   GL_SHARE_WITH_CURRENT_CONTEXT ShareWithCurrentContext
+   GL_FRAMEBUFFER_SRGB_CAPABLE   FramebufferSrgbCapable
+   GL_CONTEXT_RELEASE_BEHAVIOR   ContextReleaseBehavior
+   GL_CONTEXT_RESET_NOTIFICATION ContextResetNotification
+   GL_CONTEXT_NO_ERROR           ContextNoError
+   GL_FLOATBUFFERS               Floatbuffers
+   GL_EGL_PLATFORM               EglPlatform
+   ADDEVENT                      Add
+   PEEKEVENT                     Peek
+   GETEVENT                      Get])

@@ -1,0 +1,1130 @@
+#+TITLE: Learn 3b in Y Minutes
+#+OPTIONS: toc:2 num:nil
+
+3b is a small Lisp-flavored systems language that compiles straight to
+readable C. No GC, no runtime beyond an optional arena allocator, no
+generics (deliberately, forever -- see below), and every "generic-shaped"
+convenience (=print=, =min=/=max=, handle pools, ...) is a compiler
+builtin special-cased per call site instead.
+
+This tour is grounded entirely in real code from this repo. Most
+snippets are lifted from [[file:examples/][examples/]], which has one small, self-contained,
+individually runnable package per feature area -- each with a =main=
+that prints its own results and exits non-zero if anything is wrong, so
+a snippet here going stale is a package there failing to build. The rest
+come from [[file:examples/game/][examples/game/]] (an SDL3 + OpenGL demo). Where a snippet is
+illustrative rather than copy-pasted from a real file, it's noted.
+
+=make check-doc= re-checks this file against the tree: every =lisp=
+block still parses, and every file it links to still exists.
+
+* Comments
+
+A single =;= starts a line comment; the convention throughout this
+codebase is =;;=.
+
+#+BEGIN_SRC lisp
+;; this is a comment
+(val limit i32 100) ; so is this, trailing
+#+END_SRC
+
+* Packages and imports
+
+Every file inside a package directory starts with =(package name)=,
+where =name= must match the containing directory exactly. Loose files
+compiled without a directory (like the examples in this tour) skip that
+check but still declare a package name for consistency.
+
+#+BEGIN_SRC lisp
+(package game)
+(import sdl)
+(import gl)
+#+END_SRC
+
+=import= can appear anywhere in the file and repeat; duplicates are
+fine. Cross-package references are always =pkg/identifier=:
+
+#+BEGIN_SRC lisp
+(sdl/init sdl/INIT_VIDEO)
+(gl/clear-color 0.0 0.0 0.0 1.0)
+sdl/EventType/Quit
+#+END_SRC
+
+* Types
+:PROPERTIES:
+:CUSTOM_ID: types
+:END:
+
+Primitives: =i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool char string void
+any arena ArenaMark stream=.
+
+- =any= is C's =void*=.
+- =arena= is a real primitive type -- a bump allocator handle -- not a
+  struct.
+- =stream= is an open byte stream (a file, or one of the process's
+  standard streams), also a real primitive rather than a struct. Opaque:
+  no fields, no casts. See [[#streams][Streams]] below.
+- =char= is a distinct type from =i8=, reserved for C-string FFI:
+  =cstring=/=cstring-copy= and the header translator both produce/expect
+  =char*=, and =char*=/=i8*= are genuinely different, incompatible types.
+- =string= is a counted string (pointer + length), *not* nul-terminated.
+
+Bare integer literals default to =i32=, bare floats to =f32=; suffix to
+override: =0u32=, =1i64=, =3.14f64=. An integer literal initializing a
+=val=/=var=/=let= with a declared integer type takes *that* type instead of the
+default, so =(val n i64 5)= needs no suffix. Out-of-range is still an error,
+reported against the declared type.
+
+A hex literal is a bit pattern, not a magnitude, so the whole 64-bit range is
+writable whichever signed type it lands in:
+
+#+BEGIN_SRC lisp
+(val NOPTS_VALUE i64 0x8000000000000000)   ;; -9223372036854775808
+(val ALL_ONES    u64 0xFFFFFFFFFFFFFFFF)
+#+END_SRC
+
+Pointers stack a trailing =*= directly on the type, to any depth:
+
+#+BEGIN_SRC lisp
+Creature*   ;; pointer to Creature
+i32**       ;; pointer to pointer to i32
+#+END_SRC
+
+Handles (see [[#handles][Handles]] below) stack a trailing =^= the same way:
+=Mesh^=, =Texture^=.
+
+Arrays are =[ElementType Count]=, and nest for multi-dimensional data:
+
+#+BEGIN_SRC lisp
+(struct Inventory [items [i32 4] gold i32])
+(var multi-grid [[i32 3] 2] [[1 2 3] [4 5 6]])  ;; 2 rows of 3 i32s
+#+END_SRC
+
+The three built-in collections get their own bracket/brace shorthand,
+disambiguated from the array form by arity: =[T]= is a growable
+=Vector<T>= (vs. =[T N]=, a fixed array), ={T}= a =Set<T>=, ={K V}= a
+=Map<K,V>=. (A ={...}= whose first slot is a =:field= key is a third
+thing again -- an anonymous struct type.) Write the shorthand; the
+spelled-out keyword forms still work but nothing in this repo prefers
+them.
+
+#+BEGIN_SRC lisp
+(var v [i32])          ;; Vector of i32 -- grows
+(var s {string})       ;; Set of string
+(var m {string i32})   ;; Map from string to i32
+#+END_SRC
+
+See [[#collections-vector-map-set][Collections]] below for what you can do with them.
+
+=(const T)= marks the pointee const, mirroring C's own reading order --
+common in FFI signatures:
+
+#+BEGIN_SRC lisp
+(fn make-mesh
+  [vertices (const f32*)
+   indices  (const u32*)] Mesh^ ...)
+#+END_SRC
+
+Function-pointer types use =fn= in type position (param names required
+syntactically, ignored semantically):
+
+#+BEGIN_SRC lisp
+(alias TimerCallback (fn [a0 any a1 u32 a2 u32] u32))
+#+END_SRC
+
+A function can never *return* an array type directly (a real C
+limitation) -- return a pointer or wrap it in a struct instead.
+
+Arrays copy by value everywhere a struct would -- into a =val=/=var=,
+into a struct field (whether written as a literal or assigned later with
+=set=), out of one -- with one exception, again C's: an array-typed
+*parameter* aliases the caller's array rather than copying it, so writing
+through it is visible to the caller. Take a pointer explicitly if you
+want that to read as deliberate.
+
+* val and var
+
+=(val name Type value)= is an immutable constant; =(var name Type
+[value])= is mutable. Both need an explicit type -- unlike =let=, they
+never infer one -- except an array-typed =var= may omit its initializer
+and gets zero-initialized. Both also work as ordinary locals inside a
+function body, not just at file scope.
+
+#+BEGIN_SRC lisp
+(val limit i32 100)
+(var counter i32 0)
+(var scratch [u8 64])       ;; array var, no init -- zero-filled
+#+END_SRC
+
+* Functions
+
+=fn= always has a flat =[name Type name Type ...]= param vector and a
+mandatory return type, even for =void=:
+
+#+BEGIN_SRC lisp
+(fn add-two [a i32 b i32] i32
+  (+ a b))
+
+(fn print-i32 [a i32] void
+  (print "{}\n" a))
+#+END_SRC
+
+=private= wraps one or more top-level declarations of any kind (fn,
+struct, enum, val, extern block, ...), scoping them to the package:
+
+#+BEGIN_SRC lisp
+(private
+  (fn is-negative [v i32] bool (if (< v 1) (return true) (return false)))
+  (fn is-positive [v i32] bool (not (is-negative v))))
+#+END_SRC
+
+=extern= declares one or more C-ABI signatures with no body:
+
+#+BEGIN_SRC lisp
+(extern (fn abs  [x i32] i32)
+        (fn sqrt [x i32] i32))
+#+END_SRC
+
+Extern (only) functions may end their param list with a bare =...= for
+C varargs, printf-style -- only the fixed prefix is type-checked, the
+rest is passed through as-is:
+
+#+BEGIN_SRC lisp
+;; illustrative -- extern variadics are supported but this repo has no
+;; live call site to cite yet
+(extern (fn printf [fmt char* ...] i32))
+#+END_SRC
+
+* Multiple return values
+:PROPERTIES:
+:CUSTOM_ID: multiple-return-values
+:END:
+
+A return type of =(T0 T1 ...)= -- two or more types, no reserved keyword
+head -- is Odin-style multiple returns. It's sugar over an interned
+positional struct (fields =_0=, =_1=, ...), the same synthesis machinery
+anonymous struct parameters already use. =(return a b ...)= builds it;
+the caller unpacks it with ordinary positional =let= destructuring, so
+there's no new binding syntax to learn:
+
+#+BEGIN_SRC lisp
+(fn try-div [a i32 b i32] (bool i32)
+  (if (= b 0)
+    (return false 0)
+    (return true (/ a b))))
+
+(fn div-mod [a i32 b i32] (i32 i32 bool)
+  (return (/ a b) (% a b) (= (% a b) 0)))
+
+(let [[success quotient] (try-div 10 2)]
+  (println "try-div 10 2 -> {} {}" success quotient))
+#+END_SRC
+
+Two functions with the same ordered type list intern to the *same*
+synthesized struct, not two; a different arity gets its own.
+
+=(bool T)= in particular is this language's standard "this might not have
+worked" shape, and it's load-bearing -- several builtin families return
+it rather than a silent sentinel. Domain-checked math is one:
+=sqrt-checked=, =asin-checked=, =acos-checked=, =pow-checked= report what
+plain =sqrt=/=asin=/=acos=/=pow= would hand back as a quiet NaN. =ok= is
+=isfinite(result)=, so it catches +-Inf too, and only the functions that
+can actually land on a domain error have a =-checked= form (=sin=/=cos=/
+=floor=/... are total over every finite float, so one would always be
+true).
+
+#+BEGIN_SRC lisp
+(let [[valid v] (sqrt-checked -4.0)]
+  (println "sqrt-checked(-4.0) -> ok={} (expect false, domain error)" valid))
+
+(let [[valid v] (pow-checked 2.0 10.0)]
+  (println "pow-checked(2.0, 10.0) -> ok={} v={} (expect true, 1024)" valid v))
+#+END_SRC
+
+[[#parsing-numbers-out-of-strings][String parsing]] and =vector-index-of= are the other two families.
+
+=nth-checked= is the deliberate exception: it hands back a nilable =T*=
+instead of =(bool T)=, because =T= there is unbounded -- a struct, an
+array, anything -- and copying one out by value just to report a failure
+would be the wrong trade. Test the pointer instead (see [[file:examples/arrays/][examples/arrays/]]).
+
+See [[file:examples/multi-return/][examples/multi-return/]] and [[file:examples/checked-math/][examples/checked-math/]].
+
+* Structs, enums, flags, unions, aliases
+
+#+BEGIN_SRC lisp
+(struct Creature [name string health i32])
+
+(enum LightType [Directional Point Spot])            ;; auto 0,1,2
+(enum HttpStatus [OK 200 NotFound 404 Teapot 418])    ;; explicit values
+
+(flags WindowFlags [Resizable Hidden Borderless])     ;; auto bit positions
+(flags Permissions [Read Write Execute Custom 64])    ;; Custom = literal 64
+#+END_SRC
+
+Scoped access is always =Name/Variant=: =WindowFlags/Resizable=,
+=LightType/Spot=. The compiler auto-appends a trailing sentinel member
+you never write by hand: =Name_Count= for =enum= (next value after the
+last variant), =Name_All= for =flags= (bitwise-OR of every variant).
+
+=union= mirrors =struct='s shape with C union semantics, often combined
+with anonymous nested structs to give overlapping named views onto the
+same bytes:
+
+#+BEGIN_SRC lisp
+(union Vec2
+  [_ (struct [x f32 y f32])
+   _ (struct [w f32 h f32])
+   v [f32 2]])
+#+END_SRC
+
+=alias= renames a type and participates in real type checking, not just
+cosmetically:
+
+#+BEGIN_SRC lisp
+(alias PlayerId i32)
+#+END_SRC
+
+An optional third operand pins the C spelling the generated typedef uses.
+It changes nothing about the 3b type -- =Size= below is a =u64= that
+arithmetic and every numeric check treat as one -- only the C that comes
+out, which becomes =typedef size_t pkg_Size;= rather than =typedef u64
+pkg_Size;=:
+
+#+BEGIN_SRC lisp
+(alias Size u64 "size_t")
+#+END_SRC
+
+This exists for translated bindings, and =3b translate= is realistically
+the only thing that writes it (from a config's =pin-type=). C typedefs
+are transparent, so a pointer only matches across the FFI boundary when
+both sides bottom out in the same C type: 3b's =u64= is =unsigned long
+long=, while glibc's =size_t= is =unsigned long= -- the same width, but a
+different type, and so a warning at every call site passing one by
+address. The C spelling has to be one the generated header can see, which
+in practice means a =<stddef.h>=/=<stdint.h>= name -- the header includes
+only =3b_runtime.h=, never the bound library's own headers. It need not
+match the 3b name: =(alias Uint64 u64 "uint64_t")= is how a binding pins
+SDL's =Uint64=, whose own spelling the header would not resolve.
+
+=struct=, =union= and =enum= take the same optional operand, in the slot
+between the name and the =[]= vector:
+
+#+BEGIN_SRC lisp
+(struct data "cgltf_data" [scenes_count u64])
+
+(enum PixelFormat "enum AVPixelFormat" [Yuv420p Rgb24])
+#+END_SRC
+
+It reads differently here, though. =alias= pins what the typedef *is*;
+these declare what the type *mirrors*. The struct stays a real,
+independent C struct with its own name, laid out identically to the
+library's -- =3b translate= refuses to emit a mirror whose layout it
+cannot prove matches. Layout-compatible is not type-compatible, so at the
+one place the two meet -- an =extern= call into the library itself --
+=gcc= sees a =gltf_data*= where its prototype says =cgltf_data*=, and
+warns once per argument. The pin is what lets codegen cast there instead,
+and nowhere else: only the arguments and the result of a real FFI call,
+never a call between 3b packages.
+
+Unlike the =alias= spelling, this one is never resolved by the generated
+header -- it is written into a cast in the =.c=, where =include-first=
+has already put the library's own header in scope -- so it may name any
+type that header declares, and needs the =struct=/=enum= keyword when the
+C type has no typedef of its own. Again, =3b translate= writes it; hand
+code has no reason to.
+
+* Struct literals
+
+Two forms. Keyword form, fields in any order:
+
+#+BEGIN_SRC lisp
+(Creature {:name "Orc" :health 50})
+#+END_SRC
+
+Positional form, one value per declared field in declared order, strict
+arity (no silent zero-fill, doesn't work on anonymous structs):
+
+#+BEGIN_SRC lisp
+(Creature CreatureKind/Orc (make-apartment) 100 20)
+#+END_SRC
+
+=(zero StructOrArrayType)= zero-initializes a value; =mem-zero=,
+=mem-copy=, =mem-set=, =mem-compare= are the raw pointer-based
+equivalents, usually paired with =sizeof=:
+
+#+BEGIN_SRC lisp
+(zero sdl/Event)
+(mem-zero renderer (sizeof Renderer))
+#+END_SRC
+
+* Control flow
+
+=if= is the standard two-armed conditional; both arms must agree in
+type. =do= sequences expressions and evaluates to the last one.
+
+#+BEGIN_SRC lisp
+(if (< a b) a b)
+
+(if (+ x x)
+  (do (print "nonzero-ish") x)
+  (do (print "zero-ish") 0))
+#+END_SRC
+
+=void= behaves exactly like =do= but forces the whole form's static type
+to =void=, regardless of what the last expression would normally
+evaluate to. It exists so that =if=/=match= arms that are really just
+=set=/=+==-style statements (which evaluate to their assigned value, not
+void) can be made to agree in type without a manual cast:
+
+#+BEGIN_SRC lisp
+(if (= current (. sword-sweep frames))
+  (void (player-play player sweep-end))
+  (void (player-play player idling)))
+#+END_SRC
+
+=when= is =if= with no else branch (sugar for =(if cond (do body...))=):
+
+#+BEGIN_SRC lisp
+(when flag
+  (++ when-side-effect)
+  (++ when-side-effect))
+#+END_SRC
+
+=while= is a standard condition-checked loop:
+
+#+BEGIN_SRC lisp
+(while (< counter n) (++ counter))
+#+END_SRC
+
+=for= comes in two shapes. *Range*: =(for [i begin end] body)= steps by 1
+(or =1.0=/=0u32=, matching =begin='s type); =(for [i begin end step]
+body)= takes an explicit step.
+
+#+BEGIN_SRC lisp
+(for [i 1 10] (+= result i))
+(for [i 0u32 attribute-count] (+= result i))
+#+END_SRC
+
+*Collection*: =(for [x coll] body)= walks an array, a =[T]=, or a ={T}=;
+the two-binding form =(for [[k v] coll] body)= adds the index, and is
+mandatory for a ={K V}=. See [[#collections-vector-map-set][Collections]].
+
+#+BEGIN_SRC lisp
+(for [x v] (set sum (+ sum x)))
+(for [[k v] m] (set val-sum (+ val-sum v)))
+#+END_SRC
+
+Inside any loop, =(break)= leaves it and =(continue)= skips to its next
+iteration. Both take no arguments and always mean the *innermost*
+enclosing loop -- there are no loop labels. Outside a loop, either is a
+compile error.
+
+#+BEGIN_SRC lisp
+(for [i 0 n]
+  (when (= (% i 2) 0) (continue)) ;; odds only
+  (when (> i limit) (break))
+  (+= total i))
+#+END_SRC
+
+=(while true ...)= plus a =break= is the idiomatic "loop until something
+in the body says stop", which a condition-checked =while= alone can't
+express:
+
+#+BEGIN_SRC lisp
+(while true
+  (val line string (os/read-line f))
+  (when (= (string-len line) 0) (break))
+  (handle-line line))
+#+END_SRC
+
+=match= dispatches on structural equality against a scrutinee evaluated
+exactly once. A pattern is a single value or a =[a b c]= vector meaning
+"any of these" (OR-group):
+
+#+BEGIN_SRC lisp
+(match key
+  [[sdl/SDLK_LEFT sdl/SDLK_A]   (set (. input move-left)  down)
+   [sdl/SDLK_RIGHT sdl/SDLK_D]  (set (. input move-right) down)
+   sdl/SDLK_SPACE               (set (. input jump)       down)])
+#+END_SRC
+
+With no =else= clause, every arm is implicitly =void=-wrapped (so a
+match full of heterogeneous =set= calls type-checks as a pure statement
+dispatcher) and the whole thing falls through to nothing on no match.
+Add an =else= clause to use =match= as a real value -- then every arm,
+=else= included, must agree in type:
+
+#+BEGIN_SRC lisp
+(match (. building kind)
+  [BuildingKind/Apartment "Apartment"
+   BuildingKind/Cottage   "Cottage"
+   else                   "Unknown"])
+#+END_SRC
+
+=return= exits a function body early and is type-checked against the
+declared return type.
+
+* let and destructuring
+
+=(let [name [Type] init ...] body...)= evaluates to the last body
+expression. The type annotation is optional when the initializer is a
+struct construction, a call, or a plain identifier copy -- =let= infers
+it (unlike =val=/=var=, which always require an explicit type).
+
+#+BEGIN_SRC lisp
+(let [a i32 0
+      b i32 (* (+ a 1 10) 2)]
+  b)
+#+END_SRC
+
+Binding position also accepts two destructuring shapes.
+
+*Named/struct destructuring* with ={...}=: bare shorthand ={x y}= binds
+locals of the same name as the fields; =:field local= renames;
+=(addr field) other= binds *by reference* (a pointer into the source);
+nests arbitrarily.
+
+#+BEGIN_SRC lisp
+(let [{:mana (addr mptr)} (deref creature)]
+  (set (deref mptr) mana))
+
+(let [{:anim {:clip {:frames current}}} (deref player)] ...)
+#+END_SRC
+
+*Positional/vector destructuring* with =[...]=: works on structs (by
+declared field order) or fixed-size arrays; under-binding a prefix is
+fine, over-binding is a checker error.
+
+#+BEGIN_SRC lisp
+(let [[kind] building] kind)             ;; single field, positional
+(let [[k [hk]] (deref creature)] hk)     ;; nested struct-in-struct
+#+END_SRC
+
+* Mutation, assignment, arithmetic
+
+#+BEGIN_SRC lisp
+(set counter (+ counter 1))
+(set (deref (& creature health)) health)   ;; through a pointer/field
+
+(+= result i)   (-= x 1)   (*= x 2)   (/= x 2)
+(++ counter)    (-- counter)
+#+END_SRC
+
+=+ - * /= plus comparisons =< > <= >= = != = are ordinary operators.
+=not=/=and=/=or= give C-style truthiness and real short-circuiting;
+=bit-and=/=bit-or=/=bit-xor=/=bit-not=/=bit-shl=/=bit-shr= are the
+bitwise family, also usable on same-typed enum/flags variants:
+
+#+BEGIN_SRC lisp
+(bit-or WindowFlags/Resizable WindowFlags/Borderless)
+#+END_SRC
+
+* Pointers and field access
+
+=(addr x)= takes an address; =(deref p)= unwraps one pointer level.
+=&= is sugar for "address of a (possibly chained/auto-deref'd) field":
+=(& base f1 f2)= == =(addr (. base f1 f2))=.
+
+#+BEGIN_SRC lisp
+(let [x (& vec2 x)
+      y (& vec2 y)]
+  (+= (deref x) 100.0)
+  (-= (deref y) 100.0))
+#+END_SRC
+
+=.= is dot field access (auto-derefs through a pointer-to-struct and
+chains); =get=/=get-in= are its explicit, non-sugared equivalents:
+
+#+BEGIN_SRC lisp
+(. renderer dt)
+(get c health)
+(get-in john [parent sister age])   ;; same as (. john parent sister age)
+#+END_SRC
+
+=nth= indexes arrays/pointers, with multi-index sugar for nested arrays:
+
+#+BEGIN_SRC lisp
+(nth (. inv items) idx)
+(nth multi-grid [1 2])              ;; same as (nth (nth multi-grid 1) 2)
+#+END_SRC
+
+=cast= converts between types explicitly: =(cast TargetType expr)=.
+=reinterpret= has the same shape but copies bits instead of converting
+a value -- =(reinterpret i32 someF32)= reads a float's bits back as an
+int, where =(cast i32 someF32)= would truncate its value to =3=. Both
+sides must be the same byte size; =bool= isn't a legal =reinterpret=
+target (an arbitrary bit pattern isn't a valid =bool=).
+=(cstring s)= turns a 3b =string= into a nul-terminated =char*= for FFI;
+=(cstring-copy arena s)= does an owning copy.
+
+#+BEGIN_SRC lisp
+(cast i64 a)
+(reinterpret i32 some-f32)   ;; bit pattern, not value, e.g. for fast-inverse-sqrt tricks
+(sdl/create-window (cstring "game") w h flags)
+#+END_SRC
+
+* Arenas
+
+There's no GC. Allocation goes through arenas (bump allocators):
+=(create [reserve-size])= makes one; =(destroy a)=, =(reset a)=,
+=(release a)= manage its lifetime; =(mark a)= saves a cursor
+(=ArenaMark=) and =(pop a m)= rewinds to it.
+
+=push=/=push0= allocate out of an arena, in three shapes:
+
+#+BEGIN_SRC lisp
+(push arena Creature)      ;; one zero-garbage element, uninitialized
+(push arena Creature 3)    ;; N elements
+(push arena creature)      ;; copies an already-typed value in
+(push0 arena u8 64)        ;; zero-initialized alloc
+#+END_SRC
+
+=scratch= opens a temporary, auto-rewound arena scope -- handy for
+throwaway work inside a function:
+
+#+BEGIN_SRC lisp
+(scratch [t]
+  (let [vert-src (cstring (io/read-file t vert-path))]
+    ...))
+#+END_SRC
+
+* Collections: Vector, Map, Set
+:PROPERTIES:
+:CUSTOM_ID: collections-vector-map-set
+:END:
+
+Three built-in collections, spelled with the shorthand from [[#types][Types]]: =[T]=
+(a growable =Vector<T>=), ={K V}= (=Map<K,V>=), ={T}= (=Set<T>=). Not
+generics -- each instantiation a program actually uses is monomorphized
+by the compiler, the same bargain =print= and handle pools make. A =[T]=
+compiles to a plain, growth-tracked =T*=; ={K V}=/={T}= to a
+monomorphized open-addressing hash table. Map/Set keys are limited to
+numeric-ish primitives and =string= (struct keys aren't supported).
+
+Every operation that can *grow* the collection takes the arena to grow
+into as its first argument. There's no GC and no hidden global
+allocator, so allocation stays exactly as visible here as it is with
+=push=. Reads, removals, and =len= take no arena:
+
+#+BEGIN_SRC lisp
+(val a arena (create))
+
+(var v [i32])
+(for [i 0 5] (vector-push a v i))   ;; arena first
+(println "len(v) = {}" (len v))     ;; -> 5, no arena
+(println "v[3] = {}" (nth v 3))     ;; -> 3
+
+(var m {string i32})
+(map-set a m "one" 1)                            ;; arena first
+(println "one -> {}" (deref (map-get m "one")))  ;; nilable T*, NULL if absent
+(println "one -> {}" (deref (. m "one")))        ;; `.` is sugar for map-get
+(println "has two? {}" (map-contains? m "two"))
+(map-remove m "two")                             ;; no arena
+
+(var s {string})
+(println "added? {}" (set-add a s "a"))  ;; arena first; false if already there
+(println "has a? {}" (set-contains? s "a"))
+(set-remove s "a")                       ;; no arena
+#+END_SRC
+
+=len=, =nth=, and =for= treat a =[T]= exactly the way they already treat
+a fixed-size array -- =vector-push= is just the discoverable name for
+what =dyn-push= already did.
+
+Iteration is =for='s collection form. Vector and Set give elements;
+=[[i x]]= adds the index (for a Set that's an arbitrary slot-walk
+position, *not* 0..N-1 order). A Map always requires two bindings:
+
+#+BEGIN_SRC lisp
+(for [x v] (set sum (+ sum x)))
+(for [[i x] v] (set idx-sum (+ idx-sum i)))
+(for [x s] (set count (+ count 1)))
+(for [[k v] m] (set val-sum (+ val-sum v)))
+#+END_SRC
+
+A default-initialized (zero) collection is a valid empty one -- =len=
+reads 0, iterating runs zero times, nothing crashes. There's no separate
+"init" call to forget.
+
+Removal and search are Vector-only, and =vector-=-prefixed for that
+reason (=len=/=nth= are generic over Array and Vector both; these aren't).
+=vector-swap-remove= is O(1) and reorders -- the last element moves into
+the hole -- while =vector-remove-at= preserves order and shifts everything
+after it down. Both are *checked*: an out-of-range index returns =false=
+and mutates nothing, rather than being trusted the way =nth='s is.
+
+#+BEGIN_SRC lisp
+(vector-swap-remove sv 1)    ;; [0 1 2 3 4] -> [0 4 2 3], true
+(vector-remove-at ra 1)      ;; [0 1 2 3 4] -> [0 2 3 4], true
+(vector-remove-at ra 99)     ;; false, and ra is unchanged
+(vector-clear ra)
+
+(println "vector-contains? nums 20 = {} (expect true)" (vector-contains? nums 20))
+(let [[found idx] (vector-index-of nums 30)]
+  (println "vector-index-of nums 30 -> {} {} (expect true 3)" found idx))
+#+END_SRC
+
+=vector-contains?=/=vector-index-of= work on any comparable element type
+-- a scalar, a =string=, or a recursively-comparable struct -- the same
+comparability gate the equality operators themselves go through.
+
+See [[file:examples/vector/][examples/vector/]], [[file:examples/map/][examples/map/]], [[file:examples/set/][examples/set/]], and
+[[file:examples/type-shorthand/][examples/type-shorthand/]].
+
+* Handles
+:PROPERTIES:
+:CUSTOM_ID: handles
+:END:
+
+3b will never get real generics (a deliberate, permanent decision) --
+so anything generic-shaped, like a typed object pool with
+use-after-free protection, is a compiler builtin dispatched per call
+site by type instead of a monomorphized generic type.
+
+Declare a pool for an already-declared struct with =(handle Name)=,
+then use the =handle-*= builtin family:
+
+#+BEGIN_SRC lisp
+(struct Mesh [vao u32 vbo u32 ...])
+(handle Mesh)
+
+(handle-pool-init Mesh max-meshes arena)   ;; once, before use
+(handle-alloc Mesh)                         ;; -> Mesh^
+(handle-deref h)                            ;; -> Mesh* or NULL if stale/invalid
+(handle-valid? h)                           ;; pure check on the handle itself
+(handle-free h)
+#+END_SRC
+
+=handle-deref= never asserts on a stale handle -- it just returns NULL,
+so generation mismatches (freed-then-reused slots) are a normal,
+checkable runtime condition rather than a crash.
+
+* Printing and strings
+
+=print=/=println= take a *literal* string template (a real string-literal
+node, not just anything of type =string=) with ={}= placeholders --
+that's what lets placeholder-count and per-argument formatting be
+checked entirely at compile time, with zero runtime type tags. It
+reduces to one real =printf= call. =println= appends a trailing
+newline; plain =print= does not.
+
+#+BEGIN_SRC lisp
+(print "{}\n" (. orc health))
+(println "[stb] {} : {}x{} ({} channels)" path w h channels)
+#+END_SRC
+
+The arguments are evaluated *left to right, and all of them before any
+output* -- so an argument that prints something itself always finishes
+before the line it belongs to starts, never in the middle of it. C
+leaves the argument order of a =printf= call unspecified, and 3b
+deliberately does not inherit that: the two backends would otherwise
+print the same program differently. =str= evaluates its arguments the
+same way.
+
+=str= is Clojure's =str=, adapted to this language's explicit-arena
+convention: stringifies and concatenates each argument with no
+separator into a new owned string.
+
+#+BEGIN_SRC lisp
+;; illustrative shape, arena always first
+(str arena "n=" 7 " ok=" true)
+#+END_SRC
+
+* Parsing numbers out of strings
+:PROPERTIES:
+:CUSTOM_ID: parsing-numbers-out-of-strings
+:END:
+
+=str= and =print= go number -> string. The other direction is
+=string-to-i32=/=-i64=/=-u32=/=-u64=/=-f32=/=-f64=, each returning a
+=(bool T)= (see [[#multiple-return-values][Multiple return values]]) rather than falling back to a
+silent 0:
+
+#+BEGIN_SRC lisp
+(let [[valid n] (string-to-i32 "42")]
+  (println "'42' as i32 -> ok={} n={}" valid n))
+
+(let [[valid n] (string-to-i32 "12abc")]
+  (println "'12abc' as i32 -> ok={} n={} (trailing garbage rejected)" valid n))
+
+(let [[valid n] (string-to-f64 "3.14159")]
+  (println "'3.14159' as f64 -> ok={} n={}" valid n))
+#+END_SRC
+
+=ok= is false for anything malformed -- empty input, a bare sign,
+trailing garbage, or an out-of-range magnitude -- and never a partial
+parse. =(string-to-u32 "-5")= fails on the sign; =(string-to-i32
+"9999999999999")= fails on the range. See [[file:examples/string-parsing/][examples/string-parsing/]].
+
+* Streams
+:PROPERTIES:
+:CUSTOM_ID: streams
+:END:
+
+=stream= is the primitive type for incremental file I/O -- the
+counterpart to =os/read-file=/=os/write-file=, which only do
+whole-buffer-at-once. Open it, write or read in pieces, close it. The
+verbs all live in the =os= module; a failed =os/open= gives back a null
+stream, which =not= tests directly.
+
+#+BEGIN_SRC lisp
+(import os)
+
+(let [f (os/open "out.ppm" os/mode-write)]   ;; mode-read/-write/-append/-update
+  (when (not f) (return false))
+  (os/write-string f "P6\n")                  ;; exact bytes, nothing appended
+  (os/write f (cast any pixels) byte-count)   ;; raw buffer
+  (os/close f))                               ;; returns false if the final flush failed
+#+END_SRC
+
+The language part is that =print=/=println= take an *optional leading
+stream*. Everything else about them is unchanged -- same literal
+template, same compile-time placeholder checking -- so formatted file
+output never needs a hand-written =%d= format string:
+
+#+BEGIN_SRC lisp
+(println f "{} {}" width height)        ;; to a file
+(println (os/stderr) "cannot open {}" path)
+(println "{} {}" width height)          ;; no stream -> stdout, as always
+#+END_SRC
+
+Reading is =os/read= (raw bytes) or =os/read-line= (arena-allocated, no
+trailing newline). Drive a read loop on =os/at-end?=, since an empty
+line and end-of-file both come back as an empty string:
+
+#+BEGIN_SRC lisp
+(scratch [temp]
+  (while (not (os/at-end? f))
+    (let [line (os/read-line temp f)] ...)))
+#+END_SRC
+
+Also: =os/flush=, =os/seek= (with =os/seek-start=/=-current=/=-end=),
+=os/tell=, =os/error?=, and =os/stdout=/=os/stderr=/=os/stdin=. Closing
+a standard stream is a deliberate no-op. See =examples/streams/=.
+
+** The rest of the =os= module
+
+Besides streams, =os= has whole-file =os/read-file=/=os/write-file=,
+=os/file-exists=/=os/dir-exists=, =os/list-dir= (a =[string]= of bare
+filenames, capped at =os/list-dir-max=), =os/file-mtime=, =os/get-time=,
+=os/sleep=, =os/getenv=, and =os/exec-capture= (runs a command through
+the shell, hands back its stdout with the trailing newline trimmed).
+
+Anything that allocates takes the arena to allocate into as its first
+argument, the same convention as everything else in the language:
+
+#+BEGIN_SRC lisp
+(scratch [temp]
+  (let [cfg   (os/read-file temp "config.txt")
+        home  (os/getenv temp "HOME")
+        files (os/list-dir temp "assets")]
+    ...))
+#+END_SRC
+
+Absence and failure are both an EMPTY result -- an empty string from
+=os/read-file=/=os/getenv=, an empty Vector from =os/list-dir= -- rather
+than a separate ok flag. =os/file-mtime= is the exception, returning
+=-1= for a missing path, since =0= is a real timestamp.
+
+The WHOLE module works on BOTH backends -- native codegen and the =.3bs=
+bytecode VM -- with the same names, the same signatures, and the same
+semantics, so a file using it runs unmodified through either. (=3b run
+examples/streams= links a binary; =3b run examples/streams/main.3b=
+interprets the same file.) =examples/os-portable/= exercises every verb
+and is required to print identical output through both; =make os-parity=
+is the check.
+
+* Lanes: parallel and parallel-for
+:PROPERTIES:
+:CUSTOM_ID: lanes-parallel-and-parallel-for
+:END:
+
+Threads, not async. =parallel= forks a block across a fixed,
+process-wide pool of OS threads -- =lane-count= of them -- and joins at
+the closing paren. =parallel-for= splits a range across those lanes from
+inside such a block. There are exactly four lane-local primitives and no
+others: =(lane-index)=, =(lane-count)=, =(lane-sync)= (a barrier), and
+=(lane-arena)= (this lane's own private scratch arena, safe to push into
+without racing anyone).
+
+#+BEGIN_SRC lisp
+(var lane-results [i32 64])
+
+(fn lane-parallel-sum [n u32] void
+  (parallel [total n]
+    (var local-sum i32 0)
+    (parallel-for [i total]
+      (void (+= local-sum (cast i32 i))))
+    (void (set (nth lane-results (lane-index)) local-sum))))
+#+END_SRC
+
+=parallel='s binding vector is an explicit *capture* list -- =name init=
+pairs, evaluated once before the fork, then visible to every lane. It's
+not a lane-local declaration: =(parallel [total n] ...)= above hands each
+lane the same =total=.
+
+A =parallel= body sees its captures, its own bindings, and file-scope
+names like =lane-results= -- and *nothing else*. Naming one of the
+enclosing function's params or locals is an error, because the body runs
+on a thread where that local does not exist:
+
+#+BEGIN_SRC lisp
+(fn scaled-sum [factor i32] void
+  (parallel []
+    ;; error: `factor` is a local of the enclosing function, which a
+    ;; `parallel` body cannot see -- add it to the capture list
+    (void (set (nth lane-results (lane-index)) factor))))
+#+END_SRC
+
+=(parallel [factor factor] ...)= is the fix, and captures are copied by
+value, so that is also what makes each lane's copy its own.
+
+That's the shape to copy: each lane accumulates into a local, then writes
+its result into *its own* slot indexed by =(lane-index)=, so no lane ever
+touches another's memory and no lock is needed. Reduce over the slots
+afterwards, back on one thread.
+
+The checker enforces the rest: =parallel= blocks don't nest, and both a
+=parallel= and a =parallel-for= body must be =void= (wrap the last
+expression in =(void ...)= -- that's what the =void= calls above are
+doing). =lane-index=, =lane-sync=, and =lane-arena= are errors outside a
+=parallel= block; =lane-count= deliberately is *not*, since it's a fixed
+process-wide number, and sizing an output array by it before forking is
+the intended use -- which is exactly what =lane-results= is for.
+=handle-pool-init=/=handle-alloc=/=handle-free= are rejected *inside* a
+=parallel= block: pool alloc/free isn't synchronized across lanes, so
+initialize pools before forking.
+
+Per-lane work needs no extra syntax either -- just =match= on
+=(lane-index)= inside a plain =parallel= block:
+
+#+BEGIN_SRC lisp
+(parallel []
+  (match (lane-index)
+    [0u32 (println "lane 0 reporting in")
+     else (void (let [a (lane-arena)]
+                  (push a i32)))])
+  (lane-sync))
+#+END_SRC
+
+Measure before keeping it. Fork/join has real per-block cost, and for
+cheap per-item work over a modest number of items a plain serial loop
+wins -- "this looks parallelizable" is not evidence. See
+[[file:examples/lanes/][examples/lanes/]].
+
+Under =3b run file.3b= -- the bytecode VM rather than the native
+pipeline -- all of this compiles and runs, but as *one lane, serially*:
+=lane-count= is 1, =lane-index= is 0, =lane-sync= does nothing, and
+=parallel-for= walks the whole range. Results are unchanged; only the
+speedup is. Nothing needs writing differently for it, since a correct
+lane program already has to tolerate a lane count of 1 -- that is what a
+single-core machine hands it natively too.
+
+* Threading macros
+
+Nothing to do with threads (see [[#lanes-parallel-and-parallel-for][Lanes]] above for those) -- =->= and
+=->>= are thread-first/thread-last, same idea as Clojure's:
+
+#+BEGIN_SRC lisp
+(-> orc addr
+  (creature-set-health 80)
+  creature-heal
+  creature-heal)
+#+END_SRC
+
+* A complete tiny example
+
+From [[file:examples/creatures/][examples/creatures/]] -- a package with no =build.cfg.3b= at all (a
+manifest is optional; with none, 3b just links the generated =.c= files
+against libm):
+
+#+BEGIN_SRC lisp
+;; building.3b
+(package creatures)
+
+(enum BuildingKind [Apartment Cottage])
+(struct Building [kind BuildingKind])
+
+(fn make-apartment [] Building
+  (let [apt (Building BuildingKind/Apartment)] apt))
+
+;; creature.3b
+(package fun)
+
+(enum CreatureKind [Human Orc Elf])
+(struct Creature
+  [kind   CreatureKind
+   home   Building
+   health i32
+   mana   i32])
+
+(fn creature-set-health [creature Creature* health i32] Creature*
+  (set (deref (& creature health)) health)
+  creature)
+
+(fn creature-heal [creature Creature*] Creature*
+  (creature-set-health creature (clamp-top (+ (. creature health) 10) 100))
+  creature)
+
+;; fun.3b
+(package fun)
+
+(fn main [argc i32 argv string*] i32
+  (let [orc (Creature CreatureKind/Orc (make-apartment) 100 20)]
+    (-> orc addr
+      (creature-set-health 80)
+      creature-heal
+      creature-heal)
+    (print "{}\n" (. orc health)))
+  0)
+#+END_SRC
+
+* The other backend: .3bs scripts and hot reload
+
+Everything above compiles to C. The same language also runs a second
+way: =3b run file.3bs= compiles the same typed AST to bytecode
+(=bcgen.c=) and interprets it in-process (=bcvm.c=), with no C toolchain
+anywhere in the loop -- so it starts instantly and can be recompiled on
+the fly. A bare single-file =.3b= handed to =3b run= takes that path too,
+which is how a package's bytecode coverage gets smoke-tested without a
+second copy of anything:
+
+#+BEGIN_SRC sh
+3b run examples/streams          # native: generates C, links a binary, runs it
+3b run examples/streams/main.3b  # bytecode VM: same source, no toolchain
+#+END_SRC
+
+A =.3bs= file is an ordinary 3b source file -- same syntax, same type
+checker, a =(package ...)= line and a zero-parameter =main=. What differs
+is what it may import: the bytecode driver knows exactly =build= (shell
+out), =os= (filesystem, environment), =rng=, and =config= (the
+translator's own, usable only when a host registered a real config against
+it). Arbitrary multi-file packages still need the native pipeline. =3b
+translate='s config files are =.3bs= scripts for exactly this reason --
+they need to run loops and shell commands, not just hold data.
+
+These are real cross-package bytecode imports, not a textual splice: each
+module compiles once per run into its own bytecode program, and a call
+crosses that boundary at runtime.
+
+The payoff is the third mode: a natively-compiled 3b program embedding
+the VM as a hot-reloadable scripting layer. =(import vm)= -- baked into
+the compiler, needing no =vm/= directory and no =build.cfg.3b= entries at
+all -- gives a shipped binary =load=, =call0= through =call4=,
+=poll-reload=, and =unload=.
+
+#+BEGIN_SRC lisp
+;; fireball.3bs -- the script, edited while the host is running
+(package fireball)
+
+(fn on-cast [power i32] i32
+  (* power 3))
+#+END_SRC
+
+#+BEGIN_SRC lisp
+;; main.3b -- the host, compiled natively
+(package hotreload-demo)
+(import vm)
+
+(fn main [] i32
+  (var engine any (vm/create))
+  (let [[loaded handle] (vm/load engine "fireball.3bs")]
+    (let [[has-value value] (vm/call1 engine handle "on-cast" 7i64)]
+      (println "on-cast(7) = {} (has-value={}, expect 21/true)" value has-value))
+    ;; safe to call every frame for every loaded script: re-checks the
+    ;; source on disk, recompiling and swapping in place ONLY if it
+    ;; changed, and leaving the last good version running if the edit
+    ;; doesn't compile
+    (let [reloaded (vm/poll-reload engine handle)]
+      (println "poll-reload after external edit -> {}" reloaded)))
+  (vm/destroy engine)
+  0)
+#+END_SRC
+
+Edit =fireball.3bs= while that runs and the next =call1= on the *same
+handle* returns the new answer.
+
+The real limits, unglossed: arguments and results cross the boundary as
+plain =i64= (a number, or a packed handle value) -- there's no string or
+struct marshaling. The host owns all the state and hands the script
+handles to reach it through, which is precisely what lets a reload swap
+the script's *code* without losing the state that code operates on. And
+a false =ok= out of =call*= means "this script isn't usable right now" --
+a stale handle, an unknown function name, a wrong argument count, a
+runtime trap, or a genuinely =void= function -- so treat it as that, not
+as the value 0. That's the case where a trap would otherwise ride along
+as a plausible-looking number.
+
+See [[file:examples/hotreload-demo/][examples/hotreload-demo/]] and [[file:native_pkgs/vm/vm.3b][native_pkgs/vm/vm.3b]].
+
+* build.cfg.3b
+
+An optional manifest dropped next to a project's root package, for
+anything 3b can't infer on its own -- hand-written C sources, extra
+=-include= shims some generated bindings need, pkg-config packages,
+extra link libs, the binary's name:
+
+#+BEGIN_SRC lisp
+(binary "game")
+(c-sources ["glad/glad_impl.c" "glad/glad_shim.c" "stbimg/stbimg_impl.c"])
+(pkg-config ["sdl3"])
+(libs ["GL" "pthread"])
+(include-first
+  sdl    ["SDL3/SDL.h"]
+  gl     ["glad/gl.h" "glad/glad_shim.h"]
+  stbimg ["stbimg/stb_image.h"])
+#+END_SRC
+
+Every =private extern= binding package needs its own =include-first=
+entry: =3b build= emits no prototype for one into the generated =.c=, and
+compiles with =-Werror=implicit-function-declaration=, so a missing entry
+is a build error naming the exact function.
+
+* C interop: the translate tool
+
+=3b translate <config.3b>= reads a real C header and generates a 3b
+binding package from it -- this is how [[file:examples/game/gl/gl.3b][examples/game/gl/gl.3b]],
+[[file:examples/game/sdl/sdl.3b][examples/game/sdl/sdl.3b]], and [[file:examples/game/stbimg/stbimg.3b][examples/game/stbimg/stbimg.3b]] came to
+exist, rather than being hand-written. See
+[[file:translate/tests/testsmall/][translate/tests/testsmall/]] for a minimal end-to-end example: a C
+header, a =.cfg.3b= pointing at it, and the generated =.3b= output.
+
+#+BEGIN_SRC lisp
+;; test_small.cfg.3b
+(package testsmall)
+(headers ["test_small.h"])
+#+END_SRC
+
+* CLI cheat sheet
+
+#+BEGIN_SRC sh
+3b <dir>              # compile a package (and everything it imports)
+3b build <dir>         # compile + link into a real binary
+3b run <dir>            # build + run
+3b run <file.3bs>        # interpret through the bytecode VM, no C toolchain
+3b translate <cfg.3b>     # C header -> 3b bindings
+3b format <file>           # reformat a .3b file (--hang N sets the param indent)
+3b clean [dir]               # remove generated output
+#+END_SRC
+
+=build= and =run= take =--release=; a bare single-file =.3b= given to
+=3b run= takes the bytecode path, same as a =.3bs=.
+
+* Where to look next
+
+- [[file:examples/game/][examples/game/]] -- the fullest real program in the repo (SDL3 + OpenGL demo).
+- [[file:examples/creatures/][examples/creatures/]] -- tiny, easy-to-read language-feature examples (structs,
+  enums, destructuring, a multi-file package with no manifest).
+- [[file:examples/][examples/]] -- a small, focused, individually buildable/runnable package
+  per feature area, each asserting its own output and failing loudly on a
+  mismatch. Roughly by section of this tour:
+  [[file:examples/structs/][structs]], [[file:examples/enums-and-flags/][enums-and-flags]], [[file:examples/control-flow/][control-flow]], [[file:examples/comparisons/][comparisons]],
+  [[file:examples/arenas/][arenas]], [[file:examples/nested-scratch/][nested-scratch]], [[file:examples/arrays/][arrays]], [[file:examples/anon-struct-params/][anon-struct-params]];
+  [[file:examples/vector/][vector]], [[file:examples/map/][map]], [[file:examples/set/][set]], [[file:examples/type-shorthand/][type-shorthand]] for the collections;
+  [[file:examples/multi-return/][multi-return]], [[file:examples/checked-math/][checked-math]], [[file:examples/string-parsing/][string-parsing]] for =(bool T)=;
+  [[file:examples/lanes/][lanes]] for =parallel=; [[file:examples/streams/][streams]] for file I/O; [[file:examples/hotreload-demo/][hotreload-demo]] and
+  [[file:examples/dice/][dice]] for the =.3bs= backend.
+- [[file:build.h][build.h]] -- doc comments on the =build.cfg.3b= format.
+- [[file:translate/config.c][translate/config.c]] -- the full =.cfg.3b= directive list for the header
+  translator.

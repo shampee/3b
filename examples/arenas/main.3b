@@ -1,0 +1,86 @@
+;; Arenas: bump allocation via `create`/`push`/`push0`/`destroy`, plus
+;; `mark`/`pop` to rewind the cursor to a saved position.
+(package arenas)
+
+(struct Creature [name string health i32])
+
+;; An ArenaMark is one pointer, so it's an ordinary scalar value: it stores
+;; into a struct field like any u64 would. Worth exercising, because the two
+;; backends reached that conclusion separately -- the bytecode VM used to
+;; reject an ArenaMark FIELD outright while native compiled it fine, and
+;; nothing here covered `mark` at all, so backend-diff never saw the split.
+(struct Checkpoint [at ArenaMark label string])
+
+(fn make-asset [a arena] Creature*
+  (push a Creature))
+
+(fn make-asset-array [a arena] Creature*
+  (push a Creature 3))
+
+(fn copy-asset [a arena creature Creature] Creature*
+  (push a creature))
+
+(fn zeroed-bytes [a arena] u8*
+  (push0 a u8 64))
+
+(fn main [] i32
+  (var ok bool true)
+  (var a arena (create))
+
+  (var one-orc Creature* (make-asset a))
+  (set (get (deref one-orc) health) 77)
+  (println "make-asset: health = {} (expect 77, proves the pointer is real, writable arena memory)" (get (deref one-orc) health))
+  (when (not (= (get (deref one-orc) health) 77)) (set ok false))
+
+  (var orc-array Creature* (make-asset-array a))
+  (set (get (nth orc-array 2) health) 99)
+  (println "make-asset-array: orc-array[2].health = {} (expect 99, proves 3 contiguous elements)" (get (nth orc-array 2) health))
+  (when (not (= (get (nth orc-array 2) health) 99)) (set ok false))
+
+  (val source-orc Creature (Creature {:name "Grunt" :health 33}))
+  (val copied-orc Creature* (copy-asset a source-orc))
+  (println "copy-asset: copied-orc.health = {} name = {} (expect 33, Grunt, copied by value)"
+    (get (deref copied-orc) health) (get (deref copied-orc) name))
+  (when (not (= (get (deref copied-orc) health) 33)) (set ok false))
+  (when (not (string-match (get (deref copied-orc) name) "Grunt" 0)) (set ok false))
+
+  (val zeros u8* (zeroed-bytes a))
+  (println "zeroed-bytes: zeros[0] = {} zeros[15] = {} (expect 0, 0)" (nth zeros 0) (nth zeros 15))
+  (when (not (= (nth zeros 0) (cast u8 0))) (set ok false))
+  (when (not (= (nth zeros 15) (cast u8 0))) (set ok false))
+
+  ;; `mark`/`pop`: everything pushed after the mark is handed back, so the
+  ;; next push reuses the very same address. Held in a plain local first,
+  ;; then in a struct field and an array element -- all three are the same
+  ;; 8-byte value and have to rewind identically.
+  (val local-mark ArenaMark (mark a))
+  (val first-after i32* (push a i32))
+  (val discarded i32* (push a i32 256))
+  (set (deref discarded) 5)
+  (pop a local-mark)
+  (val reused i32* (push a i32))
+  (println "mark/pop in a local: push after the pop reuses the address = {} (expect true)"
+    (= first-after reused))
+  (when (not (= first-after reused)) (set ok false))
+
+  (val cp Checkpoint (Checkpoint {:at (mark a) :label "pre-scratch"}))
+  (val field-first i32* (push a i32))
+  (val field-discarded i32* (push a i32 256))
+  (pop a (get cp at))
+  (val field-reused i32* (push a i32))
+  (println "mark/pop through a struct field: same address again = {} label = {} (expect true, pre-scratch)"
+    (= field-first field-reused) (get cp label))
+  (when (not (= field-first field-reused)) (set ok false))
+  (when (not (string-match (get cp label) "pre-scratch" 0)) (set ok false))
+
+  (val marks [ArenaMark 2] [(mark a) (mark a)])
+  (val elem-first i32* (push a i32))
+  (val elem-discarded i32* (push a i32 256))
+  (pop a (nth marks 1))
+  (val elem-reused i32* (push a i32))
+  (println "mark/pop through an array element: same address again = {} (expect true)"
+    (= elem-first elem-reused))
+  (when (not (= elem-first elem-reused)) (set ok false))
+
+  (destroy a)
+  (if ok 0 1))

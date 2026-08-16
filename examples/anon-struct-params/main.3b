@@ -1,0 +1,41 @@
+;; Anonymous struct parameters: a `{:field type ...}` shape used directly
+;; as a `fn` parameter synthesizes (and interns, by structural shape) a
+;; real struct type, auto-binds each field as a local in the body, and
+;; lets callers pass a bare `{:field value ...}` map literal as the
+;; argument -- no need to name the synthesized type anywhere.
+(package anon-struct-params)
+
+(struct Thing [name string health i32])
+
+(fn make-thing [{:name string :health i32}] Thing
+  (Thing {:name name :health health}))
+
+;; Same field shape (name+type, same order) as make-thing's param above --
+;; should be INTERNED to the exact same synthesized struct type, not a
+;; second one. describe-thing takes that same anon shape directly (not a
+;; Thing), to prove two independently-declared identical shapes unify.
+(fn describe-thing [{:name string :health i32}] string
+  name)
+
+;; A DIFFERENT shape (extra field) -- must get its own distinct synthesized
+;; struct, not collide with the one above.
+(fn make-tagged-thing [{:name string :health i32 :tag i32}] i32
+  (+ health tag))
+
+(fn main [] i32
+  (var ok bool true)
+
+  (val t Thing (make-thing {:name "bob" :health 100}))
+  (println "make-thing: name = {} health = {}" (get t name) (get t health))
+  (when (not (string-match (get t name) "bob" 0)) (set ok false))
+  (when (not (= (get t health) 100)) (set ok false))
+
+  (val label string (describe-thing {:name "carol" :health 7}))
+  (println "describe-thing: {}" label)
+  (when (not (string-match label "carol" 0)) (set ok false))
+
+  (val tagged i32 (make-tagged-thing {:name "dave" :health 3 :tag 4}))
+  (println "make-tagged-thing: {}" tagged)
+  (when (not (= tagged 7)) (set ok false))
+
+  (if ok 0 1))

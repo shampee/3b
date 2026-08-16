@@ -1,0 +1,34 @@
+(package testsmall)
+
+(val GL_TEXTURE_2D u32 0x0DE1u32)
+(val GL_TRUE i32 1)
+
+(struct Vector2
+  [x f32
+   y f32])
+
+(struct Anon0
+  [a i32
+   b i32])
+
+(struct Player
+  [position Vector2
+   health i32
+   nested Anon0])
+
+(alias GLXContext any)
+
+(alias GLenum u32)
+
+(private (extern (fn glGetError [] i32)))
+
+(fn gl-get-error [] i32
+  (glGetError))
+
+(private (extern (fn glGenTextures [n i32 textures u32*] void)))
+
+(fn gl-gen-textures
+  [n i32
+   textures u32*] void
+  (glGenTextures n textures))
+

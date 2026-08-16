@@ -1,0 +1,58 @@
+;; Odin-style multiple return values: `(T0 T1 ...)` (2+ types, no reserved
+;; keyword head) in a `fn`'s return-type position is sugar for an interned
+;; positional struct (fields `_0`, `_1`, ...) -- same synthesis/interning
+;; machinery `{:field type ...}` anonymous-struct PARAMETERS already use,
+;; just unnamed and keyed by ordered type list instead of name:type pairs.
+;; `(return a b ...)` builds the matching struct literal automatically; the
+;; caller unpacks it with ordinary positional `let` destructuring
+;; (`[a b] expr`) -- no new binding syntax needed.
+(package multi-return)
+
+(fn try-div [a i32 b i32] (bool i32)
+  (if (= b 0)
+    (return false 0)
+    (return true (/ a b))))
+
+;; Same two-field shape (bool, i32) as try-div above -- interned to the
+;; SAME synthesized struct, not a second one.
+(fn try-parse-positive [x i32] (bool i32)
+  (if (> x 0)
+    (return true x)
+    (return false 0)))
+
+;; A different arity (3 values) gets its own, distinct synthesized struct.
+(fn div-mod [a i32 b i32] (i32 i32 bool)
+  (return (/ a b) (% a b) (= (% a b) 0)))
+
+(fn main [] i32
+  (var ok bool true)
+
+  (let [[success quotient] (try-div 10 2)]
+    (println "try-div 10 2 -> {} {}" success quotient)
+    (when (not success) (set ok false))
+    (when (not (= quotient 5)) (set ok false)))
+
+  (let [[success quotient] (try-div 10 0)]
+    (println "try-div 10 0 -> {} {}" success quotient)
+    (when success (set ok false)))
+
+  (let [[valid x] (try-parse-positive 7)]
+    (println "try-parse-positive 7 -> {} {}" valid x)
+    (when (not valid) (set ok false))
+    (when (not (= x 7)) (set ok false)))
+
+  (let [[valid x] (try-parse-positive -3)]
+    (println "try-parse-positive -3 -> {} {}" valid x)
+    (when valid (set ok false)))
+
+  (let [[q r exact] (div-mod 17 5)]
+    (println "div-mod 17 5 -> {} {} {}" q r exact)
+    (when (not (= q 3)) (set ok false))
+    (when (not (= r 2)) (set ok false))
+    (when exact (set ok false)))
+
+  (let [[q r exact] (div-mod 20 5)]
+    (println "div-mod 20 5 -> {} {} {}" q r exact)
+    (when (not exact) (set ok false)))
+
+  (if ok 0 1))

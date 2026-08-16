@@ -1,0 +1,86 @@
+;; Map<K,V>: a monomorphized open-addressing hash table (see TypeKind_Map's
+;; own comment in 3b.h and runtime/bbb_hashtable.h). Keys are restricted to
+;; numeric-ish primitives and `string` for now -- struct keys aren't
+;; supported yet. Exercises both a string-keyed and a numeric-keyed
+;; instantiation, confirming they're genuinely separate monomorphizations.
+;; Also exercises `.`'s Map sugar (`(. m key)` == `(map-get m key)`), incl.
+;; a mixed chain through a struct-valued Map.
+(package map)
+
+(struct Player [name string level i32])
+
+(fn main [] i32
+  (var ok bool true)
+  (val a arena (create))
+
+  ;; string -> i32
+  (var m1 (Map string i32))
+  (map-set a m1 "one" 1)
+  (map-set a m1 "two" 2)
+  (map-set a m1 "three" 3)
+
+  (println "contains 'two'? {}" (map-contains? m1 "two"))
+  (when (not (map-contains? m1 "two")) (set ok false))
+  (when (map-contains? m1 "missing") (set ok false))
+
+  (let [v (map-get m1 "two")]
+    (println "m1['two'] = {}" (deref v))
+    (when (not v) (set ok false))
+    (when (not (= (deref v) 2)) (set ok false)))
+
+  (when (map-get m1 "missing") (set ok false))
+
+  ;; `.` sugar: `(. m1 "two")` is exactly `(map-get m1 "two")` -- same
+  ;; nilable-pointer result, string-literal or variable key both work.
+  (let [v (. m1 "two")]
+    (println "m1.'two' (via .) = {}" (deref v))
+    (when (not (= (deref v) 2)) (set ok false)))
+  (val two-key string "two")
+  (when (not (. m1 two-key)) (set ok false))
+  (when (. m1 "missing") (set ok false))
+
+  ;; mixed chain: `.` on a struct-valued Map composes with ordinary field
+  ;; access -- `(. players "p1" level)` is `map-get` then a struct field,
+  ;; both resolved through the SAME chain, no separate syntax needed.
+  (var players (Map string Player))
+  (map-set a players "p1" (Player {:name "Ada" :level 7}))
+  (let [level (. players "p1" level)]
+    (println "players.'p1'.level (via .) = {}" level)
+    (when (not (= level 7)) (set ok false)))
+
+  ;; overwrite an existing key
+  (map-set a m1 "two" 22)
+  (let [v (map-get m1 "two")]
+    (when (not (= (deref v) 22)) (set ok false)))
+
+  (map-remove m1 "two")
+  (println "contains 'two' after remove? {}" (map-contains? m1 "two"))
+  (when (map-contains? m1 "two") (set ok false))
+  (when (not (map-contains? m1 "one")) (set ok false))
+
+  ;; i32 -> i32, large enough to force at least one resize
+  (var m2 (Map i32 i32))
+  (for [i 0 200]
+    (map-set a m2 i (* i i)))
+  (var m2-ok bool true)
+  (for [i 0 200]
+    (let [p (map-get m2 i)]
+      (when (or (not p) (not (= (deref p) (* i i)))) (set m2-ok false))))
+  (println "m2-ok (200 numeric keys, incl. resize) = {}" m2-ok)
+  (when (not m2-ok) (set ok false))
+  (when (map-get m2 99999) (set ok false))
+
+  ;; iteration -- `[[k v] m]` (Map always requires the two-binding form)
+  (var count i32 0)
+  (var val-sum i32 0)
+  (for [[k v] m2]
+    (set count (+ count 1))
+    (set val-sum (+ val-sum v)))
+  (println "iteration: count = {} (expect 200), val-sum = {}" count val-sum)
+  (when (not (= count 200)) (set ok false))
+  (var expected-sum i32 0)
+  (for [i 0 200] (set expected-sum (+ expected-sum (* i i))))
+  (when (not (= val-sum expected-sum)) (set ok false))
+
+  (destroy a)
+  (if ok 0 1))

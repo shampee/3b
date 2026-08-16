@@ -1,0 +1,51 @@
+;; Enums (plain, and with explicit values) and flags (bitmask enums, with
+;; bit-or/bit-and over their variants).
+(package enums-and-flags)
+
+(enum LightType
+  [Directional
+   Point
+   Spot])
+
+(fn get-spot-light [] LightType
+  LightType/Spot)
+
+(flags WindowFlags
+  [Resizable
+   Hidden
+   Borderless])
+
+(fn make-window-flags [] WindowFlags
+  (bit-or WindowFlags/Resizable WindowFlags/Borderless))
+
+(flags Permissions [Read Write Execute Custom 64])
+
+(fn combo [] Permissions
+  (bit-and Permissions/Read Permissions/Write))
+
+(enum HttpStatus [OK 200 NotFound 404 Teapot 418])
+
+(fn get-teapot-status [] HttpStatus
+  HttpStatus/Teapot)
+
+(fn main [] i32
+  (var ok bool true)
+
+  (val spot LightType (get-spot-light))
+  (println "get-spot-light = {} (expect LightType/Spot = {})" (cast i32 spot) (cast i32 LightType/Spot))
+  (when (not (= spot LightType/Spot)) (set ok false))
+
+  (val flags WindowFlags (make-window-flags))
+  (println "make-window-flags = {} (expect Resizable|Borderless = {})"
+    (cast i32 flags) (cast i32 (bit-or WindowFlags/Resizable WindowFlags/Borderless)))
+  (when (not (= flags (bit-or WindowFlags/Resizable WindowFlags/Borderless))) (set ok false))
+
+  (val perm Permissions (combo))
+  (println "combo = {} (expect Read&Write = {})" (cast i32 perm) (cast i32 (bit-and Permissions/Read Permissions/Write)))
+  (when (not (= perm (bit-and Permissions/Read Permissions/Write))) (set ok false))
+
+  (val status HttpStatus (get-teapot-status))
+  (println "get-teapot-status = {} (expect Teapot = {})" (cast i32 status) (cast i32 HttpStatus/Teapot))
+  (when (not (= status HttpStatus/Teapot)) (set ok false))
+
+  (if ok 0 1))

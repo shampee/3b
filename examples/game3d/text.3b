@@ -1,0 +1,124 @@
+(package game3d)
+(import stbtt)
+(import os)
+
+;; Groundwork for menus/error messages: load a TTF, bake it into a single
+;; texture atlas once (stbtt's "TEXTURE BAKING API" -- see stbtt/
+;; stbtt.cfg.3b's own comment for why only that small a slice of
+;; stb_truetype is bound at all), then draw arbitrary strings against it
+;; via renderer.3b's begin-ui/draw-ui-quad/end-ui screen-space quad pass.
+;; No layout system, no word-wrap, no multi-font atlases -- just "get a
+;; string of pixels on screen at an (x, y)", the primitive everything
+;; else (a menu, an error dialog) will eventually build on.
+
+;; ASCII 32 (space) through 126 (~) -- covers every printable character a
+;; menu/error message needs; nothing outside this range renders (see
+;; draw-text's own bounds check). Deliberately NOT full Unicode -- the
+;; baked-bitmap API bakes one contiguous codepoint range into one
+;; texture, and this demo has no non-ASCII UI text to justify a bigger
+;; atlas or the newer multi-range Pack* API stb_truetype also offers.
+(val font-first-char i32 32)
+(val font-num-chars  i32 95)
+
+;; 512x512 comfortably fits the full 95-character range at any pixel
+;; height this demo is likely to use; stbtt/bake-font-bitmap's own return
+;; value is checked in load-font in case a future much-larger pixel-
+;; height ever doesn't fit, rather than assuming this constant is always
+;; enough.
+(val font-atlas-size i32 512)
+
+(struct Font
+  [texture      u32                    ; R8 atlas, see texture.3b's make-texture-r8
+   chardata     stbtt/BakedChar* ; font-num-chars long, arena-allocated
+   atlas-w      i32
+   atlas-h      i32
+   pixel-height f32
+   ;; Baseline-to-top distance at this pixel-height (stbtt's own scaled
+   ;; VMetrics) -- draw-text/measure-text-height callers that want to
+   ;; position by a box's TOP rather than its baseline need this; not
+   ;; used internally (stbtt-get-baked-quad already expects a baseline).
+   ascent       f32
+   valid        bool])
+
+;; Reads `path` (a .ttf, e.g. DejaVuSans.ttf next to this demo's other
+;; assets) and bakes ASCII 32..126 into one atlas at `pixel-height`.
+;; Everything (file bytes, the atlas bitmap, the per-glyph metrics array)
+;; lives in `arena` -- same "load once at startup, arena owns it for the
+;; program's lifetime" convention model.3b's own load-model already
+;; uses, no separate free path.
+(fn load-font [arena arena path string pixel-height f32] Font
+  (let [contents (os/read-file arena path)]
+    (when (<= (len contents) 0u64)
+      (println "load-font: could not read {}" path)
+      (return (zero Font)))
+    (let [data (cast u8* (cstring contents))
+          pixels (push arena u8 (cast u64 (* font-atlas-size font-atlas-size)))
+          chardata (push arena stbtt/BakedChar (cast u64 font-num-chars))
+          fit (stbtt/bake-font-bitmap data 0 pixel-height pixels font-atlas-size font-atlas-size
+                font-first-char font-num-chars chardata)]
+      ;; stbtt/bake-font-bitmap's own contract: positive = success (the
+      ;; first unused bitmap row, which this doesn't need); 0 = the atlas
+      ;; is too small for even one glyph, a real failure; negative = only
+      ;; SOME glyphs fit (the atlas is usably full, just not every
+      ;; requested character made it in) -- still usable, just logged.
+      (when (= fit 0)
+        (println "load-font: {} didn't fit ANY glyphs into a {}x{} atlas at {}px"
+          path font-atlas-size font-atlas-size pixel-height)
+        (return (zero Font)))
+      (when (< fit 0)
+        (println "load-font: {} only fit {} of {} glyphs into a {}x{} atlas at {}px -- consider raising font-atlas-size"
+          path (+ font-num-chars fit) font-num-chars font-atlas-size font-atlas-size pixel-height))
+      (var ascent f32 0.0)
+      (var descent f32 0.0)
+      (var line-gap f32 0.0)
+      (stbtt/get-scaled-font-v-metrics data 0 pixel-height (addr ascent) (addr descent) (addr line-gap))
+      (Font {:texture (make-texture-r8 pixels font-atlas-size font-atlas-size)
+             :chardata chardata
+             :atlas-w font-atlas-size
+             :atlas-h font-atlas-size
+             :pixel-height pixel-height
+             :ascent ascent
+             :valid true}))))
+
+;; Total advance width of `text` at `font`'s own pixel-height, in pixels
+;; -- useful for right-aligning/centring before a real layout system
+;; exists. Walks the same per-glyph advance draw-text does but without
+;; emitting any quads (xpos accumulates identically either way, since
+;; stbtt-get-baked-quad advances it purely from xadvance regardless of
+;; whether the caller draws the returned quad).
+(fn measure-text [font Font* text string] f32
+  (when (not (. font valid)) (return 0.0))
+  (var xpos f32 0.0)
+  (var ypos f32 0.0)
+  (let [bytes (cast u8* (cstring text))
+        n (len text)]
+    (for [i 0u64 n]
+      (let [ch (cast i32 (nth bytes i))]
+        (when (and (>= ch font-first-char) (< ch (+ font-first-char font-num-chars)))
+          (var q stbtt/AlignedQuad (zero stbtt/AlignedQuad))
+          (stbtt/get-baked-quad (. font chardata) (. font atlas-w) (. font atlas-h)
+            (- ch font-first-char) (addr xpos) (addr ypos) (addr q) 1)))))
+  xpos)
+
+;; Draws `text` with its baseline at (x, y) in screen pixels (Y-down --
+;; renderer.3b's begin-ui convention), tinted `color`. Self-contained
+;; (wraps its own begin-ui/end-ui, see renderer.3b's own comment on why
+;; that's fine for menu/error-message-scale text volume) -- callers don't
+;; need to know draw-ui-quad exists at all for the common case of just
+;; wanting a string on screen.
+(fn draw-text [renderer Renderer* font Font* text string x f32 y f32 color Vec4] void
+  (when (not (. font valid)) (return))
+  (begin-ui renderer)
+  (var xpos f32 x)
+  (var ypos f32 y)
+  (let [bytes (cast u8* (cstring text))
+        n (len text)]
+    (for [i 0u64 n]
+      (let [ch (cast i32 (nth bytes i))]
+        (when (and (>= ch font-first-char) (< ch (+ font-first-char font-num-chars)))
+          (var q stbtt/AlignedQuad (zero stbtt/AlignedQuad))
+          (stbtt/get-baked-quad (. font chardata) (. font atlas-w) (. font atlas-h)
+            (- ch font-first-char) (addr xpos) (addr ypos) (addr q) 1)
+          (draw-ui-quad renderer (. q x0) (. q y0) (. q x1) (. q y1)
+            (. q s0) (. q t0) (. q s1) (. q t1) color (. font texture))))))
+  (end-ui renderer))

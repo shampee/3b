@@ -1,0 +1,19 @@
+(package game3d)
+
+;; Groundwork-adjacent to text.3b's FPS counter: the game's own current
+;; memory footprint, for the same on-screen debug HUD. See meminfo.c's
+;; own comment for why this is current RSS (via /proc/self/statm), not
+;; getrusage's peak-only ru_maxrss, and why it's hand-written C rather
+;; than routed through `os/read-file`. The real C function is named
+;; `meminfo_process_rss_bytes`, NOT `game3d_process_rss_bytes` -- this
+;; wrapper's own C name mangles to exactly that (package `game3d` + this
+;; fn's own stripped name), so the real function can't be named that too
+;; without colliding with its own wrapper -- see meminfo.h's own comment.
+(private (extern (fn meminfo_process_rss_bytes [] u64)))
+
+(fn process-rss-bytes [] u64 (meminfo_process_rss_bytes))
+
+;; Convenience: the same value in whole megabytes (1024*1024, not
+;; 1000*1000 -- matches how every OS memory monitor/`top`/`ps` already
+;; reports it, and what a HUD reader would expect "MB" to mean here).
+(fn process-rss-mb [] f32 (/ (cast f32 (process-rss-bytes)) (* 1024.0 1024.0)))

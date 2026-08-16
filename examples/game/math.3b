@@ -1,0 +1,269 @@
+(package game)
+
+;; Rgba8
+(struct Rgba8
+  [r u8 g u8 b u8 a u8])
+
+(fn rgba8 [r u8 g u8 b u8 a u8] Rgba8
+  (Rgba8 r g b a))
+
+;; Scalar
+(fn mix-f32 [a f32 b f32 t f32] f32 (+ a (* (- b a) (clamp t 0.0 1.0))))
+(fn mix-f64 [a f64 b f64 t f64] f64 (+ a (* (- b a) (clamp t 0.0f64 1.0f64))))
+
+;; Vec2
+(union Vec2
+  [_ (struct [x f32 y f32])
+   _ (struct [w f32 h f32])
+   v [f32 2]])
+
+(fn vec2 [x f32 y f32] Vec2 (Vec2 {:x x :y y}))
+(fn add-vec2 [a Vec2 b Vec2] Vec2 (vec2 (+ (. a x) (. b x)) (+ (. a y) (. b y))))
+(fn sub-vec2 [a Vec2 b Vec2] Vec2 (vec2 (- (. a x) (. b x)) (- (. a y) (. b y))))
+(fn mul-vec2 [a Vec2 b Vec2] Vec2 (vec2 (* (. a x) (. b x)) (* (. a y) (. b y))))
+(fn div-vec2 [a Vec2 b Vec2] Vec2 (vec2 (/ (. a x) (. b x)) (/ (. a y) (. b y))))
+(fn scale-vec2 [v Vec2 s f32] Vec2 (vec2 (* (. v x) s) (* (. v y) s)))
+(fn dot-vec2 [a Vec2 b Vec2] f32 (+ (* (. a x) (. b x)) (* (. a y) (. b y))))
+(fn length-squared-vec2 [v Vec2] f32 (+ (* (. v x) (. v x)) (* (. v y) (. v y))))
+(fn length-vec2 [v Vec2] f32 (sqrt (+ (* (. v x) (. v x)) (* (. v y) (. v y)))))
+(fn normalize-vec2 [v Vec2] Vec2 (scale-vec2 v (/ 1.0 (length-vec2 v))))
+(fn mix-vec2 [a Vec2 b Vec2 t f32] Vec2 (vec2 (mix-f32 (. a x) (. b x) t) (mix-f32 (. a y) (. b y) t)))
+(fn lerp-vec2 [a Vec2 b Vec2 t f32] Vec2 (add-vec2 a (scale-vec2 (sub-vec2 b a) t)))
+
+;; Vec3
+(union Vec3
+  [_ (struct [x f32 y f32 z f32])
+   _ (struct [r f32 g f32 b f32])
+   v [f32 3]])
+
+(fn vec3 [x f32 y f32 z f32] Vec3 (Vec3 {:x x :y y :z z}))
+(fn add-vec3 [a Vec3 b Vec3] Vec3 (vec3 (+ (. a x) (. b x)) (+ (. a y) (. b y)) (+ (. a z) (. b z))))
+(fn sub-vec3 [a Vec3 b Vec3] Vec3 (vec3 (- (. a x) (. b x)) (- (. a y) (. b y)) (- (. a z) (. b z))))
+(fn mul-vec3 [a Vec3 b Vec3] Vec3 (vec3 (* (. a x) (. b x)) (* (. a y) (. b y)) (* (. a z) (. b z))))
+(fn div-vec3 [a Vec3 b Vec3] Vec3 (vec3 (/ (. a x) (. b x)) (/ (. a y) (. b y)) (/ (. a z) (. b z))))
+(fn scale-vec3 [v Vec3 s f32] Vec3 (vec3 (* (. v x) s) (* (. v y) s) (* (. v z) s)))
+(fn dot-vec3 [a Vec3 b Vec3] f32 (+ (* (. a x) (. b x)) (* (. a y) (. b y)) (* (. a z) (. b z))))
+(fn length-squared-vec3 [v Vec3] f32 (+ (* (. v x) (. v x)) (* (. v y) (. v y)) (* (. v z) (. v z))))
+(fn length-vec3 [v Vec3] f32 (sqrt (+ (* (. v x) (. v x)) (* (. v y) (. v y)) (* (. v z) (. v z)))))
+(fn normalize-vec3 [v Vec3] Vec3 (scale-vec3 v (/ 1.0 (length-vec3 v))))
+(fn mix-vec3 [a Vec3 b Vec3 t f32] Vec3
+  (vec3 (mix-f32 (. a x) (. b x) t) (mix-f32 (. a y) (. b y) t) (mix-f32 (. a z) (. b z) t)))
+(fn cross-vec3 [a Vec3 b Vec3] Vec3
+  (let [{:x ax :y ay :z az} a
+        {:x bx :y by :z bz} b]
+    (vec3 (- (* ay bz) (* az by))
+          (- (* az bx) (* ax bz))
+          (- (* ax by) (* ay bx)))))
+
+;; Vec4
+(union Vec4
+  [_ (struct [x f32 y f32 z f32 w f32])
+   _ (struct [r f32 g f32 b f32 a f32])
+   v [f32 4]])
+(fn vec4 [x f32 y f32 z f32 w f32] Vec4 (Vec4 {:x x :y y :z z :w w}))
+(fn add-vec4 [a Vec4 b Vec4] Vec4 (vec4 (+ (. a x) (. b x)) (+ (. a y) (. b y)) (+ (. a z) (. b z)) (+ (. a w) (. b w))))
+(fn sub-vec4 [a Vec4 b Vec4] Vec4 (vec4 (- (. a x) (. b x)) (- (. a y) (. b y)) (- (. a z) (. b z)) (- (. a w) (. b w))))
+(fn mul-vec4 [a Vec4 b Vec4] Vec4 (vec4 (* (. a x) (. b x)) (* (. a y) (. b y)) (* (. a z) (. b z)) (* (. a w) (. b w))))
+(fn div-vec4 [a Vec4 b Vec4] Vec4 (vec4 (/ (. a x) (. b x)) (/ (. a y) (. b y)) (/ (. a z) (. b z)) (/ (. a w) (. b w))))
+(fn scale-vec4 [v Vec4 s f32] Vec4 (vec4 (* (. v x) s) (* (. v y) s) (* (. v z) s) (* (. v w) s)))
+(fn dot-vec4 [a Vec4 b Vec4] f32 (+ (* (. a x) (. b x)) (* (. a y) (. b y)) (* (. a z) (. b z)) (* (. a w) (. b w))))
+(fn length-squared-vec4 [v Vec4] f32 (+ (* (. v x) (. v x)) (* (. v y) (. v y)) (* (. v z) (. v z)) (* (. v w) (. v w))))
+(fn length-vec4 [v Vec4] f32 (sqrt (+ (* (. v x) (. v x)) (* (. v y) (. v y)) (* (. v z) (. v z)) (* (. v w) (. v w)))))
+(fn normalize-vec4 [v Vec4] Vec4 (scale-vec4 v (/ 1.0 (length-vec4 v))))
+(fn mix-vec4 [a Vec4 b Vec4 t f32] Vec4
+  (vec4 (mix-f32 (. a x) (. b x) t) (mix-f32 (. a y) (. b y) t) (mix-f32 (. a z) (. b z) t) (mix-f32 (. a w) (. b w) t)))
+
+;; Mat4
+(align 16
+  (union Mat4
+    [_ (struct [m0  f32 m4  f32 m8  f32 m12 f32
+                m1  f32 m5  f32 m9  f32 m13 f32
+                m2  f32 m6  f32 m10 f32 m14 f32
+                m3  f32 m7  f32 m11 f32 m15 f32])
+     _ (struct [x Vec4 y Vec4 z Vec4 w Vec4])
+     v [[f32 4] 4]]))
+
+(fn mat4 [diagonal f32] Mat4
+  (Mat4 {:v [[diagonal 0.0 0.0 0.0]
+             [0.0 diagonal 0.0 0.0]
+             [0.0 0.0 diagonal 0.0]
+             [0.0 0.0 0.0 diagonal]]}))
+
+(fn make-translate-mat4 [delta Vec3] Mat4
+  (let [result (mat4 1.0)]
+    (set (. result m3) (. delta x))
+    (set (. result m7) (. delta y))
+    (set (. result m11) (. delta z))
+    result))
+
+;; The three projection builders below, plus make-look-at-mat4, all
+;; agree on OpenGL's own convention: a right-handed world, view space
+;; with +X right / +Y up / -Z forward (so anything you can see has a
+;; NEGATIVE view-space z), and a depth range of [-1, 1].
+;;
+;; That agreement is load-bearing, not cosmetic. These used to be the
+;; +Z-forward variant (m14 = +1 in perspective, `eye - center` in
+;; look-at), and the pair of them multiplied out to a horizontally
+;; MIRRORED image: x_ndc came out negated, which silently reverses
+;; triangle winding, so backface culling kept exactly the faces it
+;; should have dropped. Nothing symmetric ever looks wrong, which is
+;; what made it survive. If you change the handedness of one of these,
+;; change all four.
+(fn make-perspective-mat4 [fov f32 aspect-ratio f32 near-z f32 far-z f32] Mat4
+  (let [result (mat4 1.0)
+        tan-theta-over-2 (tan (/ fov 2.0))]
+    (set (. result m0) (/ 1.0 tan-theta-over-2))
+    (set (. result m5) (/ aspect-ratio tan-theta-over-2))
+    (set (. result m14) -1.0) ; w_clip = -z_view
+    (set (. result m10) (/ (+ near-z far-z) (- near-z far-z)))
+    (set (. result m11) (/ (* 2.0 near-z far-z) (- near-z far-z)))
+    (set (. result m15) 0.0)
+    result))
+
+(fn make-orthographic-mat4 [left f32 right f32 bottom f32 top f32 near-z f32 far-z f32] Mat4
+  (let [result (mat4 1.0)]
+    (set (. result m0) (/ 2.0 (- right left)))
+    (set (. result m5) (/ 2.0 (- top bottom)))
+    (set (. result m10) (/ -2.0 (- far-z near-z)))
+    (set (. result m15) 1.0)
+    (set (. result m3) (/ (+ left right) (- left right)))
+    (set (. result m7) (/ (+ bottom top) (- bottom top)))
+    (set (. result m11) (/ (+ near-z far-z) (- near-z far-z)))
+    result))
+
+(fn make-look-at-mat4 [eye Vec3 center Vec3 up Vec3] Mat4
+  (let [f (normalize-vec3 (sub-vec3 center eye)) ; forward: eye -> target
+        s (normalize-vec3 (cross-vec3 f up))     ; right
+        u (cross-vec3 s f)]                      ; true up
+    (Mat4 {:v [[(. s x) (. u x) (- (. f x)) 0.0]
+               [(. s y) (. u y) (- (. f y)) 0.0]
+               [(. s z) (. u z) (- (. f z)) 0.0]
+               [(- (dot-vec3 s eye)) (- (dot-vec3 u eye)) (dot-vec3 f eye) 1.0]]})))
+
+(fn make-rotate-mat4 [axis Vec3 radians f32] Mat4
+  (let [result (mat4 1.0)
+        axis (normalize-vec3 axis)
+        {:x ax :y ay :z az} axis
+        sin-theta (sin radians)
+        cos-theta (cos radians)
+        cos-value (- 1.0 cos-theta)]
+    (set (. result m0) (+ (* ax ax cos-value) cos-theta))
+    (set (. result m4) (+ (* ax ay cos-value) (* az sin-theta)))
+    (set (. result m8) (- (* ax az cos-value) (* ay sin-theta)))
+    (set (. result m1) (- (* ay ax cos-value) (* az sin-theta)))
+    (set (. result m5) (+ (* ay ay cos-value) cos-theta))
+    (set (. result m9) (+ (* ay az cos-value) (* ax sin-theta)))
+    (set (. result m2) (+ (* az ax cos-value) (* ay sin-theta)))
+    (set (. result m6) (- (* az ay cos-value) (* ax sin-theta)))
+    (set (. result m10) (+ (* az az cos-value) cos-theta))
+    result))
+
+(fn mul-mat4 [a Mat4 b Mat4] Mat4
+  (let [result (zero Mat4)]
+    (for [j 0 4]
+      (for [i 0 4]
+        (set (nth (. result v) [i j])
+          (+
+            (* (nth (. a v) [0 j]) (nth (. b v) [i 0]))
+            (* (nth (. a v) [1 j]) (nth (. b v) [i 1]))
+            (* (nth (. a v) [2 j]) (nth (. b v) [i 2]))
+            (* (nth (. a v) [3 j]) (nth (. b v) [i 3]))))))
+    result))
+
+(fn scale-mat4 [m Mat4 scale f32] Mat4
+  (for [j 0 4]
+    (for [i 0 4]
+      (*= (nth (. m v) [i j]) scale)))
+  m)
+
+(fn make-scale-mat4 [scale Vec3] Mat4
+  (let [result (mat4 1.0)]
+    (set (. result m0) (. scale x))
+    (set (. result m5) (. scale y))
+    (set (. result m10) (. scale z))
+    result))
+
+(fn transpose-mat4 [m Mat4] Mat4
+  (let [[[m0 m4 m8 m12] [m1 m5 m9 m13] [m2 m6 m10 m14] [m3 m7 m11 m15]] (. m v)]
+    (Mat4 {:v [[m0 m1 m2 m3]
+               [m4 m5 m6 m7]
+               [m8 m9 m10 m11]
+               [m12 m13 m14 m15]]})))
+
+(fn derotate-mat4 [m Mat4] Mat4
+  (let [scale (vec3 (length-vec3 (vec3 (. m m0) (. m m4) (. m m8)))
+                    (length-vec3 (vec3 (. m m1) (. m m5) (. m m9)))
+                    (length-vec3 (vec3 (. m m2) (. m m6) (. m m10))))]
+    (set (. m m0) (. scale x))
+    (set (. m m1) 0.0)
+    (set (. m m2) 0.0)
+    (set (. m m4) 0.0)
+    (set (. m m5) (. scale y))
+    (set (. m m6) 0.0)
+    (set (. m m8) 0.0)
+    (set (. m m9) 0.0)
+    (set (. m m10) (. scale z))
+    m))
+
+(fn inverse-mat4 [m Mat4] Mat4
+  (let [[[m0 m4 m8 m12] [m1 m5 m9 m13] [m2 m6 m10 m14] [m3 m7 m11 m15]] (. m v)
+        coef00 (- (* m10 m15) (* m11 m14))
+        coef02 (- (* m9 m15) (* m11 m13))
+        coef03 (- (* m9 m14) (* m10 m13))
+        coef04 (- (* m6 m15) (* m7 m14))
+        coef06 (- (* m5 m15) (* m7 m13))
+        coef07 (- (* m5 m14) (* m6 m13))
+        coef08 (- (* m6 m11) (* m7 m10))
+        coef10 (- (* m5 m11) (* m7 m9))
+        coef11 (- (* m5 m10) (* m6 m9))
+        coef12 (- (* m2 m15) (* m3 m14))
+        coef14 (- (* m1 m15) (* m3 m13))
+        coef15 (- (* m1 m14) (* m2 m13))
+        coef16 (- (* m2 m11) (* m3 m10))
+        coef18 (- (* m1 m11) (* m3 m9))
+        coef19 (- (* m1 m10) (* m2 m9))
+        coef20 (- (* m2 m7) (* m3 m6))
+        coef22 (- (* m1 m7) (* m3 m5))
+        coef23 (- (* m1 m6) (* m2 m5))
+
+        fac0 (vec4 coef00 coef00 coef02 coef03)
+        fac1 (vec4 coef04 coef04 coef06 coef07)
+        fac2 (vec4 coef08 coef08 coef10 coef11)
+        fac3 (vec4 coef12 coef12 coef14 coef15)
+        fac4 (vec4 coef16 coef16 coef18 coef19)
+        fac5 (vec4 coef20 coef20 coef22 coef23)
+
+        vec0 (vec4 m1 m0 m0 m0)
+        vec1 (vec4 m5 m4 m4 m4)
+        vec2 (vec4 m9 m8 m8 m8)
+        vec3 (vec4 m13 m12 m12 m12)
+
+        inv0 (add-vec4 (sub-vec4 (mul-vec4 vec1 fac0) (mul-vec4 vec2 fac1)) (mul-vec4 vec3 fac2))
+        inv1 (add-vec4 (sub-vec4 (mul-vec4 vec0 fac0) (mul-vec4 vec2 fac3)) (mul-vec4 vec3 fac4))
+        inv2 (add-vec4 (sub-vec4 (mul-vec4 vec0 fac1) (mul-vec4 vec1 fac3)) (mul-vec4 vec3 fac5))
+        inv3 (add-vec4 (sub-vec4 (mul-vec4 vec0 fac2) (mul-vec4 vec1 fac4)) (mul-vec4 vec2 fac5))
+
+        sign-a (vec4 1.0 -1.0 1.0 -1.0)
+        sign-b (vec4 -1.0 1.0 -1.0 1.0)
+
+        result (mat4 1.0)]
+    (for [i 0 4]
+      (set (nth (. result v) [0 i]) (* (nth (. inv0 v) i) (nth (. sign-a v) i)))
+      (set (nth (. result v) [1 i]) (* (nth (. inv1 v) i) (nth (. sign-b v) i)))
+      (set (nth (. result v) [2 i]) (* (nth (. inv2 v) i) (nth (. sign-a v) i)))
+      (set (nth (. result v) [3 i]) (* (nth (. inv3 v) i) (nth (. sign-b v) i))))
+    (let [row0    (vec4 (. result m0) (. result m1) (. result m2) (. result m3))
+          m0      (vec4 (. m m0) (. m m4) (. m m8) (. m m12))
+          dot0    (mul-vec4 m0 row0)
+          det     (+ (. dot0 x) (. dot0 y) (. dot0 z) (. dot0 w))
+          inv-det (/ 1.0 det)]
+      (scale-mat4 result inv-det))))
+
+;; Rng2
+(union Rng2
+  [_ (struct [min Vec2 max Vec2])
+   _ (struct [p0 Vec2 p1 Vec2])
+   _ (struct [x0 f32 y0 f32 x1 f32 y1 f32])
+   v [Vec2 2]])
+(fn rng2 [min Vec2 max Vec2] Rng2 (Rng2 {:min min :max max}))
+(fn rng2p [x0 f32 y0 f32 x1 f32 y1 f32] Rng2 (Rng2 {:x0 x0 :y0 y0 :x1 x1 :y1 y1}))

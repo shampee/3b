@@ -1,0 +1,53 @@
+(package game3d)
+
+;; Scene-facing skybox API -- `Scene.sky-cubemap` (scene.3b) is 0 by
+;; default, which draw-sky (renderer.3b) reads as "compute the live
+;; gradient+sun-glow every frame" (renderer.3b's own sky-frag-src). Every
+;; function here just manages that one field, three different ways to
+;; put a real cubemap texture into it instead:
+;;
+;;   set-skybox-cubemap      -- caller already has a real cubemap id
+;;                               (e.g. built some other way), use it as-is
+;;   generate-skybox-gradient -- BAKE the same gradient+glow formula the
+;;                               live path already draws into a real
+;;                               cubemap (renderer.3b's make-sky-
+;;                               gradient-cubemap) -- a fixed SNAPSHOT,
+;;                               doesn't keep tracking the sun afterward
+;;                               the way the live (0) path does
+;;   load-skybox-from-files  -- real skybox art, 6 image files
+;;                               (texture.3b's load-cubemap-from-files)
+;;
+;; clear-skybox goes back to 0 -- the live gradient again. None of these
+;; free whatever cubemap texture WAS set (if any) before overwriting it
+;; -- same as every other texture-id in this project (scene.3b's
+;; texture-checker/brick/dots, light-icon-texture), a GL texture object
+;; is cheap enough at this project's scale that nothing here has ever
+;; bothered with reference counting or explicit teardown outside of
+;; whole-Renderer shutdown.
+
+(fn set-skybox-cubemap [scene Scene* cubemap u32] void
+  (set (. scene sky-cubemap) cubemap))
+
+(fn clear-skybox [scene Scene*] void
+  (set (. scene sky-cubemap) 0u32))
+
+;; Bakes `horizon`/`zenith` (plus a snapshot of scene.lights.sun's
+;; current direction/color/enabled) into a real cubemap and installs it.
+;; `size` is the cubemap's own per-face resolution (renderer.3b's
+;; make-sky-gradient-cubemap) -- 128-256 is already plenty for a gradient
+;; this smooth, nowhere near the sun shadow map's own 2048.
+(fn generate-skybox-gradient [renderer Renderer* scene Scene* horizon Vec3 zenith Vec3 size i32] void
+  (let [sun (. scene lights sun)
+        cubemap (make-sky-gradient-cubemap renderer horizon zenith (. sun dir) (. sun color) (. sun enabled) size)]
+    (when (!= cubemap 0u32) (set (. scene sky-cubemap) cubemap))))
+
+;; Loads 6 real image files (+X/-X/+Y/-Y/+Z/-Z order, texture.3b's
+;; load-cubemap-from-files) and installs the result -- false (scene left
+;; untouched) on any failure (missing file, decode error, mismatched face
+;; sizes -- see load-cubemap-from-files's own comment).
+(fn load-skybox-from-files
+  [scene Scene* px string nx string py string ny string pz string nz string] bool
+  (let [cubemap (load-cubemap-from-files px nx py ny pz nz)]
+    (when (= cubemap 0u32) (return false))
+    (set (. scene sky-cubemap) cubemap)
+    true))

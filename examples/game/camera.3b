@@ -1,0 +1,7 @@
+(package game)
+
+(struct Camera
+  [pos Vec2])
+
+(fn move-camera [cam Camera* pos Vec2] void
+  (set (. cam pos) pos))

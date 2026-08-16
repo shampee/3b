@@ -1,0 +1,4 @@
+(package game)
+
+(struct Editor
+  [cam Camera])

@@ -1,0 +1,1796 @@
+(package game3d)
+(import gl)
+(import os)
+
+;; Runtime brush editor: toggled by Input.edit-mode (F1, input.3b's own
+;; comment). While active, main.3b's loop calls update-editor here
+;; instead of scene.3b's update-scene -- WASD/arrows, Q/E and Z/X (held)
+;; move/raise/rotate a brush instead of the player, and B/R/[/]/Delete
+;; (one-shot, input.3b) create, cycle, and remove brushes. The world is
+;; otherwise frozen while editing (main.3b feeds it dt=0 and skips
+;; update-scene entirely), so nothing animates or walks around under you
+;; while you place things.
+;;
+;; Selection is either cycled ([/]) through scene.brushes in storage order,
+;; or clicked directly: mouse1 (input.3b's `pick`) fires a world-space ray
+;; (camera.3b's camera-ray) through the cursor and update-editor below
+;; hands it to scene.3b's scene-pick-brush, same "-1 = none, else index
+;; into scene.brushes" selection this file already used for [/]. Clicking
+;; empty space deselects. editor.ortho-target (every ortho pane's shared
+;; look-at point, see camera.3b's ortho-view-matrix) jumps to frame
+;; whatever's newly selected -- but only the frame `selected` actually
+;; CHANGES (pick, [/] cycling, B/R/H spawning, Delete), never continuously
+;; while it's being moved or resized, and never the PERSPECTIVE camera's
+;; own scene.camera.target at all -- selecting/cycling/spawning something
+;; doesn't relocate that view, only the 3 ortho panes (which, unlike
+;; Perspective, have no other way to keep whatever's selected in frame --
+;; there's no pan control yet, only per-pane zoom). This all used to be
+;; ONE shared `scene.camera.target` re-centred every single frame the
+;; cursor/selection had a nonzero position, which meant WASD-moving or
+;; gizmo-dragging anything dragged the ENTIRE 4-pane view -- Perspective
+;; included -- right along with it, disorienting to watch and actively
+;; unhelpful for eyeballing a drag against a viewport that's supposed to
+;; hold still.
+;;
+;; Holding mouse1 down on a face and dragging resizes it: scene-pick-brush
+;; hands back not just which brush but which face (a local-space normal),
+;; editor-start-resize below turns that into an axis (0/1/2 = x/y/z) and
+;; sign, and every frame mouse1 stays held, editor-apply-resize projects
+;; that frame's 2D mouse motion onto the face's WORLD-space outward normal
+;; (camera.3b's camera-basis) to get a scalar "how far did the face move"
+;; and grows/shrinks the brush accordingly, rebuilding its GL mesh in
+;; place every time (rebuild-brush-mesh) -- these are tiny procedural
+;; meshes (mesh.3b's make-box-mesh/make-ramp-mesh, a few dozen vertices),
+;; so redoing the GL buffers every frame of an active drag is cheap; a
+;; deferred-rebuild-on-release scheme would save nothing that matters here.
+;; X/Z resize is CENTRED (drag one face, the opposite one stays put, same
+;; as dragging a face in most 3D editors); Y resize (Box's half-y, Ramp's
+;; height) is anchored at the base instead, matching how Box/Ramp are
+;; already placed (see add-box-brush/add-ramp-brush) -- growing height
+;; never moves `offset`.
+;;
+;; G toggles grid snapping (input.3b's snap-to-grid); when on, both WASD
+;; movement and face-drag resizing round their result to the nearest
+;; multiple of EditorState.grid-size (snap-value/snap-vec3 below) instead
+;; of applying raw. grid-size itself lives on EditorState rather than a
+;; `val` constant specifically so a later "type a grid size" UI has a
+;; single field to `set` -- there's no text input yet to drive one.
+;;
+;; Whatever's selected (or the free cursor) also draws a translate gizmo:
+;; three thin RGB arms (X red, Y green, Z blue -- draw-gizmo-arm) pointing
+;; along the WORLD axes from the pivot, always axis-aligned regardless of
+;; a selected brush's yaw (unlike face-drag resizing's local-space
+;; normals). Grabbing one (editor-pick-gizmo-arm, checked BEFORE
+;; scene-pick-brush so the gizmo wins over a face directly behind it) and
+;; dragging moves the pivot along just that axis -- editor-apply-gizmo-
+;; drag feeds the drag straight into the SAME raw-offset accumulator WASD
+;; movement uses, so it's really just "move, constrained to one axis,"
+;; not a separate movement system.
+
+(val edit-move-speed      f32 4.0)   ; world units/sec, WASD/arrows + Q/E
+(val edit-rotate-speed    f32 2.0)   ; radians/sec, Z/X
+(val camera-fly-speed     f32 6.0)   ; world units/sec, WASD/arrows + Q/E while free-looking
+                                      ; (mouse2 held over the Perspective pane) -- a bit faster than
+                                      ; edit-move-speed since it's covering open space, not nudging
+                                      ; one brush
+(val edit-spawn-half-x    f32 1.0)
+(val edit-spawn-half-z    f32 1.0)
+(val edit-spawn-half-y    f32 0.5)   ; box brushes
+(val edit-spawn-height    f32 1.0)   ; ramp brushes
+(val edit-spawn-hole-half-x f32 0.4) ; hole brushes -- ~0.8m wide door/window
+(val edit-spawn-hole-half-y f32 1.0) ; ~2m tall
+(val edit-spawn-hole-half-z f32 0.2) ; ~0.4m thick -- must exceed a wall's own thin half-extent to
+                                     ; guarantee it can pierce all the way through, see
+                                     ; rebuild-all-wall-meshes's through-axis test
+(val edit-spawn-radius    f32 0.6)   ; sphere brushes
+(val drag-sensitivity     f32 0.01)  ; world units of face/gizmo movement per pixel of mouse drag
+(val resize-min-half      f32 0.1)   ; smallest half-x/half-y/half-z/height/radius a drag can shrink a brush to
+(val thing-min-scale      f32 0.1)   ; smallest Thing.scale a face-drag can shrink a placed prop to
+(val light-radius-min     f32 0.5)   ; world units, `,`/`.`-adjustable point-light falloff clamp
+(val light-radius-max     f32 40.0)
+(val light-radius-speed   f32 6.0)   ; world units/sec, held `,`/`.`
+(val default-light-color     Vec3 (Vec3 {:x 1.0 :y 0.95 :z 0.85})) ; warm white -- newly spawned point lights
+(val default-light-intensity f32 1.2)
+(val default-light-radius    f32 6.0)
+;; Degrees -- editor-cycle-selected-light-kind's own defaults whenever a
+;; Point light is flipped to Spot (light-panel.3b's Type button).
+(val default-spot-cone-inner f32 25.0)
+(val default-spot-cone-outer f32 35.0)
+(val default-grid-size    f32 0.5)   ; world units -- EditorState.grid-size starts here
+(val gizmo-arm-length     f32 1.2)   ; world units, pivot to arm tip
+(val gizmo-arm-thickness  f32 0.025) ; world units, arm cross-section (visual)
+(val gizmo-pick-thickness f32 0.22)  ; world units, arm cross-section (ray-test hitbox -- wider than the
+                                     ; visual for a forgiving click target, standard gizmo-handle practice
+
+(val hole-wire-color   Vec3 (Vec3 {:x 0.95 :y 0.3 :z 0.15}))  ; orange-red -- reads as "carves", not solid
+(val resize-wire-color Vec3 (Vec3 {:x 0.95 :y 0.85 :z 0.2}))  ; neutral yellow -- a pending Box/Ramp edit
+
+(val default-ortho-span f32 6.0) ; world units, half-height -- EditorState.ortho-span-* start here
+(val ortho-span-min     f32 0.5) ; scroll-zoom clamp, each ortho pane independently
+(val ortho-span-max     f32 60.0)
+
+;; draw-editor-grid's own constants -- world-space reference lines drawn
+;; only in the 3 ortho panes (Top/Front/Side), never Perspective, at
+;; EditorState.grid-size spacing so the visual grid always matches
+;; whatever a snapped move/resize actually rounds to.
+;;
+;; Line CROSS-SECTION is a target SCREEN-PIXEL width, not a world-unit
+;; constant -- draw-editor-grid converts it to world units every draw
+;; using that pane's own current span, so a line is always this many
+;; pixels wide on screen regardless of zoom. A fixed world-unit
+;; thickness (this used to be one, 0.015) goes sub-pixel the moment
+;; span/pane-height pushes it under ~1px, and sub-pixel-wide geometry
+;; doesn't reliably rasterize at all: whether a triangle that thin
+;; covers a given pixel's sample point depends on its exact fractional
+;; world position, so lines can flicker in and out -- or, if every
+;; line's phase happens to miss every pixel center at once (plausible
+;; at nice round targets/spacing), the WHOLE grid renders as nothing,
+;; which is what a live session reproduced deterministically at
+;; ordinary default zoom. (An earlier pass misattributed this to GL
+;; depth-state timing -- swapping `gl/depth-func` for `gl/disable`/
+;; `gl/enable` around the draw calls changed nothing, which is what
+;; actually revealed the real cause: pushing grid-line-px-thickness up
+;; to 0.1 WORLD units made the grid render reliably again regardless of
+;; which depth approach was in use.)
+(val grid-line-px-thickness f32 1.5)
+;; The MOST lines draw-editor-grid will ever pack along one swept axis,
+;; regardless of zoom -- see its own comment for why this exists (a
+;; fixed WORLD-space spacing eventually packs many lines within a
+;; single screen pixel once zoomed out far enough, which reads as
+;; visual noise no matter how reliably any one of them rasterizes).
+(val grid-max-lines-per-axis f32 40.0)
+(val grid-half-extent-factor f32 2.5)        ; lines cover this many multiples of the pane's own ortho span
+(val grid-line-color Vec3 (Vec3 {:x 0.3 :y 0.32 :z 0.36})) ; dim neutral gray -- background structure
+;; input.snap-to-grid (G) ON recolors the WHOLE grid to this instead --
+;; a clear "this is what you're about to snap to" cue, distinct from the
+;; RGB gizmo/yellow resize-ghost/orange hole-outline colors already in
+;; use elsewhere in this file.
+(val grid-line-color-active Vec3 (Vec3 {:x 0.3 :y 0.75 :z 0.95}))
+
+(fn edit-brush-material [] Material (material (vec3 0.5 0.5 0.55) 8.0 0.05))
+
+;; What `EditorState.selected` (below) indexes into -- a brush
+;; (scene.brushes), a point light (scene.lights.points), or a placed
+;; model instance (scene.things, editor.3b's own add-prop -- see the
+;; model-browser panel further down). Only meaningful while
+;; `selected >= 0`; unset/stale otherwise. Kept as a SEPARATE field from
+;; `selected` itself (rather than, say, negative indices meaning "light")
+;; so every existing `(>= selected 0)` "is anything selected at all"
+;; check keeps working unchanged regardless of which kind it turns out
+;; to be.
+(enum SelectedKind [Brush Light Thing])
+
+(struct EditorState
+  [selected      i32     ; -1 = none, else index into scene.brushes OR scene.lights.points -- see selected-kind
+   selected-kind SelectedKind
+   cursor       Vec3    ; free edit point -- camera target & spawn point when nothing's selected
+   resize-axis  i32     ; -1 = not resizing, else 0/1/2 = x/y/z (LOCAL axis of the dragged face)
+   resize-sign  f32     ; +1.0 or -1.0 -- which of that axis's two faces is being dragged
+   ;; World units a snapped move/resize rounds to (input.3b's snap-to-grid
+   ;; is only the on/off switch). Lives on EditorState, not a `val`
+   ;; constant, on purpose -- there's no text input yet to type a new
+   ;; size into, so it's stuck at default-grid-size for now, but a future
+   ;; "type a grid size" UI just needs to `set` this field, not touch any
+   ;; of the snapping code itself.
+   grid-size    f32
+   ;; UNSNAPPED WASD-move accumulator for whatever's currently selected
+   ;; (or the free cursor, when nothing is) -- see update-editor's own
+   ;; comment for why this can't just be `cursor`/the brush's own
+   ;; `offset` itself: continuously re-snapping an already-snapped value
+   ;; every frame throws away any movement smaller than half a grid
+   ;; cell, so held-key movement can get permanently stuck AT a grid
+   ;; point instead of crossing it. raw-offset always accumulates the
+   ;; real, un-rounded position; `cursor`/`offset` are only ever set to
+   ;; snap-vec3(raw-offset, grid), never fed back into raw-offset.
+   raw-offset    Vec3
+   ;; Last frame's `selected`/`selected-kind` -- update-editor reseeds
+   ;; raw-offset above to the new selection's actual current position
+   ;; exactly when EITHER changes (pick, [/] cycling, spawning, or
+   ;; Delete all change `selected`; this catches every one of them in a
+   ;; single place instead of each of those functions having to know
+   ;; about raw-offset). Both fields, not just `selected`, because
+   ;; `selected` is an index WITHIN whichever kind selected-kind names --
+   ;; cycling from brush index 2 to light index 2 leaves the NUMBER
+   ;; unchanged, so selected-kind alone catches that transition.
+   prev-selected i32
+   prev-selected-kind SelectedKind
+   ;; Same idea as raw-offset, but for face-drag resizing: the UNSNAPPED
+   ;; current value of whichever dimension resize-axis points at
+   ;; (half-x/half-y/half-z/height) and, for a centred (X/Z) resize, the
+   ;; paired unsnapped `offset`. Seeded fresh by editor-start-resize every
+   ;; time a new drag starts.
+   resize-raw-half   f32
+   resize-raw-offset Vec3
+   ;; -1 = not dragging a gizmo arm, else 0/1/2 = x/y/z (WORLD axis, never
+   ;; rotated -- unlike resize-axis's brush-local one, the translate
+   ;; gizmo's arms always point along the world axes regardless of the
+   ;; selected brush's yaw). Mutually exclusive with resize-axis: a click
+   ;; either grabs a gizmo arm (this) or a brush face (resize-axis), never
+   ;; both -- see update-editor's pick handling. Feeds into raw-offset
+   ;; above via editor-apply-gizmo-drag rather than its own accumulator,
+   ;; since a gizmo drag IS just a constrained-to-one-axis move.
+   move-axis   i32
+   ;; This frame's (versus last frame's) "is any edit -- resize, gizmo-
+   ;; drag, WASD/arrow move, Q/E raise/lower, Z/X rotate -- in progress on
+   ;; the current selection" state, see update-editor's own falling-edge
+   ;; check. The real GL mesh rebuild (rebuild-all-wall-meshes, Ramp's own
+   ;; rebuild-brush-mesh) only happens once, the frame this goes from true
+   ;; to false -- everything mid-edit only ever touches plain data fields
+   ;; and `.transform` (both cheap), never GL buffers.
+   was-editing bool
+   ;; Which of the 4-pane view's panes a click/drag is happening in --
+   ;; 0=Perspective, 1=Top, 2=Front, 3=Side (see pane-for-pixel below),
+   ;; same plain-i32-sentinel style as resize-axis/move-axis/selected
+   ;; rather than a new enum type here. Set on `input.pick` (mouse1 down)
+   ;; from whichever pane the click landed in and held fixed for the rest
+   ;; of that drag -- editor-apply-resize/editor-apply-gizmo-drag both
+   ;; read it (via pane-camera-basis) so a drag stays bound to the pane it
+   ;; started in even if the cursor strays outside that pane's rect mid-
+   ;; drag, matching how a real editor's own viewports behave. Outside of
+   ;; a drag this is meaningless (whatever the last drag left it at) --
+   ;; nothing reads it except mid-drag code.
+   active-pane i32
+   ;; Independent zoom (orthographic half-height) per ortho pane, world
+   ;; units -- Top/Front/Side all look at the SAME `ortho-target` below
+   ;; (see camera.3b's ortho-view-matrix), so only span needs to live per
+   ;; pane, not a whole separate camera each. Adjusted by scroll-wheel
+   ;; while hovered (apply-input-editor below), same falloff camera-zoom
+   ;; already uses for the perspective camera's own distance.
+   ortho-span-top   f32
+   ortho-span-front f32
+   ortho-span-side  f32
+   ;; Every ortho pane's shared look-at point -- DELIBERATELY a separate
+   ;; field from `scene.camera.target` (the perspective camera's own orbit
+   ;; pivot) rather than reusing it the way this used to. Both still get
+   ;; framed onto the newly selected brush the instant `selected` changes
+   ;; (see update-editor's own comment), but only THIS one does --
+   ;; scene.camera.target never moves on its own in edit mode any more, so
+   ;; picking/cycling/spawning something doesn't relocate the perspective
+   ;; view, only the 3 ortho panes (which, unlike Perspective, have no
+   ;; other way to keep whatever you're editing in frame -- there's no
+   ;; pan control yet, only per-pane zoom).
+   ortho-target Vec3
+   ;; ui.3b-built panel toggles -- Y opens/closes the texture picker
+   ;; (draw-texture-picker below), independent of selection/pane state,
+   ;; so it stays open across a pick/cycle the same way the 4-pane view
+   ;; itself does.
+   texture-picker-open bool
+   ;; N opens/closes the color picker (draw-color-picker below) -- same
+   ;; independent-of-selection lifecycle as texture-picker-open.
+   color-picker-open bool
+   ;; The color picker's baked GL textures (texture.3b's make-hue-strip-
+   ;; texture/make-sv-square-texture) -- hue-tex is baked ONCE in
+   ;; make-editor (a hue strip never changes); sv-tex/sv-hue are re-baked
+   ;; by draw-color-picker only when the selection's hue actually moves
+   ;; (sv-hue is the hue it was LAST baked for, compared every frame the
+   ;; panel is open -- see draw-color-picker's own comment).
+   color-picker-hue-tex u32
+   color-picker-sv-tex  u32
+   color-picker-sv-hue  f32
+   ;; M opens/closes the light-properties panel (draw-light-panel below)
+   ;; -- same independent-of-selection lifecycle as texture/color-picker-
+   ;; open, just with content that changes shape (sun vs Point vs Spot)
+   ;; based on the current selection instead of being fixed.
+   light-panel-open bool
+   ;; P opens/closes the model-browser panel (draw-model-browser below)
+   ;; -- same independent-of-selection lifecycle as the other panels above.
+   ;; `model-browser-files` is rebuilt fresh (scan-model-files) every time
+   ;; the panel transitions closed -> open, not cached across the whole
+   ;; editor session -- disk contents can change between sessions/opens,
+   ;; and a directory listing is cheap enough not to bother diffing.
+   model-browser-open  bool
+   model-browser-files [string]
+   ;; Keyed by filename (the same bare string model-browser-files already
+   ;; holds) -- each row's real render-to-texture snapshot (renderer.3b's
+   ;; make-model-thumbnail), computed once the first time model-thumbnail-
+   ;; for actually needs it and kept for the rest of the process, never
+   ;; rebuilt on a later re-open the way model-browser-files itself is --
+   ;; unlike a directory LISTING (cheap, and disk contents can genuinely
+   ;; change between opens), re-rendering a real GPU snapshot of a file
+   ;; that hasn't changed on disk would be pure waste every time the panel
+   ;; reopens.
+   model-thumbnails {string u32}])
+
+(fn make-editor [] EditorState
+  (EditorState {:selected -1 :selected-kind SelectedKind/Brush :cursor (vec3 0.0 0.0 0.0) :resize-axis -1 :resize-sign 1.0
+                :grid-size default-grid-size :raw-offset (vec3 0.0 0.0 0.0) :prev-selected -1
+                :prev-selected-kind SelectedKind/Brush
+                :resize-raw-half 0.0 :resize-raw-offset (vec3 0.0 0.0 0.0) :move-axis -1
+                :was-editing false :active-pane 0
+                :ortho-span-top default-ortho-span :ortho-span-front default-ortho-span
+                :ortho-span-side default-ortho-span :ortho-target (vec3 0.0 0.0 0.0)
+                :texture-picker-open false :color-picker-open false
+                :color-picker-hue-tex (make-hue-strip-texture) :color-picker-sv-tex 0u32
+                :color-picker-sv-hue -1.0 :light-panel-open false
+                :model-browser-open false :model-browser-files (zero [string])
+                :model-thumbnails (zero {string u32})}))
+
+;; ~~ 4-pane editor view (Top/Front/Side/Perspective) -- see camera.3b's
+;; own OrthoView/ortho-* comment for the view math itself; everything
+;; here is purely about WHICH pane a given pixel/drag belongs to and
+;; reading the right camera for it. `ortho-span-for-pane`/
+;; `ortho-view-for-pane` below are only ever called for pane 1/2/3 (every
+;; caller checks `(= pane 0)` first and takes the Perspective branch
+;; directly) -- pane 0 would silently fall into their `else` arm
+;; otherwise, since neither has a real "Perspective" case of its own.
+
+;; Screen-space (mouse-pixel, Y-down) quadrant test -- see
+;; pane-viewport-rect below for the (different!) GL-viewport mapping of
+;; these same 4 quadrants.
+(fn pane-for-pixel [width i32 height i32 x f32 y f32] i32
+  (let [left (< x (cast f32 (/ width 2)))
+        top (< y (cast f32 (/ height 2)))]
+    (if top (if left 0 1) (if left 2 3))))
+
+;; GL viewport rect (x y w h) for one of the 4 screen quadrants --
+;; GL_VIEWPORT is Y-UP (origin bottom-left), the OPPOSITE of the mouse-
+;; pixel Y-down space pane-for-pixel tests against, so "screen top" (small
+;; mouse y) means "GL y = height/2" (the UPPER half), not 0 -- easy to get
+;; backwards, which is exactly why this is its own function rather than
+;; inlined at its one call site (main.3b's draw loop).
+(fn pane-viewport-rect [width i32 height i32 pane i32] (i32 i32 i32 i32)
+  (let [half-w (/ width 2) half-h (/ height 2)]
+    (match pane
+      [0 (return 0 half-h half-w half-h)        ; Perspective: screen top-left
+       1 (return half-w half-h half-w half-h)   ; Top: screen top-right
+       2 (return 0 0 half-w half-h)             ; Front: screen bottom-left
+       else (return half-w 0 half-w half-h)]))) ; Side: screen bottom-right
+
+;; `x`/`y` (window pixels) translated into whichever pane they fall in's
+;; OWN local pixel space -- same screen-Y-down origin pane-for-pixel
+;; itself tests against, needed since camera-ray/ortho-camera-ray both
+;; expect screen-x/y relative to THEIR OWN viewport, not the whole window.
+(fn pane-local-xy [width i32 height i32 pane i32 x f32 y f32] Vec2
+  (let [half-w (cast f32 (/ width 2)) half-h (cast f32 (/ height 2))]
+    (match pane
+      [0 (vec2 x y)
+       1 (vec2 (- x half-w) y)
+       2 (vec2 x (- y half-h))
+       else (vec2 (- x half-w) (- y half-h))])))
+
+(fn ortho-span-for-pane [editor EditorState* pane i32] f32
+  (match pane [1 (. editor ortho-span-top) 2 (. editor ortho-span-front) else (. editor ortho-span-side)]))
+
+(fn ortho-view-for-pane [pane i32] OrthoView
+  (match pane [1 OrthoView/Top 2 OrthoView/Front else OrthoView/Side]))
+
+;; World-space ray through whichever pane `pane` is, at that pane's own
+;; local (x,y) (see pane-local-xy) -- dispatches to camera.3b's
+;; camera-ray for Perspective (pane 0), ortho-camera-ray otherwise. `w`/`h`
+;; are that PANE's own pixel dimensions (half the window's, for this 2x2
+;; grid -- see pane-viewport-rect), not the whole window's.
+(fn pane-camera-ray
+  [editor EditorState* scene Scene* pane i32 w i32 h i32 x f32 y f32] (Vec3 Vec3)
+  (if (= pane 0)
+    (camera-ray (& scene camera) w h x y)
+    (ortho-camera-ray (ortho-view-for-pane pane) (. editor ortho-target)
+      (ortho-span-for-pane editor pane) w h x y)))
+
+;; Same dispatch, for the (forward right up) basis editor-apply-resize/
+;; editor-apply-gizmo-drag project mouse deltas onto.
+(fn pane-camera-basis [editor EditorState* scene Scene* pane i32] (Vec3 Vec3 Vec3)
+  (if (= pane 0)
+    (camera-basis (& scene camera))
+    (ortho-camera-basis (ortho-view-for-pane pane))))
+
+;; Pane-aware counterpart to camera.3b's camera-right-flat/camera-forward-
+;; flat, used by update-editor's WASD/arrow movement below instead of
+;; always the perspective camera's own -- previously WASD moved a brush
+;; relative to wherever the PERSPECTIVE camera happened to be orbited even
+;; while the mouse was over an ortho pane, which rarely lined up with what
+;; that pane actually shows on screen. Perspective (pane 0) keeps the exact
+;; ground-plane "walk" convention camera-right-flat/camera-forward-flat
+;; already give (unrelated to any single pane's screen axes -- this is a
+;; deliberate fly-around-orbit convention, not something to special-case).
+;; Each ortho pane instead moves along its OWN fixed screen axes --
+;; ortho-camera-basis's right/up, the exact same two directions that
+;; pane's view is built from -- so W/A/S/D always match what's visually
+;; up/right on whichever pane is being worked in, not the perspective
+;; camera's unrelated yaw.
+(fn editor-move-axes [scene Scene* pane i32] (Vec3 Vec3)
+  (if (= pane 0)
+    (return (camera-right-flat (& scene camera)) (camera-forward-flat (& scene camera)))
+    (let [[forward right up] (ortho-camera-basis (ortho-view-for-pane pane))]
+      (return right up))))
+
+;; This pane's full view-projection matrix -- main.3b's draw loop calls
+;; this once per pane, per frame.
+(fn pane-view-proj [editor EditorState* scene Scene* pane i32 w i32 h i32] Mat4
+  (let [aspect (if (> h 0) (/ (cast f32 w) (cast f32 h)) 1.0)]
+    (if (= pane 0)
+      (mul-mat4 (camera-proj (& scene camera) w h) (camera-view (& scene camera)))
+      (mul-mat4 (ortho-proj-matrix (ortho-span-for-pane editor pane) aspect)
+                (ortho-view-matrix (ortho-view-for-pane pane) (. editor ortho-target))))))
+
+;; This pane's "eye" position, only meaningful for the shader's specular
+;; view-vector (u_camera_pos) -- an orthographic pane has no single real
+;; eye point (parallel rays), so this reuses the SAME synthetic eye
+;; ortho-view-matrix itself placed the look-at camera at (camera.3b's
+;; ortho-eye).
+(fn pane-eye [editor EditorState* scene Scene* pane i32] Vec3
+  (if (= pane 0)
+    (camera-eye (& scene camera))
+    (ortho-eye (ortho-view-for-pane pane) (. editor ortho-target))))
+
+;; Pane-aware counterpart to input.3b's apply-input, used instead of it
+;; while `input.edit-mode` is on (see main.3b) -- orbit/zoom apply to the
+;; perspective camera exactly as apply-input already does ONLY when the
+;; mouse is over the Perspective pane; over an ortho pane, mouse2-drag
+;; orbit is simply a no-op (an orthographic view has no orbit, it's
+;; fixed-angle by definition), wheel adjusts THAT pane's own ortho-span-*
+;; instead (same multiplicative falloff camera-zoom already uses for the
+;; perspective camera's own distance), and mouse3 (middle button) held
+;; pans editor.ortho-target within that pane's own view plane -- an
+;; ortho view can't orbit, but it can still look around by translating,
+;; the same "grab and drag the world" interaction every 2D/ortho editor
+;; view uses (Blender, Photoshop's hand tool, ...). Perspective has no
+;; pan of its own yet, only orbit (mouse2) and fly (mouse2+WASD).
+(fn apply-input-editor [input Input* scene Scene* editor EditorState* width i32 height i32] void
+  (let [pane (pane-for-pixel width height (. input mouse-x) (. input mouse-y))]
+    (if (= pane 0)
+      (do
+        (camera-orbit (& scene camera)
+          (* (. input orbit-x) (- orbit-sensitivity)) (* (. input orbit-y) orbit-sensitivity))
+        (when (!= (. input zoom) 0.0) (camera-zoom (& scene camera) (. input zoom))))
+      (do
+        (when (!= (. input zoom) 0.0)
+          (let [span (ortho-span-for-pane editor pane)
+                new-span (clamp (* span (+ 1.0 (* (. input zoom) -0.12))) ortho-span-min ortho-span-max)]
+            (match pane
+              [1 (set (. editor ortho-span-top) new-span)
+               2 (set (. editor ortho-span-front) new-span)
+               else (set (. editor ortho-span-side) new-span)])))
+        ;; The point under the cursor stays under the cursor as you drag
+        ;; -- world units per pixel is `2*span/pane-height` (span is
+        ;; already a HALF-height, so a pane spanning the full window
+        ;; height covers `2*span` world units top to bottom); the SAME
+        ;; factor applies to both axes despite the pane being wider than
+        ;; tall, since `span`/`ortho-proj-matrix` are defined off height,
+        ;; never width (see camera.3b's own ortho-proj-matrix comment for
+        ;; why half-w is derived FROM span*aspect, not the other way
+        ;; round). Dragging right (`dx` > 0) should make the CONTENT
+        ;; track right, which means the view's own `target` moves LEFT
+        ;; (opposite `right`) -- and since screen-y is DOWN but `up` is
+        ;; visually UP, `dy` needs no such flip.
+        (when (. input panning)
+          (let [[dir right up] (ortho-camera-basis (ortho-view-for-pane pane))
+                span (ortho-span-for-pane editor pane)
+                pane-h (cast f32 (/ height 2))
+                world-per-pixel (* 2.0 (/ span pane-h))
+                dx (. input pan-x)
+                dy (. input pan-y)
+                delta (add-vec3
+                        (scale-vec3 right (* (- dx) world-per-pixel))
+                        (scale-vec3 up (* dy world-per-pixel)))]
+            (set (. editor ortho-target) (add-vec3 (. editor ortho-target) delta))))))))
+
+;; Rounds `v` to the nearest multiple of `grid` -- 0 (or negative) means
+;; "no grid", `v` unchanged, so callers can pass EditorState.grid-size
+;; straight through without a separate zero-check.
+(fn snap-value [v f32 grid f32] f32
+  (if (<= grid 0.0) v (* grid (round (/ v grid)))))
+
+(fn snap-vec3 [v Vec3 grid f32] Vec3
+  (vec3 (snap-value (. v x) grid) (snap-value (. v y) grid) (snap-value (. v z) grid)))
+
+;; Rebuilds `b`'s transform from its own current offset/yaw -- same
+;; translate/rotate convention add-box-brush/add-ramp-brush used to build
+;; it the first time (Box's translate is lifted by half-y, Ramp's isn't),
+;; called every time editing moves, turns, OR resizes a brush.
+(fn refresh-brush-transform [b Brush*] void
+  ;; Box and Hole share the lift-by-half-y placement convention (a Hole is
+  ;; Box-shaped); Sphere lifts by `radius` instead (its own half-y is
+  ;; just a mirror of radius, see Brush.radius's own comment); only Ramp
+  ;; places `offset` directly with no lift.
+  (let [lift (match (. b kind)
+               [BrushKind/Ramp   (vec3 0.0 0.0 0.0)
+                BrushKind/Sphere (vec3 0.0 (. b radius) 0.0)
+                else             (vec3 0.0 (. b half-y) 0.0)])]
+    (set (. b transform)
+      (mul-mat4
+        (make-translate-mat4 (add-vec3 (. b offset) lift))
+        (make-rotate-mat4 (vec3 0.0 1.0 0.0) (. b yaw))))))
+
+;; Throws away `b`'s current GL mesh and builds a fresh one from its
+;; (just-changed) half-x/half-y/half-z/height -- resizing a Brush changes
+;; its actual geometry, unlike moving/turning one (refresh-brush-transform
+;; above), which only ever touches the placement matrix around a mesh
+;; that's still the right shape.
+(fn rebuild-brush-mesh [b Brush*] void
+  (destroy-mesh (. b mesh))
+  (set (. b mesh)
+    (match (. b kind)
+      [BrushKind/Box    (make-box-mesh (vec3 (. b half-x) (. b half-y) (. b half-z)))
+       BrushKind/Sphere (make-sphere-mesh (. b radius))
+       else             (make-ramp-mesh (. b half-x) (. b half-z) (. b height))])))
+
+;; `axis`/`sign`'s outward normal, world-space, given `b`'s CURRENT yaw --
+;; axis 1 (Y) is unaffected by yaw (rotating about Y never moves a vector
+;; already pointing along Y), X/Z are rotated the same forward direction
+;; scene-pick-brush's own local<-world rotation inverts.
+(fn resize-world-normal [b Brush* axis i32 sign f32] Vec3
+  (let [cy (cos (. b yaw)) sy (sin (. b yaw))]
+    (match axis
+      [0 (vec3 (* sign cy) 0.0 (* sign (- sy)))
+       1 (vec3 0.0 sign 0.0)
+       else (vec3 (* sign sy) 0.0 (* sign cy))])))
+
+;; Turns a scene-pick-brush hit's local-space face normal (one of the six
+;; axis-aligned unit vectors) into editor.resize-axis/resize-sign, and
+;; seeds resize-raw-half/resize-raw-offset from `b`'s CURRENT dimensions
+;; -- the unsnapped baseline every subsequent editor-apply-resize call
+;; this drag accumulates onto (see EditorState's own field comments for
+;; why this can't just read `b` back each frame instead).
+;; A Sphere is always resized as if axis 1 (Y), sign +1 had been grabbed,
+;; regardless of which face `normal` actually reports -- it has exactly
+;; ONE degree of freedom (`radius`, see Brush.radius's own comment), not
+;; 3 independent half-extents, so there's no real "which face" to pick:
+;; every drag direction ends up feeding the same scalar either way, and
+;; axis-1's anchored-at-base convention (offset never shifts, see
+;; editor-apply-resize's own comment) is exactly right for a sphere that
+;; also places `offset` at its own base, not its centre.
+(fn editor-start-resize [editor EditorState* b Brush* normal Vec3] void
+  (when (= (. b kind) BrushKind/Sphere)
+    (set (. editor resize-axis) 1)
+    (set (. editor resize-sign) 1.0)
+    (set (. editor resize-raw-half) (. b radius))
+    (set (. editor resize-raw-offset) (. b offset))
+    (return))
+  (if (!= (. normal x) 0.0)
+    (void (set (. editor resize-axis) 0) (set (. editor resize-sign) (. normal x)))
+    (if (!= (. normal y) 0.0)
+      (void (set (. editor resize-axis) 1) (set (. editor resize-sign) (. normal y)))
+      (void (set (. editor resize-axis) 2) (set (. editor resize-sign) (. normal z)))))
+  (set (. editor resize-raw-half)
+    (match (. editor resize-axis)
+      ;; Box and Hole both resize half-y on axis 1 (Hole is Box-shaped);
+      ;; only Ramp resizes `height` instead.
+      [0 (. b half-x)
+       1 (match (. b kind) [BrushKind/Ramp (. b height) else (. b half-y)])
+       else (. b half-z)]))
+  (set (. editor resize-raw-offset) (. b offset)))
+
+;; Thing's own counterpart to editor-start-resize above -- always axis 1
+;; (Y), sign +1.0, regardless of which face of its world AABB scene-pick-
+;; thing actually reported (it doesn't report one at all, see its own
+;; comment) -- Thing.scale is a single uniform DOF, same one-face-fits-all
+;; treatment editor-start-resize's own Sphere branch already gives a
+;; Brush with only one real dimension. Seeded from the Thing's own CURRENT
+;; scale rather than any half-extent.
+(fn editor-start-thing-resize [editor EditorState* obj Thing*] void
+  (set (. editor resize-axis) 1)
+  (set (. editor resize-sign) 1.0)
+  (set (. editor resize-raw-half) (. obj scale))
+  (set (. editor resize-raw-offset) (. obj offset)))
+
+;; This frame's face-drag, if one is in progress (editor.resize-axis >= 0)
+;; and the mouse actually moved (delta-x/delta-y -- input.3b's resize-x/y,
+;; accumulated while mouse1 is held). `d` is how far the dragged face
+;; itself should move this frame, in world units: the mouse's 2D screen
+;; motion dotted against the face's own world-space normal (via the
+;; camera's right/up, camera.3b's camera-basis) projected onto camera-
+;; right/camera-up -- dragging the mouse in the screen direction that
+;; visually points along the face's outward normal grows the brush,
+;; dragging the opposite way shrinks it, same idea as camera-orbit's flat
+;; pixel-delta-times-sensitivity, just projected onto a 3D direction
+;; instead of applied straight to yaw/pitch.
+;;
+;; Axis 0/2 (X/Z) are CENTRED: the resized dimension grows by d/2 and
+;; `offset` shifts by normal*d/2, which keeps the OPPOSITE face exactly
+;; where it was (see this file's header comment) -- growing a Ramp's
+;; high-end wall outward this way also naturally makes its slope gentler,
+;; since `height` is untouched while the run gets longer. Axis 1 (Y) is
+;; anchored: no offset shift, `d` goes straight onto half-y (Box) or
+;; height (Ramp).
+;;
+;; `snap` (input.3b's snap-to-grid) rounds resize-raw-half/-offset for
+;; the ACTUAL `b` assignment, every frame, but never writes the rounded
+;; result back into resize-raw-half/-offset themselves -- same
+;; already-snapped-value-eats-small-deltas trap EditorState.raw-offset's
+;; own comment describes, just for resizing instead of moving.
+;; resize-min-half clamps resize-raw-half directly (not just the
+;; snapped-for-display value) so shrinking past the minimum and then
+;; growing back doesn't need to first claw back through a dead zone.
+(fn editor-apply-resize [editor EditorState* scene Scene* delta-x f32 delta-y f32 snap bool] void
+  (when (< (. editor resize-axis) 0) (return))
+  (when (< (. editor selected) 0) (return))
+  (when (and (= delta-x 0.0) (= delta-y 0.0)) (return))
+  ;; Thing: always the world-Y face (editor-start-thing-resize's own
+  ;; comment), feeding straight into `.scale` -- no half-x/half-z/offset
+  ;; bookkeeping at all (a uniform scale has nothing centred/anchored to
+  ;; track the way a Brush's per-axis half-extents do), and deliberately
+  ;; UNSNAPPED regardless of `snap` -- EditorState.grid-size is a
+  ;; world-unit spatial concept, there's no natural "grid" for a unitless
+  ;; multiplier to round to. Returns before ever touching scene.brushes
+  ;; below -- `.selected` here indexes scene.things, not scene.brushes.
+  (when (= (. editor selected-kind) SelectedKind/Thing)
+    (let [obj (addr (nth (. scene things) (cast u64 (. editor selected))))
+          [cam-forward cam-right cam-up] (pane-camera-basis editor scene (. editor active-pane))
+          normal (vec3 0.0 1.0 0.0)
+          d (* drag-sensitivity
+               (- (* (dot-vec3 normal cam-right) delta-x) (* (dot-vec3 normal cam-up) delta-y)))]
+      (when (!= d 0.0)
+        (set (. editor resize-raw-half) (max thing-min-scale (+ (. editor resize-raw-half) d)))
+        (set (. obj scale) (. editor resize-raw-half))))
+    (return))
+  (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))
+        [cam-forward cam-right cam-up] (pane-camera-basis editor scene (. editor active-pane))
+        normal (resize-world-normal b (. editor resize-axis) (. editor resize-sign))
+        d (* drag-sensitivity
+             (- (* (dot-vec3 normal cam-right) delta-x) (* (dot-vec3 normal cam-up) delta-y)))
+        grid (if snap (. editor grid-size) 0.0)
+        centred (or (= (. editor resize-axis) 0) (= (. editor resize-axis) 2))
+        half-growth (if centred (* 0.5 d) d)]
+    (when (!= d 0.0)
+      (set (. editor resize-raw-half) (max resize-min-half (+ (. editor resize-raw-half) half-growth)))
+      (when centred
+        (set (. editor resize-raw-offset) (add-vec3 (. editor resize-raw-offset) (scale-vec3 normal (* 0.5 d)))))
+
+      (let [half (snap-value (. editor resize-raw-half) grid)]
+        (when (= (. editor resize-axis) 0) (set (. b half-x) half))
+        (when (= (. editor resize-axis) 1)
+          ;; Box and Hole both resize half-y; Ramp resizes `height`;
+          ;; Sphere resizes `radius` (and mirrors it into half-x/y/z too
+          ;; -- see Brush.radius's own comment for why).
+          (match (. b kind)
+            [BrushKind/Ramp   (void (set (. b height) half))
+             BrushKind/Sphere
+             (void (set (. b radius) half) (set (. b half-x) half)
+                   (set (. b half-y) half) (set (. b half-z) half))
+             else           (void (set (. b half-y) half))]))
+        (when (= (. editor resize-axis) 2) (set (. b half-z) half)))
+      (when centred
+        (set (. b offset) (snap-vec3 (. editor resize-raw-offset) grid))
+        ;; update-editor's own WASD/arrow movement block runs every
+        ;; frame UNCONDITIONALLY (even with no key held) and always
+        ;; writes `b.offset` from `editor.raw-offset` -- a SEPARATE
+        ;; accumulator this function never touches otherwise. Without
+        ;; this resync, that write was clobbering a centred resize's own
+        ;; offset shift back to whatever stale position raw-offset last
+        ;; held (usually the brush's ORIGINAL spawn point) the very next
+        ;; frame, and again every idle frame after mouse1 released --
+        ;; so the NEXT resize session would start from that stale
+        ;; baseline instead of wherever this one actually left the
+        ;; brush, making the far face silently jump. Keeping raw-offset
+        ;; mirrored to the real (possibly snapped) offset here makes the
+        ;; movement block's per-frame reapplication a no-op while a
+        ;; resize -- not a move -- is what's actually driving position.
+        (set (. editor raw-offset) (. b offset)))
+
+      ;; NOT rebuild-brush-mesh here any more -- the real GL mesh (Box's
+      ;; possibly hole-punched one included) only gets rebuilt once, on
+      ;; release, via editor-commit below. `.transform` stays live every
+      ;; frame regardless (cheap, no GL work) since draw-wireframe-brush's
+      ;; resize-ghost preview (draw-editor-gizmo) needs it to already be
+      ;; correctly placed.
+      (refresh-brush-transform b))))
+
+;; Which of the translate gizmo's three arms (world-space, always axis-
+;; aligned regardless of any brush's yaw -- see EditorState.move-axis's
+;; own comment) a ray hits first, or -1 for none. Each arm is a thin
+;; world-space AABB from `pivot` out to gizmo-arm-length along its own
+;; axis, gizmo-pick-thickness wide on the other two -- no per-brush
+;; rotation to undo here (unlike scene-pick-brush), so this just builds
+;; three bmin/bmax pairs straight in world space and reuses math.3b's
+;; ray-aabb-hit directly.
+(fn editor-pick-gizmo-arm [pivot Vec3 origin Vec3 dir Vec3] i32
+  (var best i32 -1)
+  (var best-t f32 1000000.0)
+  (let [half-t (* 0.5 gizmo-pick-thickness)]
+    (let [bmin (vec3 (. pivot x) (- (. pivot y) half-t) (- (. pivot z) half-t))
+          bmax (vec3 (+ (. pivot x) gizmo-arm-length) (+ (. pivot y) half-t) (+ (. pivot z) half-t))
+          [hit t hit-normal] (ray-aabb-hit origin dir bmin bmax)]
+      (when (and hit (< t best-t)) (set best 0) (set best-t t)))
+    (let [bmin (vec3 (- (. pivot x) half-t) (. pivot y) (- (. pivot z) half-t))
+          bmax (vec3 (+ (. pivot x) half-t) (+ (. pivot y) gizmo-arm-length) (+ (. pivot z) half-t))
+          [hit t hit-normal] (ray-aabb-hit origin dir bmin bmax)]
+      (when (and hit (< t best-t)) (set best 1) (set best-t t)))
+    (let [bmin (vec3 (- (. pivot x) half-t) (- (. pivot y) half-t) (. pivot z))
+          bmax (vec3 (+ (. pivot x) half-t) (+ (. pivot y) half-t) (+ (. pivot z) gizmo-arm-length))
+          [hit t hit-normal] (ray-aabb-hit origin dir bmin bmax)]
+      (when (and hit (< t best-t)) (set best 2) (set best-t t))))
+  best)
+
+;; This frame's gizmo-arm drag, if one is in progress (editor.move-axis
+;; >= 0). Same mouse-delta-projected-onto-a-3D-direction technique as
+;; editor-apply-resize, just onto a fixed WORLD axis instead of a
+;; (possibly yaw-rotated) face normal, and feeding straight into
+;; raw-offset instead of its own accumulator -- a gizmo drag IS a move,
+;; constrained to one axis, so it reuses the exact same raw-offset ->
+;; snap -> `cursor`/`offset` pipeline update-editor's movement block
+;; already runs every frame regardless of what's driving raw-offset.
+(fn editor-apply-gizmo-drag [editor EditorState* scene Scene* delta-x f32 delta-y f32] void
+  (when (< (. editor move-axis) 0) (return))
+  (when (and (= delta-x 0.0) (= delta-y 0.0)) (return))
+  (let [[cam-forward cam-right cam-up] (pane-camera-basis editor scene (. editor active-pane))
+        axis-dir (match (. editor move-axis)
+                   [0 (vec3 1.0 0.0 0.0)
+                    1 (vec3 0.0 1.0 0.0)
+                    else (vec3 0.0 0.0 1.0)])
+        d (* drag-sensitivity
+             (- (* (dot-vec3 axis-dir cam-right) delta-x) (* (dot-vec3 axis-dir cam-up) delta-y)))]
+    (set (. editor raw-offset) (add-vec3 (. editor raw-offset) (scale-vec3 axis-dir d)))))
+
+;; World position of whatever's currently selected (brush.offset or
+;; light.pos), or `editor.cursor` when nothing is -- the one place that
+;; kind-dispatch happens for reading a position, so pick/cycle/the
+;; movement block/ortho-target-framing don't each need their own copy of
+;; the `(match selected-kind ...)`.
+(fn editor-selected-pos [editor EditorState* scene Scene*] Vec3
+  (if (< (. editor selected) 0)
+    (. editor cursor)
+    (match (. editor selected-kind)
+      [SelectedKind/Light (. (nth (. scene lights points) (cast u32 (. editor selected))) pos)
+       SelectedKind/Thing (. (nth (. scene things) (cast u64 (. editor selected))) offset)
+       else               (. (nth (. scene brushes) (cast u64 (. editor selected))) offset)])))
+
+;; Moves the selection by `dir` (+1/-1) through a single combined list --
+;; every brush (scene.brushes, in storage order), THEN every point light
+;; (scene.lights.points), THEN every placed model instance (scene.things)
+;; -- wrapping end to end; -1 (nothing selected) picks the first/last
+;; entry depending on which way `dir` cycles. A no-op with nothing to
+;; select at all.
+(fn editor-cycle-selection [editor EditorState* scene Scene* dir i32] void
+  (let [nb (cast i32 (len (. scene brushes)))
+        nl (cast i32 (. scene lights point-count))
+        nt (cast i32 (len (. scene things)))
+        total (+ (+ nb nl) nt)]
+    (if (<= total 0)
+      (void (set (. editor selected) -1))
+      (let [flat (if (< (. editor selected) 0)
+                   -1
+                   (match (. editor selected-kind)
+                     [SelectedKind/Light (+ nb (. editor selected))
+                      SelectedKind/Thing (+ (+ nb nl) (. editor selected))
+                      else                (. editor selected)]))
+            next (if (< flat 0) (if (> dir 0) 0 (- total 1)) (% (+ (+ flat dir) total) total))]
+        (if (< next nb)
+          (void (set (. editor selected) next) (set (. editor selected-kind) SelectedKind/Brush))
+          (if (< next (+ nb nl))
+            (void (set (. editor selected) (- next nb)) (set (. editor selected-kind) SelectedKind/Light))
+            (void (set (. editor selected) (- next (+ nb nl))) (set (. editor selected-kind) SelectedKind/Thing))))))))
+
+(fn editor-spawn-box [editor EditorState* scene Scene* arena arena] void
+  (add-box-brush scene arena edit-spawn-half-x edit-spawn-half-y edit-spawn-half-z
+    (edit-brush-material) 0u32 (. editor cursor) 0.0)
+  (set (. editor selected) (cast i32 (- (len (. scene brushes)) 1u64)))
+  (set (. editor selected-kind) SelectedKind/Brush)
+  (rebuild-all-wall-meshes scene arena))
+
+(fn editor-spawn-ramp [editor EditorState* scene Scene* arena arena] void
+  (add-ramp-brush scene arena edit-spawn-half-x edit-spawn-half-z edit-spawn-height
+    (edit-brush-material) 0u32 (. editor cursor) 0.0)
+  (set (. editor selected) (cast i32 (- (len (. scene brushes)) 1u64)))
+  (set (. editor selected-kind) SelectedKind/Brush))
+
+(fn editor-spawn-hole [editor EditorState* scene Scene* arena arena] void
+  (add-hole-brush scene arena edit-spawn-hole-half-x edit-spawn-hole-half-y edit-spawn-hole-half-z
+    (. editor cursor) 0.0)
+  (set (. editor selected) (cast i32 (- (len (. scene brushes)) 1u64)))
+  (set (. editor selected-kind) SelectedKind/Brush)
+  (rebuild-all-wall-meshes scene arena))
+
+(fn editor-spawn-sphere [editor EditorState* scene Scene* arena arena] void
+  (add-sphere-brush scene arena edit-spawn-radius (edit-brush-material) 0u32 (. editor cursor) 0.0)
+  (set (. editor selected) (cast i32 (- (len (. scene brushes)) 1u64)))
+  (set (. editor selected-kind) SelectedKind/Brush))
+
+;; Spawns one point light at the cursor -- a no-op past light.3b's own
+;; max-point-lights cap (add-point-light already logs and refuses; the
+;; `before`/`after` compare here is just how this function notices that
+;; happened, so it doesn't select a light that was never actually added).
+(fn editor-spawn-light [editor EditorState* scene Scene*] void
+  (let [before (. scene lights point-count)]
+    (add-point-light (& scene lights)
+      (point-light (. editor cursor) default-light-color default-light-intensity default-light-radius false))
+    (when (> (. scene lights point-count) before)
+      (set (. editor selected) (cast i32 before))
+      (set (. editor selected-kind) SelectedKind/Light))))
+
+;; Flips `l` between Point and Spot -- the light panel's own Type button
+;; (light-panel.3b). Switching TO Spot always resets `dir`/cone angles to
+;; sane defaults (straight down, default-spot-cone-inner/outer) rather
+;; than trying to preserve whatever garbage a Point's own zeroed dir/180-
+;; degree cone already had -- same "give sane defaults" spirit editor-
+;; spawn-light itself has for a brand new light, just on an existing one.
+;; Switching BACK to Point must reset cone-inner/cone-outer to 180 (point-
+;; light's own constructor values) -- NOT "harmless leftover data": the
+;; shader (renderer.3b's frag-src) never looks at `kind` at all, only at
+;; cone-outer's own value, to decide whether a light is cone-restricted
+;; (light.3b's flatten-lights' whole point is treating Point/Spot
+;; identically). Leaving a real cone value behind would make a "Point"
+;; light stay lit like a Spot forever. `dir` alone is left alone (truly
+;; harmless once cone-outer is back to "no restriction") so re-aiming a
+;; Spot after flipping back and forth doesn't lose the old aim.
+(fn editor-toggle-light-kind [l Light*] void
+  (if (= (. l kind) LightKind/Spot)
+    (do
+      (set (. l kind) LightKind/Point)
+      (set (. l cone-inner) 180.0)
+      (void (set (. l cone-outer) 180.0)))
+    (do
+      (set (. l kind) LightKind/Spot)
+      (set (. l dir) (vec3 0.0 -1.0 0.0))
+      (set (. l cone-inner) default-spot-cone-inner)
+      (void (set (. l cone-outer) default-spot-cone-outer)))))
+
+;; `current` (a brush's own texture-id) advanced to the next of the 4
+;; states `U` cycles through: none (0) -> scene.texture-checker ->
+;; scene.texture-brick -> scene.texture-dots -> back to none. Compared
+;; against the scene's own fields rather than a hardcoded index/enum,
+;; same reasoning level.3b's texture-name/texture-id-from-name resolve
+;; against them too -- a GL texture id is only stable for this one run,
+;; so nothing should hardcode a specific numeric value anywhere but
+;; make-scene itself.
+(fn next-brush-texture [scene Scene* current u32] u32
+  (if (= current 0u32) (. scene texture-checker)
+    (if (= current (. scene texture-checker)) (. scene texture-brick)
+      (if (= current (. scene texture-brick)) (. scene texture-dots)
+        0u32))))
+
+;; Cycles the selected BRUSH's own texture-id (see next-brush-texture) --
+;; a no-op with nothing selected, a LIGHT selected (no texture field to
+;; cycle), or a Hole selected (never drawn, see BrushKind/Brush's own
+;; comment -- texturing it would be silently invisible).
+(fn editor-cycle-brush-texture [editor EditorState* scene Scene*] void
+  (when (< (. editor selected) 0) (return))
+  (when (!= (. editor selected-kind) SelectedKind/Brush) (return))
+  (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))]
+    (when (= (. b kind) BrushKind/Hole) (return))
+    (set (. b texture-id) (next-brush-texture scene (. b texture-id)))))
+
+;; Same guard as editor-cycle-brush-texture, but sets a SPECIFIC
+;; texture-id directly rather than advancing to "whatever's next" --
+;; draw-texture-picker's own click handler, below.
+(fn editor-set-brush-texture [editor EditorState* scene Scene* texture-id u32] void
+  (when (< (. editor selected) 0) (return))
+  (when (!= (. editor selected-kind) SelectedKind/Brush) (return))
+  (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))]
+    (when (= (. b kind) BrushKind/Hole) (return))
+    (set (. b texture-id) texture-id)))
+
+;; ~~ Texture picker panel (ui.3b) -- Y toggles EditorState.texture-
+;; picker-open. Screen-corner-anchored (top-right, PIXEL coordinates --
+;; see ui.3b's own header comment for the Y-down/origin-top-left
+;; convention every widget here shares), one swatch per texture this
+;; project actually has (none/checker/brick/dots, scene.3b's own
+;; texture-checker/-brick/-dots fields) -- clicking one calls editor-
+;; set-brush-texture above. `texture-picker-rect` is its own function
+;; (not inlined into draw-texture-picker) specifically so update-editor's
+;; click-routing guard can compute the SAME rect without also depending
+;; on Renderer -- see ui.3b's own header comment on why that ordering
+;; matters.
+
+(val texture-picker-margin f32 10.0)  ; world... no, SCREEN pixels, from the window's own top-right corner
+(val texture-picker-swatch f32 48.0)  ; one texture swatch, square, screen pixels
+(val texture-picker-pad    f32 8.0)
+(val texture-picker-count  f32 4.0)   ; none/checker/brick/dots
+
+(fn texture-picker-rect [width i32 height i32] (f32 f32 f32 f32)
+  (let [w (+ (* texture-picker-count texture-picker-swatch)
+             (* (+ texture-picker-count 1.0) texture-picker-pad))
+        h (+ texture-picker-swatch (* 2.0 texture-picker-pad))
+        x1 (- (cast f32 width) texture-picker-margin)
+        x0 (- x1 w)
+        y0 texture-picker-margin
+        y1 (+ y0 h)]
+    (return x0 y0 x1 y1)))
+
+;; `i`'s own texture-id (0=none) and swatch tint -- the "none" swatch has
+;; no texture to preview, so it gets a flat neutral-gray fill instead
+;; (texture-id 0, same "0 = untextured" convention as everywhere else)
+;; while the other three are drawn at full white so their own texture
+;; colors show through unmodified (ui-rect's `color` still multiplies
+;; whatever the texture samples, same as draw-textured-model's own
+;; u_albedo does for a real 3D material).
+(fn texture-picker-swatch-texture [scene Scene* i u32] u32
+  (match i
+    [0u32 0u32
+     1u32 (. scene texture-checker)
+     2u32 (. scene texture-brick)
+     else (. scene texture-dots)]))
+
+(fn draw-texture-picker
+  [renderer Renderer* scene Scene* editor EditorState* input Input* width i32 height i32] void
+  (when (not (. editor texture-picker-open)) (return))
+  (let [[x0 y0 x1 y1] (texture-picker-rect width height)]
+    (void (ui-rect renderer input x0 y0 x1 y1 (vec4 0.05 0.05 0.07 0.85) 0u32))
+    (for [i 0u32 (cast u32 texture-picker-count)]
+      (let [sx0 (+ x0 texture-picker-pad (* (cast f32 i) (+ texture-picker-swatch texture-picker-pad)))
+            sx1 (+ sx0 texture-picker-swatch)
+            sy0 (+ y0 texture-picker-pad)
+            sy1 (+ sy0 texture-picker-swatch)
+            tex (texture-picker-swatch-texture scene i)
+            swatch-color (if (= i 0u32) (vec4 0.4 0.4 0.44 1.0) (vec4 1.0 1.0 1.0 1.0))]
+        (when (ui-rect renderer input sx0 sy0 sx1 sy1 swatch-color tex)
+          (editor-set-brush-texture editor scene tex))))))
+
+;; ~~ Color picker panel (ui.3b) -- N toggles EditorState.color-picker-
+;; open. Stacked directly below the texture picker (color-picker-rect
+;; below reads texture-picker-rect's own y1 to place itself, regardless
+;; of whether that panel is actually open right now -- simpler than
+;; tracking "is anything above me" state). A hue strip sits below a
+;; saturation/value square, a flat preview swatch and a read-only hex
+;; label underneath -- both gradients are REAL baked textures
+;; (texture.3b's make-hue-strip-texture/make-sv-square-texture), drawn via
+;; `ui-rect` (texture-id set, visual only, its own click return ignored)
+;; with `ui-slider-1d`/`-2d` laid over the SAME rect as the actual
+;; continuous-drag input -- same "one rect, two separate calls, drawing
+;; vs input" split texture-picker's swatches don't need but a gradient
+;; does (a swatch's fixed color already IS a discrete choice; a gradient
+;; isn't one). HSV round-trips through the selection's stored RGB every
+;; frame rather than being tracked as its own persistent state (no
+;; separate "current hue" field to fall out of sync with the real color)
+;; -- the one cost is that a fully desaturated color (s=0, where hue is
+;; mathematically undefined) always reads back as hue=0/red the next time
+;; this panel opens, same accepted-tradeoff shape as ui-slider-1d/-2d's
+;; own "value freezes if the drag strays outside its rect." Applies live
+;; to whatever's selected -- a LIGHT's `color`, a BRUSH's
+;; `material.albedo` (never a Hole, no albedo means anything on one) --
+;; same dual-dispatch shape as `T`/`V`, except with no sun fallback: a
+;; brush material color has no sun-equivalent to fall back to, so this is
+;; simply a no-op with nothing selected.
+
+(val color-picker-margin  f32 10.0)  ; screen pixels, gap below the texture picker above it
+(val color-picker-sv-size f32 160.0) ; the SV square, screen pixels, square
+(val color-picker-hue-h   f32 18.0)  ; hue strip height, screen pixels
+(val color-picker-pad     f32 8.0)
+(val color-picker-preview f32 28.0)  ; preview swatch height, screen pixels
+(val color-picker-label-h f32 20.0)  ; hex label row height, screen pixels
+
+(fn color-picker-rect [width i32 height i32] (f32 f32 f32 f32)
+  (let [[tp-x0 tp-y0 tp-x1 tp-y1] (texture-picker-rect width height)
+        w (+ color-picker-sv-size (* 2.0 color-picker-pad))
+        h (+ (* 5.0 color-picker-pad) color-picker-sv-size color-picker-hue-h
+             color-picker-preview color-picker-label-h)
+        x1 (- (cast f32 width) color-picker-margin)
+        x0 (- x1 w)
+        y0 (+ tp-y1 color-picker-margin)
+        y1 (+ y0 h)]
+    (return x0 y0 x1 y1)))
+
+;; `#RRGGBB`, read-only for now (step 4's own job is making this an
+;; editable/typeable ui-text-field instead) -- one hex digit per nibble,
+;; `hex-chars` a plain lookup table since there's no hex format
+;; specifier anywhere in this project's `str`/print templates
+;; ([[print-and-str-builtins]]-family builtins are base-10 only).
+(val hex-chars [string 16] ["0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "A" "B" "C" "D" "E" "F"])
+
+(fn hex-byte [arena arena b u8] string
+  (str arena (nth hex-chars (cast u64 (/ b 16u8))) (nth hex-chars (cast u64 (% b 16u8)))))
+
+(fn color-to-hex [arena arena c Vec3] string
+  (let [r (cast u8 (clamp (* (. c x) 255.0) 0.0 255.0))
+        g (cast u8 (clamp (* (. c y) 255.0) 0.0 255.0))
+        b (cast u8 (clamp (* (. c z) 255.0) 0.0 255.0))]
+    (str arena "#" (hex-byte arena r) (hex-byte arena g) (hex-byte arena b))))
+
+;; Guard shape mirrors editor-set-brush-texture above, just dual-dispatch
+;; (brush vs light) instead of brush-only -- a no-op with nothing
+;; selected or a Hole selected (no albedo means anything on one, same
+;; guard editor-cycle-brush-texture already has), draw-color-picker's own
+;; click handler below.
+(fn editor-set-selected-color [editor EditorState* scene Scene* color Vec3] void
+  (when (< (. editor selected) 0) (return))
+  (if (= (. editor selected-kind) SelectedKind/Light)
+    (let [l (addr (nth (. scene lights points) (cast u32 (. editor selected))))]
+      (void (set (. l color) color)))
+    (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))]
+      (when (!= (. b kind) BrushKind/Hole)
+        (void (set (. b material albedo) color))))))
+
+(fn draw-color-picker
+  [renderer Renderer* scene Scene* editor EditorState* input Input* font Font* width i32 height i32] void
+  (when (not (. editor color-picker-open)) (return))
+  (let [[x0 y0 x1 y1] (color-picker-rect width height)
+        current (if (< (. editor selected) 0)
+                  (vec3 1.0 1.0 1.0)
+                  (if (= (. editor selected-kind) SelectedKind/Light)
+                    (. (nth (. scene lights points) (cast u32 (. editor selected))) color)
+                    (. (nth (. scene brushes) (cast u64 (. editor selected))) material albedo)))
+        hsv (rgb-to-hsv current)
+        sv-x0 (+ x0 color-picker-pad)
+        sv-y0 (+ y0 color-picker-pad)
+        sv-x1 (+ sv-x0 color-picker-sv-size)
+        sv-y1 (+ sv-y0 color-picker-sv-size)
+        hue-x0 sv-x0
+        hue-y0 (+ sv-y1 color-picker-pad)
+        hue-x1 sv-x1
+        hue-y1 (+ hue-y0 color-picker-hue-h)
+        prev-x0 sv-x0
+        prev-y0 (+ hue-y1 color-picker-pad)
+        prev-x1 sv-x1
+        prev-y1 (+ prev-y0 color-picker-preview)
+        label-y (+ prev-y1 color-picker-pad (. font ascent))]
+
+    (void (ui-rect renderer input x0 y0 x1 y1 (vec4 0.05 0.05 0.07 0.85) 0u32))
+
+    ;; SV square's baked texture depends on `hue`, so it's only re-baked
+    ;; (old GL texture destroyed, a new one uploaded) when the selection's
+    ;; hue actually moved since the last frame this ran -- regenerating
+    ;; every idle frame the panel sits open would mean constant GL texture
+    ;; churn for a picture that never changes.
+    (when (or (= (. editor color-picker-sv-tex) 0u32)
+              (> (abs (- (. hsv x) (. editor color-picker-sv-hue))) 0.0005))
+      (destroy-texture (. editor color-picker-sv-tex))
+      (set (. editor color-picker-sv-tex) (make-sv-square-texture (. hsv x)))
+      (set (. editor color-picker-sv-hue) (. hsv x)))
+
+    (ui-image renderer sv-x0 sv-y0 sv-x1 sv-y1 (. editor color-picker-sv-tex))
+    (ui-image renderer hue-x0 hue-y0 hue-x1 hue-y1 (. editor color-picker-hue-tex))
+    (void (ui-rect renderer input prev-x0 prev-y0 prev-x1 prev-y1
+            (vec4 (. current x) (. current y) (. current z) 1.0) 0u32))
+    (scratch [t]
+      (ui-label renderer font (color-to-hex t current) prev-x0 label-y (vec4 0.9 0.9 0.9 1.0)))
+
+    ;; Interaction: ui-slider-2d/-1d read continuous drag position over
+    ;; the SAME rects the textured ui-rects above just drew, independent
+    ;; of those calls' own one-shot click returns (ignored -- the
+    ;; textures are purely visual here, the sliders are the real input).
+    ;; Gated on mouse1-down purely to skip a same-value no-op write every
+    ;; idle frame the panel sits open -- ui-slider-1d/-2d already no-op
+    ;; internally otherwise (see their own comments).
+    (when (. input mouse1-down)
+      (let [raw-sv (ui-slider-2d input sv-x0 sv-y0 sv-x1 sv-y1 (vec2 (. hsv y) (- 1.0 (. hsv z))))
+            new-hue (ui-slider-1d input hue-x0 hue-y0 hue-x1 hue-y1 (. hsv x))
+            new-s (. raw-sv x)
+            new-v (- 1.0 (. raw-sv y))]
+        (editor-set-selected-color editor scene (hsv-to-rgb new-hue new-s new-v))))))
+
+;; ~~ Light-properties panel (ui.3b) -- M toggles EditorState.light-
+;; panel-open, same independent-of-selection lifecycle as texture/color-
+;; picker-open. Unlike those two, its CONTENT depends on what's selected:
+;; nothing selected shows the sun (+ scene.lights.ambient, the other half
+;; of "set a mood" beyond individual fixtures -- no existing in-editor
+;; control before this), a selected Point shows Type/Intensity/Radius, a
+;; selected Spot additionally shows the cone angles. A selected BRUSH
+;; hides the panel entirely (light-panel-visible? below) -- there's
+;; nothing here for one. Color is deliberately left to N's color picker
+;; rather than duplicated here.
+
+(val light-panel-margin f32 10.0)  ; screen pixels, gap from the window's bottom-left corner
+(val light-panel-width  f32 230.0)
+(val light-panel-row-h  f32 26.0)  ; screen pixels, one slider/button row
+(val light-panel-pad    f32 8.0)
+
+(fn light-panel-visible? [editor EditorState*] bool
+  (and (. editor light-panel-open)
+       (or (< (. editor selected) 0) (= (. editor selected-kind) SelectedKind/Light))))
+
+(fn light-panel-row-count [scene Scene* editor EditorState*] i32
+  (if (< (. editor selected) 0)
+    6 ; sun: intensity, ambient r/g/b, shadow, enabled
+    (if (= (. (nth (. scene lights points) (cast u32 (. editor selected))) kind) LightKind/Spot)
+      7  ; spot: type, intensity, radius, cone-inner, cone-outer, shadow, enabled
+      5))) ; point: type, intensity, radius, shadow, enabled
+
+(fn light-panel-rect [scene Scene* editor EditorState* width i32 height i32] (f32 f32 f32 f32)
+  (let [rows (light-panel-row-count scene editor)
+        h (+ (* 2.0 light-panel-pad) (* (cast f32 rows) light-panel-row-h))
+        x0 light-panel-margin
+        y1 (- (cast f32 height) light-panel-margin)
+        y0 (- y1 h)
+        x1 (+ x0 light-panel-width)]
+    (return x0 y0 x1 y1)))
+
+;; One decimal place, e.g. `1.2` -- this project's `str`/println templates
+;; are base-10 only with no float-precision control ([[print-and-str-
+;; builtins]]-family), so this rounds to tenths by hand rather than
+;; printing a raw f32 (which would come out as a long, cluttered decimal
+;; expansion in a panel this narrow).
+(fn format-1dp [arena arena v f32] string
+  (let [scaled (cast i32 (round (* v 10.0)))
+        whole  (/ scaled 10)
+        frac   (abs (% scaled 10))]
+    (str arena whole "." frac)))
+
+;; A toggle button: filled green while `on`, dark gray otherwise, label
+;; drawn on top -- returns whether IT was clicked this frame (ui-rect's
+;; own one-shot `pick` return), caller decides what clicking it means
+;; (draw-light-panel below always flips whatever bool it's mirroring).
+(fn light-panel-button
+  [renderer Renderer* input Input* font Font* x0 f32 y0 f32 x1 f32 label string on bool] bool
+  (let [y1 (+ y0 light-panel-row-h)
+        color (if on (vec4 0.22 0.5 0.28 0.9) (vec4 0.16 0.16 0.18 0.9))
+        clicked (ui-rect renderer input x0 y0 x1 y1 color 0u32)]
+    (ui-label renderer font label (+ x0 6.0) (+ y0 (. font ascent) 3.0) (vec4 0.92 0.92 0.92 1.0))
+    clicked))
+
+;; A labeled horizontal slider over [min,max] -- draws a background bar,
+;; a filled portion up to `value`'s own position, and a "label: n.n" text
+;; on top, then reads continuous drag the same "one rect, two calls, draw
+;; vs input" split draw-color-picker's own SV square/hue strip use.
+;; Returns the (possibly unchanged) new value; caller writes it back.
+(fn light-panel-slider
+  [renderer Renderer* input Input* font Font* x0 f32 y0 f32 x1 f32 label string value f32 lo f32 hi f32] f32
+  (let [bar-y0 (+ y0 (- light-panel-row-h 8.0))
+        bar-y1 (+ bar-y0 6.0)
+        t (clamp (/ (- value lo) (- hi lo)) 0.0 1.0)
+        fill-x1 (+ x0 (* (- x1 x0) t))]
+    (void (ui-rect renderer input x0 bar-y0 x1 bar-y1 (vec4 0.12 0.12 0.14 0.9) 0u32))
+    (void (ui-rect renderer input x0 bar-y0 fill-x1 bar-y1 (vec4 0.4 0.52 0.85 0.9) 0u32))
+    (scratch [a]
+      (ui-label renderer font (str a label ": " (format-1dp a value)) (+ x0 4.0) (+ y0 (. font ascent)) (vec4 0.9 0.9 0.9 1.0)))
+    (if (. input mouse1-down)
+      (+ lo (* (ui-slider-1d input x0 bar-y0 x1 bar-y1 t) (- hi lo)))
+      value)))
+
+(fn draw-light-panel
+  [renderer Renderer* scene Scene* editor EditorState* input Input* font Font* width i32 height i32] void
+  (when (not (light-panel-visible? editor)) (return))
+  (let [[x0 y0 x1 y1] (light-panel-rect scene editor width height)
+        cx0 (+ x0 light-panel-pad)
+        cx1 (- x1 light-panel-pad)]
+    (void (ui-rect renderer input x0 y0 x1 y1 (vec4 0.05 0.05 0.07 0.85) 0u32))
+    (var row-y f32 (+ y0 light-panel-pad))
+
+    (if (< (. editor selected) 0)
+      (let [sun (& scene lights sun)]
+        (set (. sun intensity) (light-panel-slider renderer input font cx0 row-y cx1 "Intensity" (. sun intensity) 0.0 5.0))
+        (+= row-y light-panel-row-h)
+        (set (. scene lights ambient x) (light-panel-slider renderer input font cx0 row-y cx1 "Ambient R" (. scene lights ambient x) 0.0 1.0))
+        (+= row-y light-panel-row-h)
+        (set (. scene lights ambient y) (light-panel-slider renderer input font cx0 row-y cx1 "Ambient G" (. scene lights ambient y) 0.0 1.0))
+        (+= row-y light-panel-row-h)
+        (set (. scene lights ambient z) (light-panel-slider renderer input font cx0 row-y cx1 "Ambient B" (. scene lights ambient z) 0.0 1.0))
+        (+= row-y light-panel-row-h)
+        (when (light-panel-button renderer input font cx0 row-y cx1 "Cast Shadow" (. sun cast-shadow))
+          (set (. sun cast-shadow) (not (. sun cast-shadow))))
+        (+= row-y light-panel-row-h)
+        (when (light-panel-button renderer input font cx0 row-y cx1 "Enabled" (. sun enabled))
+          (set (. sun enabled) (not (. sun enabled)))))
+      (let [l (addr (nth (. scene lights points) (cast u32 (. editor selected))))
+            spot (= (. l kind) LightKind/Spot)]
+        (when (light-panel-button renderer input font cx0 row-y cx1 (if spot "Type: Spot" "Type: Point") spot)
+          (editor-toggle-light-kind l))
+        (+= row-y light-panel-row-h)
+        (set (. l intensity) (light-panel-slider renderer input font cx0 row-y cx1 "Intensity" (. l intensity) 0.0 10.0))
+        (+= row-y light-panel-row-h)
+        (set (. l radius) (light-panel-slider renderer input font cx0 row-y cx1 "Radius" (. l radius) light-radius-min light-radius-max))
+        (+= row-y light-panel-row-h)
+        (when spot
+          (do
+            (set (. l cone-inner) (light-panel-slider renderer input font cx0 row-y cx1 "Cone Inner" (. l cone-inner) 1.0 89.0))
+            (+= row-y light-panel-row-h)
+            (set (. l cone-outer) (light-panel-slider renderer input font cx0 row-y cx1 "Cone Outer" (. l cone-outer) 1.0 89.0))
+            (+= row-y light-panel-row-h)))
+        (when (light-panel-button renderer input font cx0 row-y cx1 "Cast Shadow" (. l cast-shadow))
+          (set (. l cast-shadow) (not (. l cast-shadow))))
+        (+= row-y light-panel-row-h)
+        (when (light-panel-button renderer input font cx0 row-y cx1 "Enabled" (. l enabled))
+          (set (. l enabled) (not (. l enabled))))))))
+
+;; ~~ Model-browser panel (ui.3b) -- P toggles EditorState.model-browser-
+;; open. Screen-corner-anchored (top-left, the one corner texture-picker/
+;; color-picker/light-panel don't already occupy), a vertical list of
+;; every .gltf/.glb file scan-model-files finds in the working directory
+;; (the same directory every add-model call in main.3b already loads
+;; from), each row a real render-to-texture thumbnail (renderer.3b's
+;; make-model-thumbnail, via model-thumbnail-for's cache below) next to
+;; the filename. Clicking a row calls add-prop directly (same "draw
+;; function also mutates scene state" pattern draw-texture-picker's own
+;; swatch click already established) at editor.cursor, then selects the
+;; newly-placed Thing so the translate gizmo/resize-drag/Z-X-rotate
+;; immediately apply to it -- same "spawn, then select what you just
+;; spawned" convention editor-spawn-box/-ramp/-hole/-sphere/-light
+;; already share.
+
+(val model-browser-margin  f32 10.0)  ; screen pixels, from the window's own top-left corner
+(val model-browser-width   f32 260.0)
+(val model-browser-row-h   f32 44.0)  ; tall enough for a model-browser-thumb-size-square thumbnail
+(val model-browser-pad     f32 8.0)
+;; The most rows this panel will ever draw at once, regardless of how
+;; many files scan-model-files actually found -- there's no scroll
+;; control yet (ui.3b has none), so a models folder bigger than this
+;; would run rows off the bottom of the screen; comfortably past what
+;; this demo's own flat asset directory has.
+(val model-browser-max-rows f32 12.0)
+(val model-browser-thumb-size f32 36.0) ; on-screen thumbnail swatch, square, screen pixels
+;; Off-screen render TARGET resolution (renderer.3b's make-model-
+;; thumbnail) -- deliberately bigger than model-browser-thumb-size's own
+;; on-screen size (GPU-cheap at this scale, one-time cost per distinct
+;; file) so the swatch still reads cleanly if a later pass ever draws it
+;; larger (a hover-preview, say) without needing a second bake.
+(val model-browser-thumb-tex-size i32 128)
+
+;; True for a bare filename (not a full path -- scan-model-files below
+;; only ever sees what os/list-dir itself returns, already bare) ending
+;; in one of the two extensions load-model actually understands
+;; (model.3b's own gltf/parse-file call, no format sniffing beyond the
+;; extension).
+(fn model-file? [name string] bool
+  (or (string-ends-with name ".gltf" 0u32) (string-ends-with name ".glb" 0u32)))
+
+;; Every .gltf/.glb file directly inside the current working directory --
+;; called once, the frame the panel transitions closed -> open (update-
+;; editor's own toggle handler below), not every frame it's open, same
+;; "rebuild on open, not continuously" lifecycle draw-color-picker's own
+;; SV-square texture cache uses for a different reason (there, cost;
+;; here, simplicity -- a directory listing this small is cheap either
+;; way, but the file list only needs to reflect "whatever's on disk right
+;; now" at the moment you open the panel, not live while it sits open).
+(fn scan-model-files [arena arena] [string]
+  (var result [string])
+  (for [name (os/list-dir arena ".")]
+    (when (model-file? name) (vector-push arena result name)))
+  result)
+
+;; `name`'s own thumbnail texture-id, computed and cached
+;; (EditorState.model-thumbnails) the first time this is ever called for
+;; it, reused every call after -- see that field's own comment for why
+;; this is a process-lifetime cache, unlike model-browser-files itself.
+;; `load-model` underneath is ITSELF cached by path (model.3b's own
+;; model-cache), so the common case (a file main.3b already loaded at
+;; startup, or the player already placed once) costs one hash lookup here
+;; plus one more in load-model, not a real disk/GPU-upload round trip --
+;; only a file that's never been loaded at all this run pays for both a
+;; real load-model AND a real make-model-thumbnail render the first time
+;; its row is ever drawn. 0 (load-model failed, or make-model-thumbnail's
+;; own framebuffer-incomplete fallback) is cached the exact same way a
+;; real texture-id is -- a permanently-broken file shouldn't retry every
+;; frame the panel is open either.
+(fn model-thumbnail-for [renderer Renderer* editor EditorState* arena arena name string] u32
+  (let [cached (map-get (. editor model-thumbnails) name)]
+    (when cached (return (deref cached)))
+    (let [[ok model] (load-model arena name)
+          tex (if ok (make-model-thumbnail renderer (addr model) model-browser-thumb-tex-size) 0u32)]
+      (map-set arena (. editor model-thumbnails) name tex)
+      tex)))
+
+(fn model-browser-rect [editor EditorState* width i32 height i32] (f32 f32 f32 f32)
+  (let [rows (max (min (cast f32 (len (. editor model-browser-files))) model-browser-max-rows) 1.0)
+        h (+ (* 2.0 model-browser-pad) (* rows model-browser-row-h))
+        x0 model-browser-margin
+        x1 (+ x0 model-browser-width)
+        y0 model-browser-margin
+        y1 (+ y0 h)]
+    (return x0 y0 x1 y1)))
+
+(fn draw-model-browser
+  [renderer Renderer* scene Scene* editor EditorState* input Input* font Font* arena arena width i32 height i32] void
+  (when (not (. editor model-browser-open)) (return))
+  (let [[x0 y0 x1 y1] (model-browser-rect editor width height)
+        files (. editor model-browser-files)
+        row-count (min (len files) (cast u64 model-browser-max-rows))]
+    (void (ui-rect renderer input x0 y0 x1 y1 (vec4 0.05 0.05 0.07 0.85) 0u32))
+    (if (= (len files) 0u64)
+      (ui-label renderer font "(no .gltf/.glb files found)"
+        (+ x0 model-browser-pad) (+ y0 model-browser-pad (. font ascent)) (vec4 0.7 0.7 0.7 1.0))
+      (for [i 0u64 row-count]
+        (let [name (nth files i)
+              ry0 (+ y0 model-browser-pad (* (cast f32 i) model-browser-row-h))
+              ry1 (+ ry0 model-browser-row-h)
+              thumb-y0 (+ ry0 (* 0.5 (- model-browser-row-h model-browser-thumb-size)))
+              thumb-x0 (+ x0 model-browser-pad)
+              thumb-x1 (+ thumb-x0 model-browser-thumb-size)
+              thumb-y1 (+ thumb-y0 model-browser-thumb-size)
+              label-x (+ thumb-x1 model-browser-pad)
+              tex (model-thumbnail-for renderer editor arena name)]
+          (when (ui-rect renderer input x0 ry0 x1 ry1 (vec4 0.14 0.14 0.18 0.5) 0u32)
+            (let [[ok tidx] (add-prop scene arena name (. editor cursor))]
+              (when ok
+                (set (. editor selected) tidx)
+                (set (. editor selected-kind) SelectedKind/Thing))))
+          ;; A blank slot (dim outline, no image) for a 0 texture-id --
+          ;; either not baked yet this frame's earlier rows already forced
+          ;; it (shouldn't happen, model-thumbnail-for is called right
+          ;; above) or the file genuinely failed to load/render -- reads
+          ;; as "no preview available" rather than a jarring transparent
+          ;; hole where a swatch should be.
+          (if (!= tex 0u32)
+            (ui-image renderer thumb-x0 thumb-y0 thumb-x1 thumb-y1 tex)
+            (void (ui-rect renderer input thumb-x0 thumb-y0 thumb-x1 thumb-y1 (vec4 0.2 0.2 0.22 0.6) 0u32)))
+          (ui-label renderer font name label-x (+ ry0 (* 0.5 model-browser-row-h) (* 0.5 (. font ascent))) (vec4 0.9 0.9 0.9 1.0)))))))
+
+;; Deletes the selected brush (if any) -- vector-swap-remove (scene.3b's
+;; draw-scene/terrain-height don't care about brush order) plus a
+;; destroy-mesh so its GL mesh doesn't leak the way destroy-scene cleans
+;; up every brush at shutdown. Hole never had a real mesh to destroy (see
+;; BrushKind/Brush's own comment) -- and either a wall or a hole going away
+;; can change some OTHER wall's hole-punch state, hence the unconditional
+;; rebuild-all-wall-meshes after.
+;; Deletes whatever's selected, brush or light. A brush delete is
+;; vector-swap-remove (scene.3b's draw-scene/terrain-height don't care
+;; about brush order) plus a destroy-mesh so its GL mesh doesn't leak the
+;; way destroy-scene cleans up every brush at shutdown, and since either
+;; a wall or a hole going away can change some OTHER wall's hole-punch
+;; state, an unconditional rebuild-all-wall-meshes after -- a light
+;; delete (light.3b's own remove-point-light, same swap-remove
+;; convention) affects none of that, so it skips straight to clearing
+;; the selection.
+;; A Thing delete is just vector-swap-remove, no destroy-mesh -- unlike a
+;; Brush's own procedurally-built mesh (owned outright, one per brush),
+;; a Thing's Model comes from load-model's own model-cache (model.3b),
+;; keyed by path and potentially shared by other instances of the same
+;; file, so nothing here owns it exclusively to tear down.
+(fn editor-delete-selected [editor EditorState* scene Scene* arena arena] void
+  (when (< (. editor selected) 0) (return))
+  (match (. editor selected-kind)
+    [SelectedKind/Light (remove-point-light (& scene lights) (cast u32 (. editor selected)))
+     SelectedKind/Thing (void (vector-swap-remove (. scene things) (cast u64 (. editor selected))))
+     else
+     (let [i (cast u64 (. editor selected))
+           b (addr (nth (. scene brushes) i))]
+       (when (!= (. b kind) BrushKind/Hole) (destroy-mesh (. b mesh)))
+       (vector-swap-remove (. scene brushes) i)
+       (rebuild-all-wall-meshes scene arena))])
+  (set (. editor selected) -1))
+
+;; Runs once, the frame an edit session ends (see EditorState.was-editing's
+;; own comment) -- the ONLY place the real GL mesh catches up to whatever
+;; changed during the drag/hold. Ramp and Sphere both need their own
+;; explicit rebuild (the only two kinds whose resize changes shape via
+;; rebuild-brush-mesh -- a resized Box's new shape is already covered
+;; below, and a light has no mesh at all); rebuild-all-wall-meshes always
+;; runs regardless of what actually changed (even for a selected light --
+;; cheap, and simpler than tracking whether a wall could possibly have
+;; been involved), since a wall's own move/resize/rotate OR a Hole's can
+;; each change some wall's hole-punch state (see its own comment).
+(fn editor-commit [editor EditorState* scene Scene* arena arena] void
+  (when (and (>= (. editor selected) 0) (= (. editor selected-kind) SelectedKind/Brush))
+    (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))]
+      (when (or (= (. b kind) BrushKind/Ramp) (= (. b kind) BrushKind/Sphere)) (rebuild-brush-mesh b))))
+  (rebuild-all-wall-meshes scene arena))
+
+(fn update-editor [editor EditorState* scene Scene* arena arena input Input* dt f32 width i32 height i32] void
+  (when (. input select-prev) (editor-cycle-selection editor scene -1))
+  (when (. input select-next) (editor-cycle-selection editor scene 1))
+  (when (. input new-box) (editor-spawn-box editor scene arena))
+  (when (. input new-ramp) (editor-spawn-ramp editor scene arena))
+  (when (. input new-hole) (editor-spawn-hole editor scene arena))
+  (when (. input new-sphere) (editor-spawn-sphere editor scene arena))
+  (when (. input new-light) (editor-spawn-light editor scene))
+  (when (. input delete-brush) (editor-delete-selected editor scene arena))
+  (when (. input cycle-texture) (editor-cycle-brush-texture editor scene))
+  (when (. input toggle-texture-picker)
+    (set (. editor texture-picker-open) (not (. editor texture-picker-open))))
+  (when (. input toggle-color-picker)
+    (set (. editor color-picker-open) (not (. editor color-picker-open))))
+  (when (. input toggle-light-panel)
+    (set (. editor light-panel-open) (not (. editor light-panel-open))))
+  (when (. input toggle-model-browser)
+    (set (. editor model-browser-open) (not (. editor model-browser-open)))
+    (when (. editor model-browser-open)
+      (set (. editor model-browser-files) (scan-model-files arena))))
+
+  ;; F5/F9 save/load the current brushes+lights to/from disk -- level.3b's
+  ;; own save-level/load-level. A load replaces `selected` out from under
+  ;; whatever was picked (the old index may not even exist in the newly
+  ;; loaded brush list), so it's cleared the same way editor-delete-
+  ;; selected already does after removing the thing it was pointing at.
+  (when (. input save-level) (save-level scene arena default-level-path))
+  (when (. input load-level)
+    (when (load-level scene arena default-level-path)
+      (set (. editor selected) -1)))
+
+  ;; T toggles cast-shadow on the selected LIGHT if one is selected,
+  ;; else the sun's -- see light.3b's own cast-shadow comment for why a
+  ;; point light's flag is inert today (no point-light shadow map
+  ;; exists yet), kept per-light anyway for when one does.
+  (when (. input toggle-shadow)
+    (if (and (>= (. editor selected) 0) (= (. editor selected-kind) SelectedKind/Light))
+      (let [l (addr (nth (. scene lights points) (cast u32 (. editor selected))))]
+        (set (. l cast-shadow) (not (. l cast-shadow))))
+      (set (. scene lights sun cast-shadow) (not (. scene lights sun cast-shadow)))))
+
+  ;; V toggles `enabled` on the selected LIGHT if one is selected, else
+  ;; the sun's -- same "light, else sun" fallback as T above, just for
+  ;; whether the light contributes at all (light.3b's own flatten-lights/
+  ;; renderer.3b's sun handling) rather than whether it casts a shadow.
+  ;; Unlike Delete this never removes the light -- draw-scene's own gizmo
+  ;; cube keeps drawing it, dimmed, so it stays selectable to turn back on.
+  (when (. input toggle-enabled)
+    (if (and (>= (. editor selected) 0) (= (. editor selected-kind) SelectedKind/Light))
+      (let [l (addr (nth (. scene lights points) (cast u32 (. editor selected))))]
+        (set (. l enabled) (not (. l enabled))))
+      (set (. scene lights sun enabled) (not (. scene lights sun enabled)))))
+
+  ;; `,`/`.` shrink/grow the selected light's falloff radius, held, same
+  ;; lifecycle as Q/E raise/lower below -- a no-op on anything but a
+  ;; selected light (a brush has nothing analogous to adjust this way).
+  (when (and (>= (. editor selected) 0) (= (. editor selected-kind) SelectedKind/Light))
+    (let [l (addr (nth (. scene lights points) (cast u32 (. editor selected))))
+          d (- (if (. input light-radius-up) 1.0 0.0) (if (. input light-radius-down) 1.0 0.0))]
+      (when (!= d 0.0)
+        (set (. l radius) (clamp (+ (. l radius) (* d light-radius-speed dt)) light-radius-min light-radius-max)))))
+
+  ;; A click that lands on an OPEN ui.3b panel belongs to that panel
+  ;; (draw-texture-picker's own click handling, run later this same
+  ;; frame during the draw phase) -- never ALSO to whatever 3D geometry
+  ;; happens to sit behind it on screen. Computed here, ahead of the
+  ;; scene-pick block below, since this runs during the UPDATE phase
+  ;; (before any drawing this frame) -- see ui.3b's own header comment
+  ;; for why the ordering has to be this way round.
+  (let [ui-consumed-click
+        (or
+          (and (. editor texture-picker-open)
+            (let [[tp-x0 tp-y0 tp-x1 tp-y1] (texture-picker-rect width height)]
+              (ui-panel-consumes-click? input tp-x0 tp-y0 tp-x1 tp-y1)))
+          (and (. editor color-picker-open)
+            (let [[cp-x0 cp-y0 cp-x1 cp-y1] (color-picker-rect width height)]
+              (ui-panel-consumes-click? input cp-x0 cp-y0 cp-x1 cp-y1)))
+          (and (light-panel-visible? editor)
+            (let [[lp-x0 lp-y0 lp-x1 lp-y1] (light-panel-rect scene editor width height)]
+              (ui-panel-consumes-click? input lp-x0 lp-y0 lp-x1 lp-y1)))
+          (and (. editor model-browser-open)
+            (let [[mb-x0 mb-y0 mb-x1 mb-y1] (model-browser-rect editor width height)]
+              (ui-panel-consumes-click? input mb-x0 mb-y0 mb-x1 mb-y1))))]
+
+  ;; A click grabs at most ONE thing: a gizmo arm (checked first -- the
+  ;; gizmo is drawn on top of/around the current selection, so it should
+  ;; win over a brush face directly behind it), failing that whatever
+  ;; scene-pick-brush hits, failing THAT whatever scene-pick-light hits
+  ;; (so an overlapping brush always wins over a light -- see its own
+  ;; comment). All three start out cleared so exactly one (or none, on an
+  ;; empty-space click) ends up active.
+  (when (and (. input pick) (not ui-consumed-click))
+    (let [pane (pane-for-pixel width height (. input pick-x) (. input pick-y))
+          local (pane-local-xy width height pane (. input pick-x) (. input pick-y))
+          [origin dir] (pane-camera-ray editor scene pane (/ width 2) (/ height 2) (. local x) (. local y))
+          pivot (editor-selected-pos editor scene)
+          arm-axis (editor-pick-gizmo-arm pivot origin dir)]
+      (set (. editor active-pane) pane)
+      (set (. editor move-axis) -1)
+      (set (. editor resize-axis) -1)
+      (when (>= arm-axis 0) (set (. editor move-axis) arm-axis))
+      (when (< arm-axis 0)
+        (let [[idx ray-normal] (scene-pick-brush scene origin dir)]
+          (if (>= idx 0)
+            (do
+              (set (. editor selected) idx)
+              (set (. editor selected-kind) SelectedKind/Brush)
+              ;; scene-pick-brush's own normal is only meaningful for a
+              ;; PERSPECTIVE ray -- an orthographic ray is axis-aligned, so
+              ;; ray-aabb-hit can only ever report a face on `dir`'s own
+              ;; axis (exactly the one axis that pane's view can't show or
+              ;; usefully resize), see ortho-face-pick's own comment.
+              (let [b (addr (nth (. scene brushes) (cast u64 idx)))
+                    normal (if (= pane 0) ray-normal (ortho-face-pick b origin dir))]
+                (editor-start-resize editor b normal)))
+            (let [lidx (scene-pick-light scene origin dir)]
+              (if (>= lidx 0)
+                (void (set (. editor selected) lidx) (set (. editor selected-kind) SelectedKind/Light))
+                ;; Tried last -- a Brush or Light directly under the click
+                ;; always wins over an overlapping decorative prop, same
+                ;; priority scene-pick-light already gives Brush over
+                ;; itself.
+                (let [tidx (scene-pick-thing scene origin dir)]
+                  (set (. editor selected) tidx)
+                  (when (>= tidx 0)
+                    (set (. editor selected-kind) SelectedKind/Thing)
+                    (editor-start-thing-resize editor (addr (nth (. scene things) (cast u64 tidx))))))))))))))
+
+  (when (. input mouse1-down)
+    (editor-apply-resize editor scene (. input drag-x) (. input drag-y) (. input snap-to-grid))
+    (editor-apply-gizmo-drag editor scene (. input drag-x) (. input drag-y)))
+  (when (not (. input mouse1-down))
+    (set (. editor resize-axis) -1)
+    (set (. editor move-axis) -1))
+
+  ;; Whatever changed `selected`/`selected-kind` above ([/], pick, any
+  ;; spawn, or Delete) means raw-offset needs to restart from whatever's
+  ;; newly current -- otherwise the very first WASD move after switching
+  ;; selection would jump from wherever the OLD selection's raw-offset
+  ;; happened to be. This is ALSO the only place editor.ortho-target
+  ;; (every ortho pane's shared look-at, see EditorState's own comment)
+  ;; moves -- frames the new selection once, right here, rather than
+  ;; chasing it every frame of a subsequent drag/move the way this used
+  ;; to. scene.camera.target (the PERSPECTIVE camera's own orbit pivot)
+  ;; deliberately does NOT move here any more -- selecting/cycling/
+  ;; spawning something no longer relocates that view at all, only the 3
+  ;; ortho panes.
+  (when (or (!= (. editor selected) (. editor prev-selected))
+            (!= (. editor selected-kind) (. editor prev-selected-kind)))
+    (let [new-pos (editor-selected-pos editor scene)]
+      (set (. editor raw-offset) new-pos)
+      (set (. editor ortho-target) (add-vec3 new-pos (vec3 0.0 0.5 0.0))))
+    (set (. editor prev-selected) (. editor selected))
+    (set (. editor prev-selected-kind) (. editor selected-kind)))
+
+  ;; WASD/arrow movement below reads whichever pane is CURRENTLY HOVERED
+  ;; (not editor.active-pane -- that's only meaningful mid mouse-drag, see
+  ;; its own comment) so held-key movement always matches whatever pane
+  ;; the mouse happens to be sitting over this frame, same live-hover
+  ;; convention apply-input-editor already uses for scroll-zoom/orbit.
+  ;;
+  ;; `flying` -- mouse2 held (apply-input-editor is already mouse-looking
+  ;; with it, unchanged) while hovering the Perspective pane specifically
+  ;; -- is the Unreal/Unity/Source-Hammer convention: WASD/E-Q drive the
+  ;; CAMERA instead of the selected brush for as long as it's true, never
+  ;; both at once. Z/X rotate is the one exception (see further down) --
+  ;; it has no camera meaning either way, so it always still turns the
+  ;; brush regardless of flying.
+  (let [hover-pane (pane-for-pixel width height (. input mouse-x) (. input mouse-y))
+        flying (and (= hover-pane 0) (. input looking))]
+    (if flying
+      ;; Free-look fly camera: translate scene.camera.target along the
+      ;; camera's own REAL 3D forward/right (camera-basis -- unlike
+      ;; editor-move-axes's flattened ground-plane convention for brush
+      ;; movement, this includes pitch, so looking down and pressing W
+      ;; flies you down-forward, matching how a real fly-cam feels).
+      ;; E/Q move straight up/down along world Y same as they'd otherwise
+      ;; raise/lower a brush.
+      (let [[cam-forward cam-right cam-up] (camera-basis (& scene camera))
+            axis (input-move-axis input)
+            rise (- (if (. input edit-raise) 1.0 0.0) (if (. input edit-lower) 1.0 0.0))
+            move (add-vec3
+                   (add-vec3 (scale-vec3 cam-right (. axis x)) (scale-vec3 cam-forward (. axis y)))
+                   (vec3 0.0 rise 0.0))]
+        (set (. scene camera target)
+          (add-vec3 (. scene camera target) (scale-vec3 move (* camera-fly-speed dt)))))
+      (let [[move-right move-up] (editor-move-axes scene hover-pane)
+            axis   (input-move-axis input)
+            planar (add-vec3 (scale-vec3 move-right (. axis x))
+                              (scale-vec3 move-up (. axis y)))
+            rise   (- (if (. input edit-raise) 1.0 0.0) (if (. input edit-lower) 1.0 0.0))
+            ;; The full `planar` vector, not just its x/z -- unlike the
+            ;; perspective camera's always-flat (y=0) right/forward, an
+            ;; ortho pane's own screen-up (editor-move-axes's `move-up`)
+            ;; can BE the world Y axis (Front/Side panes), so W/S there
+            ;; raises/lowers the same way Q/E does. Redundant on those two
+            ;; panes, not a bug -- both simply add into the same delta.y.
+            delta  (add-vec3 (scale-vec3 planar (* edit-move-speed dt))
+                              (vec3 0.0 (* rise edit-move-speed dt) 0.0))
+            grid   (if (. input snap-to-grid) (. editor grid-size) 0.0)]
+        (set (. editor raw-offset) (add-vec3 (. editor raw-offset) delta))
+        (set (. editor cursor) (snap-vec3 (. editor raw-offset) grid))))
+    (when (>= (. editor selected) 0)
+      ;; A Point light has no facing to turn -- Z/X rotate is a Brush/
+      ;; Thing-only concept for it, same as before. A Spot light DOES have
+      ;; one (light.3b's Light.dir, light-to-aim), so Z/X instead tilts
+      ;; that through the X-Y plane (straight down <-> angled forward/
+      ;; back) -- the one aiming control this demo needs to swing a
+      ;; spot's beam off the "spawn straight down" default (editor-set-
+      ;; selected-kind below) into something dramatic.
+      (match (. editor selected-kind)
+        [SelectedKind/Light
+         (let [l (addr (nth (. scene lights points) (cast u32 (. editor selected))))]
+           (when (not flying) (set (. l pos) (. editor cursor)))
+           (when (= (. l kind) LightKind/Spot)
+             (let [turn (- (if (. input edit-rotate-right) 1.0 0.0) (if (. input edit-rotate-left) 1.0 0.0))]
+               (when (!= turn 0.0)
+                 (let [a (* turn edit-rotate-speed dt)
+                       d (. l dir)
+                       c (cos a) s (sin a)]
+                   (set (. l dir)
+                     (vec3 (- (* (. d x) c) (* (. d y) s)) (+ (* (. d x) s) (* (. d y) c)) (. d z))))))))
+         ;; No refresh-brush-transform equivalent needed -- unlike a
+         ;; Brush's own cached `.transform` field, a Thing's placement is
+         ;; recomputed live every draw straight from offset/yaw/scale
+         ;; (scene.3b's object-transform), so there's nothing to keep in
+         ;; sync here.
+         SelectedKind/Thing
+         (let [obj (addr (nth (. scene things) (cast u64 (. editor selected))))
+               turn (- (if (. input edit-rotate-right) 1.0 0.0) (if (. input edit-rotate-left) 1.0 0.0))]
+           (when (not flying) (set (. obj offset) (. editor cursor)))
+           (when (!= turn 0.0) (+= (. obj yaw) (* turn edit-rotate-speed dt))))
+         else
+         (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))
+               turn (- (if (. input edit-rotate-right) 1.0 0.0) (if (. input edit-rotate-left) 1.0 0.0))]
+           (when (not flying) (set (. b offset) (. editor cursor)))
+           (when (!= turn 0.0) (+= (. b yaw) (* turn edit-rotate-speed dt)))
+           (refresh-brush-transform b))])))
+
+  ;; Falling edge of "an edit is in progress" (any of: face-drag resize,
+  ;; gizmo-arm drag, held WASD/arrow move, Q/E raise/lower, Z/X rotate) on
+  ;; the current selection -- editor-commit runs exactly once, the frame
+  ;; this goes from true to false, not every frame of the edit itself.
+  ;; WASD/E-Q don't count while `flying` (recomputed here -- it was local
+  ;; to the movement `let` above) since they're driving the camera, not
+  ;; the brush, in that case; Z/X always counts either way, matching the
+  ;; movement block's own exception for it.
+  (let [move-axis-input (input-move-axis input)
+        hover-pane (pane-for-pixel width height (. input mouse-x) (. input mouse-y))
+        flying (and (= hover-pane 0) (. input looking))
+        editing-now (and (>= (. editor selected) 0)
+                     (or (>= (. editor resize-axis) 0)
+                         (>= (. editor move-axis) 0)
+                         (and (not flying)
+                              (or (!= (. move-axis-input x) 0.0) (!= (. move-axis-input y) 0.0)
+                                  (. input edit-raise) (. input edit-lower)))
+                         (. input edit-rotate-left) (. input edit-rotate-right)))]
+    (when (and (. editor was-editing) (not editing-now))
+      (editor-commit editor scene arena))
+    (set (. editor was-editing) editing-now)))
+
+;; A small emissive marker floating above whatever's selected (or the
+;; free cursor, if nothing is) -- the only visual feedback for selection
+;; today, no outline/highlight shader. Reuses scene.gizmo, the same mesh
+;; draw-scene already floats over each point light.
+;; One grid line: reuses scene.gizmo-arm (a -0.5..0.5 unit cube, same
+;; mesh draw-gizmo-arm/draw-wireframe-brush already reuse) scaled to a
+;; thin box and translated so it's CENTRED at `center` -- unlike
+;; draw-gizmo-arm's own base-at-pivot convention, a grid line has no
+;; natural "base", it's centred on whichever coordinate is constant along
+;; its length.
+(fn draw-grid-line [renderer Renderer* scene Scene* center Vec3 scale Vec3 color Vec3] void
+  (draw-model renderer (. scene gizmo-arm)
+    (mul-mat4 (make-translate-mat4 center) (make-scale-mat4 scale)) (emissive-material color)))
+
+;; World-space reference grid for the 3 ortho panes only (never
+;; Perspective) -- lines sit at ABSOLUTE multiples of EditorState.grid-
+;; size in world space, not relative to wherever ortho-target currently
+;; is, so the grid always reads as ONE fixed lattice you pan/zoom across
+;; -- exactly what a snapped move/resize actually rounds to -- rather
+;; than drifting with the current pane's own centre. Each pane draws two
+;; sets of lines in its own visible plane (Top: XZ at Y=0; Front: XY at
+;; Z=0; Side: ZY at X=0 -- the fixed coordinate on the pane's own locked
+;; axis is arbitrary, an orthographic view has no depth cue that would
+;; make one choice look different from another), sized to comfortably
+;; exceed the pane's own current span (`grid-half-extent-factor`) so
+;; zooming out never runs past the drawn extent. Recolored WHOLESALE to
+;; grid-line-color-active while input.snap-to-grid (G) is on -- a snapped
+;; move/resize only ever rounds to points ON this same lattice, so this is
+;; the most direct "here's what you're about to snap to" cue available,
+;; simpler than trying to highlight individual snap points as they'd be
+;; approached.
+;;
+;; Always-on-top, drawn AFTER draw-scene (main.3b's own draw loop, not
+;; this function's call site) -- Y=0/Z=0/X=0 sits INSIDE or directly
+;; behind the solid ground slab (ground-half.y=0.25 straddles Y=0), so a
+;; depth-tested grid drawn BEFORE the ground would need a per-pane offset
+;; dodging every piece of scene geometry to stay visible at all.
+;; `gl/disable gl/DEPTH_TEST` for the duration (same convention as
+;; draw-editor-gizmo) is enough on its own -- see grid-line-px-thickness's
+;; own comment for the actual bug this used to get blamed on instead.
+;;
+;; `spacing` below -- NOT `grid` (EditorState.grid-size) directly -- is
+;; what actually spaces the drawn lines: doubled repeatedly until the
+;; covered range needs no more than grid-max-lines-per-axis of them.
+;; Zoomed in close, spacing == grid, same lattice a snapped move/resize
+;; actually rounds to. Zoomed WAY out, `full` (the covered WORLD extent)
+;; keeps growing with `span` while the PANE's own pixel size doesn't --
+;; at grid's raw 0.5-unit spacing that eventually packs many lines into
+;; a handful of screen pixels, reading as visual noise -- doubling
+;; spacing keeps the drawn lines comfortably above one pixel apart at any
+;; zoom, the same fix real editors use (coarser grid subdivisions the
+;; further out you zoom) -- purely visual, EditorState.grid-size and what
+;; snapping actually rounds to are unchanged either way.
+;;
+;; `t` (line cross-section) is grid-line-px-thickness converted from
+;; screen pixels to world units using THIS pane's own span and pixel
+;; height, every draw -- see that constant's own comment for why a fixed
+;; world-unit thickness doesn't work.
+(fn draw-editor-grid [renderer Renderer* scene Scene* editor EditorState* input Input* pane i32] void
+  (when (= pane 0) (return))
+  (let [grid (. editor grid-size)]
+    (when (<= grid 0.0) (return))
+    (let [span (ortho-span-for-pane editor pane)
+          half-extent (* span grid-half-extent-factor)
+          full (* 2.0 half-extent)
+          pane-h (/ (. renderer height) 2)
+          world-per-px (/ (* 2.0 span) (cast f32 pane-h))
+          t (* grid-line-px-thickness world-per-px)
+          target (. editor ortho-target)
+          color (if (. input snap-to-grid) grid-line-color-active grid-line-color)]
+      (var spacing f32 grid)
+      (while (> (/ full spacing) grid-max-lines-per-axis) (set spacing (* spacing 2.0)))
+      (gl/disable gl/DEPTH_TEST)
+      (match pane
+        [1 ;; Top: XZ plane at Y=0.
+         (let [x0 (* spacing (floor (/ (- (. target x) half-extent) spacing)))
+               z0 (* spacing (floor (/ (- (. target z) half-extent) spacing)))
+               n  (cast i32 (+ 2.0 (/ full spacing)))]
+           (for [i 0 n]
+             (draw-grid-line renderer scene
+               (vec3 (+ x0 (* (cast f32 i) spacing)) 0.0 (. target z)) (vec3 t t full) color))
+           (for [i 0 n]
+             (draw-grid-line renderer scene
+               (vec3 (. target x) 0.0 (+ z0 (* (cast f32 i) spacing))) (vec3 full t t) color)))
+         2 ;; Front: XY plane at Z=0.
+         (let [x0 (* spacing (floor (/ (- (. target x) half-extent) spacing)))
+               y0 (* spacing (floor (/ (- (. target y) half-extent) spacing)))
+               n  (cast i32 (+ 2.0 (/ full spacing)))]
+           (for [i 0 n]
+             (draw-grid-line renderer scene
+               (vec3 (+ x0 (* (cast f32 i) spacing)) (. target y) 0.0) (vec3 t full t) color))
+           (for [i 0 n]
+             (draw-grid-line renderer scene
+               (vec3 (. target x) (+ y0 (* (cast f32 i) spacing)) 0.0) (vec3 full t t) color)))
+        else ;; Side: ZY plane at X=0.
+         (let [z0 (* spacing (floor (/ (- (. target z) half-extent) spacing)))
+               y0 (* spacing (floor (/ (- (. target y) half-extent) spacing)))
+               n  (cast i32 (+ 2.0 (/ full spacing)))]
+           (for [i 0 n]
+             (draw-grid-line renderer scene
+               (vec3 0.0 (. target y) (+ z0 (* (cast f32 i) spacing))) (vec3 t full t) color))
+           (for [i 0 n]
+             (draw-grid-line renderer scene
+               (vec3 0.0 (+ y0 (* (cast f32 i) spacing)) (. target z)) (vec3 t t full) color)))])
+      (gl/enable gl/DEPTH_TEST))))
+
+;; One arm of the translate gizmo: scene.gizmo-arm (a -0.5..0.5 unit cube)
+;; scaled into a thin bar along `axis` and translated so its BASE sits at
+;; `pivot` and its tip is gizmo-arm-length further out -- the same pivot
+;; editor-pick-gizmo-arm tests a ray against, so what's drawn is exactly
+;; what's clickable.
+(fn draw-gizmo-arm [renderer Renderer* scene Scene* pivot Vec3 axis i32 color Vec3] void
+  (let [t gizmo-arm-thickness
+        l gizmo-arm-length
+        h (* 0.5 l)
+        scale (match axis
+                [0    (vec3 l t t)
+                 1    (vec3 t l t)
+                 else (vec3 t t l)])
+        tip-offset (match axis
+                     [0    (vec3 h 0.0 0.0)
+                      1    (vec3 0.0 h 0.0)
+                      else (vec3 0.0 0.0 h)])
+        transform (mul-mat4 (make-translate-mat4 (add-vec3 pivot tip-offset)) (make-scale-mat4 scale))]
+    (draw-model renderer (. scene gizmo-arm) transform (emissive-material color))))
+
+;; A wireframe outline of `b`'s CURRENT shape (whatever its live half-x/
+;; half-y/half-z/height/transform are this frame -- for a brush actively
+;; being resized, that's the pending, not-yet-committed shape) -- used for
+;; Hole's permanent outline (it never has a real mesh at all) and for the
+;; live resize-ghost preview of a Box/Ramp being dragged (see
+;; rebuild-all-wall-meshes/editor-commit's own comments for why the real
+;; mesh isn't rebuilt every frame any more).
+;;
+;; Reuses scene.gizmo-arm (a -0.5..0.5 unit cube) scaled by 2*half for
+;; Box/Hole (both share the lift-by-half-y placement convention, so
+;; `.transform` already puts the unit cube's centre in the right place),
+;; scene.unit-ramp (make-ramp-mesh 1.0 1.0 1.0) scaled by (half-x,
+;; height, half-z) for Ramp -- see Scene.unit-ramp's own comment for why
+;; that per-axis scale is exactly equivalent to a real make-ramp-mesh
+;; call -- and scene.unit-sphere (make-sphere-mesh 1.0) scaled uniformly
+;; by `radius` for Sphere. No new geometry is ever built for a preview,
+;; just a scale matrix on an already-cached unit mesh -- gl/polygon-mode
+;; LINE is what actually makes it read as a wireframe rather than a solid
+;; emissive shape.
+(fn draw-wireframe-brush [renderer Renderer* scene Scene* b Brush* color Vec3] void
+  (let [mesh (match (. b kind)
+               [BrushKind/Ramp   (. scene unit-ramp)
+                BrushKind/Sphere (. scene unit-sphere)
+                else             (. scene gizmo-arm)])
+        scale (match (. b kind)
+                [BrushKind/Ramp   (vec3 (. b half-x) (. b height) (. b half-z))
+                 BrushKind/Sphere (vec3 (. b radius) (. b radius) (. b radius))
+                 else             (vec3 (* 2.0 (. b half-x)) (* 2.0 (. b half-y)) (* 2.0 (. b half-z)))])
+        transform (mul-mat4 (. b transform) (make-scale-mat4 scale))]
+    (gl/polygon-mode gl/FRONT_AND_BACK gl/LINE)
+    (draw-model renderer mesh transform (emissive-material color))
+    (gl/polygon-mode gl/FRONT_AND_BACK gl/FILL)))
+
+;; No depth test for any of this -- editor tooling, not scene geometry,
+;; so it should read as always-on-top the way every real editor's own
+;; gizmo does, rather than getting swallowed by whatever brush/character
+;; happens to be standing at the same point (this used to be visible:
+;; the free cursor's default (0,0,0) coincides with the RiggedFigure's
+;; spawn point in main.3b, and the Y arm was invisible behind its mesh).
+;; Disabling GL_DEPTH_TEST also skips writing the depth buffer for the
+;; length of the disable (GL doesn't update depth when the test itself
+;; is off), so nothing drawn after re-enabling it can be thrown off by
+;; a stray gizmo depth value either.
+(fn draw-editor-gizmo [renderer Renderer* scene Scene* editor EditorState*] void
+  (let [pos (editor-selected-pos editor scene)]
+    (gl/disable gl/DEPTH_TEST)
+    ;; (draw-model renderer (. scene gizmo)
+    ;;   (make-translate-mat4 (add-vec3 pos (vec3 0.0 2.0 0.0)))
+    ;;   (emissive-material (vec3 1.0 0.9 0.2)))
+    (draw-gizmo-arm renderer scene pos 0 (vec3 0.9 0.15 0.15))
+    (draw-gizmo-arm renderer scene pos 1 (vec3 0.15 0.85 0.15))
+    (draw-gizmo-arm renderer scene pos 2 (vec3 0.2 0.35 0.95))
+
+    ;; Every Hole brush's permanent outline -- it never has a real solid
+    ;; mesh, so this is the only way to see (and aim) one at all, whether
+    ;; or not it's the current selection.
+    (for [b (. scene brushes)]
+      (when (= (. b kind) BrushKind/Hole)
+        (draw-wireframe-brush renderer scene (addr b) hole-wire-color)))
+
+    ;; The edit-ghost: a live wireframe of whatever's actively being
+    ;; resized/moved/rotated (main.3b's draw-scene/draw-scene-depth calls
+    ;; skip that SAME brush's real, possibly-stale mesh for exactly this
+    ;; reason -- see draw-scene's own comment). was-editing covers every
+    ;; kind of edit uniformly, not just resize -- a moved/rotated brush's
+    ;; own shape never goes stale, but a WALL being dragged near/away from
+    ;; a Hole has a stale hole-punch either way, so this reads the same
+    ;; live (not-yet-committed) offset/yaw/half-*/height/transform a
+    ;; resize-ghost would, for the whole duration of ANY edit.
+    (when (and (. editor was-editing) (>= (. editor selected) 0)
+               (= (. editor selected-kind) SelectedKind/Brush))
+      (let [b (addr (nth (. scene brushes) (cast u64 (. editor selected))))]
+        (draw-wireframe-brush renderer scene b resize-wire-color)))
+
+    (gl/enable gl/DEPTH_TEST)))

@@ -1,0 +1,46 @@
+;; Domain-checked libm: `sqrt-checked`/`asin-checked`/`acos-checked`/
+;; `pow-checked` -- the ordinary `sqrt`/`asin`/`acos`/`pow` builtins
+;; silently produce NaN on an out-of-domain input (negative `sqrt`, an
+;; `asin`/`acos` argument outside [-1, 1], a negative `pow` base with a
+;; fractional exponent); these return `(bool T)` instead (`T` is f32 or
+;; f64, matching whichever the argument itself is), `ok` being
+;; `isfinite(result)` -- catching NaN AND +-Inf, not just NaN. Only offered
+;; for the functions that can actually LAND on a domain error -- sin/cos/
+;; tan/atan/sinh/cosh/tanh/cbrt/ceil/floor/round are total over every
+;; finite float, so a `-checked` form for those would be pointless (always
+;; true).
+(package checked-math)
+
+(fn main [] i32
+  (var ok bool true)
+
+  (let [[valid v] (sqrt-checked 16.0)]
+    (println "sqrt-checked(16.0) -> ok={} v={} (expect true, 4)" valid v)
+    (when (not (and valid (= v 4.0))) (set ok false)))
+
+  (let [[valid v] (sqrt-checked -4.0)]
+    (println "sqrt-checked(-4.0) -> ok={} (expect false, domain error)" valid)
+    (when valid (set ok false)))
+
+  ;; f64 works the same way -- dispatches on the argument's own type
+  (let [[valid v] (sqrt-checked 9.0f64)]
+    (println "sqrt-checked(9.0f64) -> ok={} v={} (expect true, 3)" valid v)
+    (when (not (and valid (= v 3.0f64))) (set ok false)))
+
+  (let [[valid v] (asin-checked 2.0)]
+    (println "asin-checked(2.0) -> ok={} (expect false, outside [-1,1])" valid)
+    (when valid (set ok false)))
+
+  (let [[valid v] (acos-checked 0.5)]
+    (println "acos-checked(0.5) -> ok={} v={} (expect true)" valid v)
+    (when (not valid) (set ok false)))
+
+  (let [[valid v] (pow-checked -2.0 0.5)]
+    (println "pow-checked(-2.0, 0.5) -> ok={} (expect false, negative base + fractional exponent)" valid)
+    (when valid (set ok false)))
+
+  (let [[valid v] (pow-checked 2.0 10.0)]
+    (println "pow-checked(2.0, 10.0) -> ok={} v={} (expect true, 1024)" valid v)
+    (when (not (and valid (= v 1024.0))) (set ok false)))
+
+  (if ok 0 1))

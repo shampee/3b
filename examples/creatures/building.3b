@@ -1,0 +1,19 @@
+(package creatures)
+
+(enum BuildingKind
+  [Apartment
+   Cottage])
+
+(struct Building
+  [kind BuildingKind])
+
+(fn make-cottage [] Building
+  (let [cottage (Building BuildingKind/Cottage)]
+    cottage))
+
+(fn make-apartment [] Building
+  (let [apt (Building BuildingKind/Apartment)]
+    apt))
+
+(fn building-kind [building Building] BuildingKind
+  (let [[kind] building] kind))

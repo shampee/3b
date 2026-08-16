@@ -1,0 +1,90 @@
+;; Bracket/brace shorthand for the collection type-formers -- purely
+;; additive sugar, disambiguated by arity (and, for `{...}`, whether the
+;; first slot is a `:field` key):
+;;   `[T]`               == `(Vector T)`   (vs. `[T N]`, a fixed array)
+;;   `{T}`               == `(Set T)`
+;;   `{K V}`             == `(Map K V)`
+;;   `{:field type ...}` == `(struct {:field type ...})`, without the
+;;                          `struct` wrapper
+;; The keyword forms all keep working unchanged -- see examples/vector,
+;; examples/map, examples/set, examples/anon-struct-params.
+(package type-shorthand)
+
+(fn build-vec [a arena] [i32]
+  (var v [i32])
+  (for [i 0 5] (vector-push a v i))
+  v)
+
+(fn build-set [a arena] {i32}
+  (var s {i32})
+  (set-add a s 1)
+  (set-add a s 2)
+  s)
+
+(fn build-map [a arena] {string i32}
+  (var m {string i32})
+  (map-set a m "one" 1)
+  m)
+
+;; bare anon-struct-type shorthand (no `struct` wrapper)
+(fn make-thing [{:name string :health i32}] i32
+  health)
+
+;; A shorthand-declared collection takes the FULL operation set -- `{K V}`/
+;; `{T}` aren't a reduced form of the keyword spelling, they name the same
+;; type. examples/map and examples/set exercise these same ops through the
+;; keyword form; this covers the short one, which is what
+;; learn-3b-in-y-minutes.org quotes.
+(fn exercise-shorthand-ops [a arena] bool
+  (var ok bool true)
+
+  (var m {string i32})
+  (map-set a m "one" 1)
+  (map-set a m "two" 2)
+  (when (not (map-contains? m "two")) (set ok false))
+  (when (not (= (deref (map-get m "one")) 1)) (set ok false))
+  (when (not (= (deref (. m "one")) 1)) (set ok false)) ;; `.` sugar == map-get
+  (map-remove m "two")
+  (when (map-contains? m "two") (set ok false))
+  (var pair-sum i32 0)
+  (for [[k v] m] (set pair-sum (+ pair-sum v)))
+  (println "shorthand map: sum of remaining values = {} (expect 1)" pair-sum)
+  (when (not (= pair-sum 1)) (set ok false))
+
+  (var s {string})
+  (set-add a s "a")
+  (set-add a s "b")
+  (set-remove s "a")
+  (when (set-contains? s "a") (set ok false))
+  (var elems i32 0)
+  (for [x s] (set elems (+ elems 1)))
+  (println "shorthand set: element count after remove = {} (expect 1)" elems)
+  (when (not (= elems 1)) (set ok false))
+
+  ok)
+
+(fn main [] i32
+  (var ok bool true)
+  (val a arena (create))
+
+  (val v [i32] (build-vec a))
+  (println "len(v) = {} (expect 5)" (len v))
+  (when (not (= (len v) 5u64)) (set ok false))
+
+  (val s {i32} (build-set a))
+  (println "set contains 2? {}" (set-contains? s 2))
+  (when (not (set-contains? s 2)) (set ok false))
+  (when (set-contains? s 99) (set ok false))
+
+  (val m {string i32} (build-map a))
+  (println "map['one'] = {}" (deref (map-get m "one")))
+  (when (not (= (deref (map-get m "one")) 1)) (set ok false))
+
+  (val hp i32 (make-thing {:name "bob" :health 42}))
+  (println "make-thing health = {} (expect 42)" hp)
+  (when (not (= hp 42)) (set ok false))
+
+  (when (not (exercise-shorthand-ops a)) (set ok false))
+
+  (destroy a)
+  (if ok 0 1))

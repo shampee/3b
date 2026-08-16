@@ -1,0 +1,55 @@
+(package stbtt)
+;; stb_truetype.h (v1.26, public domain, https://github.com/nothings/stb) is
+;; a single-header library, same shape as ../stb/stb.cfg.3b's stb_image --
+;; implementation gated behind STB_TRUETYPE_IMPLEMENTATION, compiled
+;; separately as plain C (see ../stbtt_impl.c).
+;;
+;; UNLIKE stb.cfg.3b, this config points at `stb_truetype_baked.h`, a
+;; hand-written trimmed re-declaration of just the "texture baking API"
+;; subset this project uses (see that file's own comment for why) --
+;; stb_truetype.h's real, full ~5000-line header is only ever included by
+;; stbtt_impl.c, never by the translator.
+;;
+;; The header is vendored into this directory (not a system header).
+;; `cmd_translate`/`cmd_extract` (translate.c's `enter_config_dir`) chdir
+;; INTO this config's own directory before resolving headers, so the path
+;; below is relative to THIS directory, not wherever `3b translate` was
+;; invoked from -- unlike stb.cfg.3b's own `"stb/stb_image.h"` (written
+;; against an older version of the tool that didn't auto-chdir; that
+;; path is now stale, confirmed via `3b translate --extract stb/
+;; stb.cfg.3b` failing the same "file not found" way this did before this
+;; fix -- harmless so far since nobody's had to regenerate stb.3b since).
+;; Regenerate via `3b translate --translate stbtt/stbtt.cfg.3b`, invoked
+;; from anywhere (CWD no longer matters, only the config's own directory
+;; does) -- output lands at stbtt/stbtt.3b either way, since the config's
+;; directory is already named after its own package.
+(headers ["stb_truetype_baked.h"])
+(strip-func-prefix "stbtt_")
+
+;; The two struct names need spelling out by hand, because neither of the
+;; two automatic paths works for a library whose own prefix already equals
+;; this package's name:
+;;
+;;   - leaving them alone gives `stbtt_bakedchar`, which the package prefix
+;;     turns into `stbtt_stbtt_bakedchar` in the generated C -- harmless but
+;;     ugly, and it makes every gcc message about these types unreadable;
+;;   - `(strip-struct-prefix "stbtt_")` gives `bakedchar`, which the package
+;;     prefix turns back into exactly `stbtt_bakedchar` -- the REAL name,
+;;     which `include-first`'s stb_truetype_baked.h has already defined in
+;;     the same translation unit. That is a hard `conflicting types` error,
+;;     not a warning (the same trap cgltf hit; see examples/game3d/gltf,
+;;     named `gltf` rather than `cgltf` for this reason).
+;;
+;; So: pick names that are neither. PascalCase is what 3b structs look like
+;; everywhere else anyway, and `stbtt/BakedChar` reads better at the use
+;; site than `stbtt/stbtt_bakedchar` did.
+;;
+;; The generated `stbtt_BakedChar` still stands in for the real
+;; `stbtt_bakedchar` at the two FFI call sites, so gcc still warns
+;; -Wincompatible-pointer-types there. That is the normal state of every
+;; binding in this tree (sdl, gl and gltf all do it too): the mirror struct
+;; is a distinct C type by NAME, and `verify_record_layouts` has already
+;; proved it identical by LAYOUT before writing this file at all.
+(rename-type
+  [stbtt_bakedchar    BakedChar
+   stbtt_aligned_quad AlignedQuad])

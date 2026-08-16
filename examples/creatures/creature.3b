@@ -1,0 +1,29 @@
+(package creatures)
+
+(enum CreatureKind
+  [Human Orc Elf])
+
+(struct Creature
+  [kind   CreatureKind
+   home   Building
+   health i32
+   mana   i32])
+
+(private (val max-health i32 100))
+
+(fn creature-set-health [creature Creature* health i32] Creature*
+  (set (. creature health) health)
+  creature)
+
+(fn creature-set-mana [creature Creature* mana i32] Creature*
+  (let [{:mana (addr mptr)} (deref creature)]
+    (set (deref mptr) mana))
+  creature)
+
+(fn creature-home-kind [creature Creature*] BuildingKind
+  (let [[k [hk]] (deref creature)]
+    hk))
+
+(fn creature-heal [creature Creature*] Creature*
+  (creature-set-health creature (clamp-top (+ (. creature health) 10) max-health))
+  creature)

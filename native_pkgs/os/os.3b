@@ -1,0 +1,275 @@
+(package os)
+
+;; The native-3b `os` module -- environment/filesystem/wall-clock
+;; primitives, wrapping the embedded runtime prelude's own `bbb_os_*`
+;; functions (runtime/bbb_file.h/bbb_os.h, baked into every project's
+;; generated `3b_runtime.h`/`.c` automatically -- no manifest wiring
+;; needed, unlike gl/sdl/stb, which wrap a THIRD-PARTY library instead).
+;; Hand-written, like ../vm/vm.3b -- NOT `3b translate` output.
+;;
+;; EMBEDDED IN THE COMPILER ITSELF too, same as ../vm/vm.3b -- `(import
+;; os)` needs no `os/` folder anywhere in a project (compiler.c's
+;; compile_package falls back to this file, baked into the `3b` binary
+;; via Makefile's NATIVE_PKG_EMBED_FILES, whenever no real `os/` directory
+;; resolves). Unlike `vm`, `os` needs no link-time/`-include` help at all
+;; (its real definitions are the embedded runtime prelude, already part
+;; of every generated `3b_runtime.c`), so this one's fully self-contained.
+;;
+;; This is the NATIVE-code counterpart to `(import os)` in a `.3bs`
+;; script (bcosprims.c's own `os/*` table, spliced by script.c as a native
+;; pseudo-module) -- same NAME and CATEGORY by convention, but a genuinely
+;; separate implementation, same "two independent backends, one shared
+;; name" precedent as the math.3b duplication elsewhere in this tree.
+;;
+;; PORTABILITY: every verb and constant in this file exists on the
+;; bytecode-VM side too, under the same name, with the same signature and
+;; the same semantics -- read-line honouring its caller's arena, list-dir
+;; capping at the same list-dir-max, file-mtime returning the same -1 for a
+;; missing path. `(import os)` therefore means the same thing in a `.3b`
+;; package compiled to C and in the same source run straight through
+;; `3b run`, and examples/os-portable/main.3b is the standing proof: it
+;; exercises the whole module and its output must be byte-identical under
+;; both backends (`make os-parity` runs exactly that comparison).
+;;
+;; NOT PORTABLE, and the complete list of it:
+;;
+;;   - `open`/`close` and friends hand out a `stream`, and the two backends
+;;     back that primitive with different C types (bbb_Stream here, a bare
+;;     FILE* on the VM). Nothing portable can be done with the value other
+;;     than pass it to another os verb, so this is invisible in practice --
+;;     it only means a `stream` can't be reinterpreted to a pointer and
+;;     have that mean the same thing on both sides.
+;;
+;; That's it. Anything else that appears on one side and not the other is a
+;; bug, not a design choice -- and the reason to write the list out rather
+;; than say "each side has what it has needed so far" (which is what this
+;; comment used to say, back when the two sets genuinely did differ).
+;;
+;; Keep them in step: adding, removing or re-signing anything here without
+;; the matching change in bcosprims.c's bc_os_primitive_decls/
+;; bc_os_constant_decls silently breaks that guarantee for every program
+;; that runs on both backends. The parity example is what catches it.
+
+(private
+  (extern (fn bbb_os_file_read [arena arena path string] string)
+          (fn bbb_os_file_write [path string contents string] bool)
+          (fn bbb_os_getenv [arena arena name string] string)
+          (fn bbb_os_time_unix [] i64)
+          (fn bbb_os_sleep [seconds u32] void)
+          (fn bbb_os_list_dir [arena arena dir string out string* max u32] u32)
+          (fn bbb_os_file_mtime [path string] i64)
+          (fn bbb_os_file_exists [path string] bool)
+          (fn bbb_os_dir_exists [path string] bool)
+          (fn bbb_os_exec_capture [arena arena cmd string] string)))
+
+(private
+  (extern (fn bbb_stream_open [path string mode u32] stream)
+          (fn bbb_stream_stdout [] stream)
+          (fn bbb_stream_stderr [] stream)
+          (fn bbb_stream_stdin [] stream)
+          (fn bbb_stream_close [s stream] bool)
+          (fn bbb_stream_write [s stream data any size u64] u64)
+          (fn bbb_stream_write_string [s stream text string] u64)
+          (fn bbb_stream_read [s stream out any size u64] u64)
+          (fn bbb_stream_read_line [arena arena s stream] string)
+          (fn bbb_stream_flush [s stream] bool)
+          (fn bbb_stream_seek [s stream offset i64 origin u32] bool)
+          (fn bbb_stream_tell [s stream] i64)
+          (fn bbb_stream_at_end [s stream] bool)
+          (fn bbb_stream_had_error [s stream] bool)))
+
+;; Most entries `list-dir` will ever collect from one directory --
+;; comfortably past any real project/asset folder; see list-dir's own
+;; comment for what happens past this (silently dropped, not an error).
+;; Published as a name rather than left as an internal 512 so a caller can
+;; test `(= (vector-len entries) os/list-dir-max)` to notice the cap; the
+;; bytecode VM publishes the same constant with the same value, and its own
+;; os/list-dir truncates at it identically.
+(val list-dir-max u32 512u32)
+
+;; Reads `path`'s entire contents into `arena`. Returns an empty string
+;; (`(= (string-len result) 0)`) on any failure -- missing file, permission
+;; denied, etc.
+(fn read-file [arena arena path string] string
+  (bbb_os_file_read arena path))
+
+;; Writes `contents` to `path`, creating it if missing and overwriting it
+;; otherwise. Returns false on any failure (can't open, short write) --
+;; the write-side counterpart to read-file above.
+(fn write-file [path string contents string] bool
+  (bbb_os_file_write path contents))
+
+;; Returns the named environment variable's value, copied into `arena`.
+;; Empty string for an unset variable -- same convention read-file's own
+;; "empty means failure/absence" already has.
+(fn getenv [arena arena name string] string
+  (bbb_os_getenv arena name))
+
+;; Seconds since the Unix epoch -- wall-clock, NOT monotonic.
+(fn get-time [] i64
+  (bbb_os_time_unix))
+
+;; Blocks the calling thread for `seconds` -- whole seconds only.
+(fn sleep [seconds u32] void
+  (bbb_os_sleep seconds))
+
+;; Every entry's bare filename (not the full path, "." and ".." skipped)
+;; directly inside `dir`, copied into `arena` -- unspecified order (see
+;; bbb_os_list_dir's own comment), capped at list-dir-max entries. An
+;; empty Vector for a missing/unreadable/empty directory, same "empty
+;; means absence/failure" convention read-file's own empty-string result
+;; already uses.
+(fn list-dir [arena arena dir string] [string]
+  (let [buf (push arena string list-dir-max)
+        n (bbb_os_list_dir arena dir buf list-dir-max)]
+    (var result [string])
+    (for [i 0u32 n] (vector-push arena result (nth buf i)))
+    result))
+
+;; `path`'s own last-modified time, seconds since the Unix epoch. -1 for a
+;; missing/unstat-able path -- NOT 0, so a caller comparing "did this
+;; change since I last checked" never confuses "gone" with "an ancient
+;; but real timestamp" (bbb_os_file_mtime's own comment).
+(fn file-mtime [path string] i64
+  (bbb_os_file_mtime path))
+
+;; Whether `path` names an existing REGULAR file. False for a directory,
+;; for a missing path, and for one this process can't stat at all -- the
+;; three are deliberately not distinguished, since every caller so far
+;; wants the one question "can I read this".
+(fn file-exists [path string] bool
+  (bbb_os_file_exists path))
+
+;; Whether `path` names an existing DIRECTORY -- file-exists' counterpart,
+;; false for a regular file.
+(fn dir-exists [path string] bool
+  (bbb_os_dir_exists path))
+
+;; Runs `cmd` through the platform SHELL and returns what it wrote to
+;; stdout, copied into `arena`, with one trailing newline trimmed -- the
+;; same thing a shell's own `$(cmd)` substitution hands back. Its stderr is
+;; not captured (it goes to this process's stderr, so a failure is still
+;; visible somewhere) and neither is its exit status, so a command that
+;; failed silently and one that succeeded silently both come back empty.
+;;
+;; `cmd` is shell-interpreted: never build one out of untrusted input.
+;;
+;; This exists natively, rather than being left to `.3bs` build scripts
+;; where it started, because the capability is the same libc `popen` on
+;; both sides and a compiled program has no less business shelling out
+;; than a script does -- a tool written in 3b that drives `git` or
+;; `pkg-config` is an ordinary program, not a build-system special case.
+;; Leaving it VM-only would have made the two `os` modules differ for a
+;; reason about the CALLER rather than about the capability, which is the
+;; kind of split this module is explicitly trying not to have.
+(fn exec-capture [arena arena cmd string] string
+  (bbb_os_exec_capture arena cmd))
+
+;;;;;;;;;;;;;;;;
+;;~ Streams
+;;
+;; The INCREMENTAL counterpart to read-file/write-file above -- open once,
+;; write (or read) in pieces, close. `stream` itself is a language
+;; primitive (like `arena`/`string`, see TypeKind_Stream in 3b.h), not a
+;; struct declared here: that's what lets it cross the `(import os)`
+;; boundary at all, and it's why formatted writes are spelled with the
+;; ordinary `print`/`println` builtin rather than anything in this file:
+;;
+;;   (let [f (os/open "out.ppm" os/mode-write)]
+;;     (when (not f) (return false))     ;; a failed open is a null stream
+;;     (println f "P6")                  ;; `{}` templates, straight to the file
+;;     (println f "{} {}" width height)
+;;     (os/write f (cast any pixels) byte-count)
+;;     (os/close f))
+
+;; `mode` values for `open` -- must match runtime/bbb_file.h's own
+;; bbb_StreamMode_* enum, which is what these numbers actually mean once
+;; they reach the C side. Every one opens in BINARY mode: no platform
+;; silently rewrites the bytes going through (the same reasoning
+;; write-file's own "wb" already has), so a mode for text-translated I/O
+;; deliberately doesn't exist.
+(val mode-read   u32 0u32) ;; must already exist
+(val mode-write  u32 1u32) ;; created, or truncated if it already exists
+(val mode-append u32 2u32) ;; created if missing; every write goes to the end
+(val mode-update u32 3u32) ;; read AND write; must already exist
+
+;; `origin` values for `seek` -- bbb_StreamOrigin_* on the C side, the
+;; same three C stdio positions under friendlier names.
+(val seek-start   u32 0u32)
+(val seek-current u32 1u32)
+(val seek-end     u32 2u32)
+
+;; Opens `path` in `mode` (one of the mode-* constants above). Returns a
+;; null stream on any failure -- missing file, permission denied -- which
+;; `(not f)` tests directly, the pointer-shaped version of the "empty
+;; means failure" convention read-file already uses. Every successful open
+;; must be matched with a `close`; nothing here is arena-scoped.
+(fn open [path string mode u32] stream
+  (bbb_stream_open path mode))
+
+;; The process's own standard streams. Each call hands back the SAME
+;; stream, not a fresh one, so `close` on one of these is a deliberate
+;; no-op (closing the real stdout because some helper "owned" it is never
+;; what a caller meant). Mostly useful with the print builtin:
+;; `(println (os/stderr) "failed to open {}" path)`.
+(fn stdout [] stream (bbb_stream_stdout))
+(fn stderr [] stream (bbb_stream_stderr))
+(fn stdin  [] stream (bbb_stream_stdin))
+
+;; Flushes and closes `s`. Returns false if that final flush failed -- a
+;; full disk surfaces HERE, not at the write that filled the buffer, so
+;; code that cares about the bytes actually landing checks this and not
+;; just the writes. Using `s` afterwards is a use-after-free.
+(fn close [s stream] bool
+  (bbb_stream_close s))
+
+;; Writes `size` raw bytes from `data`. Returns how many actually got
+;; written -- `size` on success, less (usually 0) on failure. `data` is
+;; `any`, so callers cast: `(os/write f (cast any (addr buf)) n)`.
+(fn write [s stream data any size u64] u64
+  (bbb_stream_write s data size))
+
+;; Writes a string's bytes exactly -- no nul, no newline appended. Use
+;; `(println s ...)` instead when you want a template and a line ending.
+(fn write-string [s stream text string] u64
+  (bbb_stream_write_string s text))
+
+;; Reads up to `size` bytes into `out`, returning how many actually
+;; arrived. A short read (including 0) is end-of-file, NOT an error --
+;; `at-end?`/`error?` below are what tell those two apart.
+(fn read [s stream out any size u64] u64
+  (bbb_stream_read s out size))
+
+;; One line into `arena`, without its trailing newline (or the \r of a
+;; CRLF file). An empty string means end-of-file OR a genuinely empty
+;; line -- indistinguishable, so drive the loop on `at-end?`:
+;;   (while (not (os/at-end? f))
+;;     (let [line (os/read-line scratch f)] ...))
+(fn read-line [arena arena s stream] string
+  (bbb_stream_read_line arena s))
+
+;; Pushes buffered writes out to the OS -- NOT a physical disk sync.
+(fn flush [s stream] bool
+  (bbb_stream_flush s))
+
+;; Moves the cursor to `offset` bytes from `origin` (a seek-* constant
+;; above). False if the stream isn't seekable (a pipe, a terminal).
+(fn seek [s stream offset i64 origin u32] bool
+  (bbb_stream_seek s offset origin))
+
+;; The cursor's byte offset from the start, or -1 if the stream isn't
+;; seekable -- the same -1-not-0 sentinel file-mtime uses, for the same
+;; reason (0 is a real answer here).
+(fn tell [s stream] i64
+  (bbb_stream_tell s))
+
+;; Whether a previous read already hit end-of-file. C stdio semantics: it
+;; only goes true AFTER a read came up short, never speculatively.
+(fn at-end? [s stream] bool
+  (bbb_stream_at_end s))
+
+;; Whether ANY operation on this stream has failed since it was opened --
+;; a sticky flag, so a batch of writes can go unchecked and be asked about
+;; once at the end.
+(fn error? [s stream] bool
+  (bbb_stream_had_error s))

@@ -1,0 +1,134 @@
+(package game)
+
+;; -- Sprite sheets ------------------------------------------------------
+;; A `SpriteSheet` is a texture plus the base grid it's packed on -- NOT
+;; the size of any one sprite. dungeon_sheet.png packs everything onto a
+;; 4px unit grid, and different sprites span different numbers of units:
+;; ordinary tiles are 4x4 units (16x16px), most objects are 3x3 units
+;; (12x12px), the character is 3x4 (12x16px). So a sprite is addressed as
+;; a rectangle in grid-unit space -- `(col, row, w-units, h-units)` --
+;; rather than a flat frame index into an implied uniform cell size. A
+;; flat index only ever worked when every sprite shared one footprint.
+
+(struct SpriteSheet
+  [texture Texture^
+   unit-w  i32
+   unit-h  i32])
+
+(fn make-sprite-sheet [texture Texture^ unit-w i32 unit-h i32] SpriteSheet
+  (SpriteSheet texture unit-w unit-h))
+
+(fn sheet-rect [sheet SpriteSheet col i32 row i32 w-units i32 h-units i32] Rng2
+  (let [{:unit-w uw :unit-h uh} sheet
+        x (cast f32 (* col uw))
+        y (cast f32 (* row uh))
+        w (cast f32 (* w-units uw))
+        h (cast f32 (* h-units uh))]
+    (rng2p x y (+ x w) (+ y h))))
+
+;; `flip-x` mirrors by swapping the SOURCE rect's x0/x1 (not the destination
+;; quad) -- `draw-image-sub` just divides these through by texture size to
+;; get UVs, so a src rect with x0 > x1 samples the texture right-to-left
+;; while the on-screen quad's position/size stay exactly as given.
+(fn draw-sprite
+  [renderer Renderer*
+   sheet    SpriteSheet
+   col      i32
+   row      i32
+   w-units  i32
+   h-units  i32
+   pos      Vec2
+   flip-x   bool
+   tint     Rgba8] void
+  (let [{:unit-w uw :unit-h uh texture} sheet
+        {:x px :y py} pos
+        w (cast f32 (* w-units uw))
+        h (cast f32 (* h-units uh))
+        dst (rng2 pos (vec2 (+ px w) (+ py h)))
+        {x0 y0 x1 y1} (sheet-rect sheet col row w-units h-units)
+        src (if flip-x (rng2p x1 y0 x0 y1) (rng2p x0 y0 x1 y1))]
+    (draw-image-sub renderer dst texture src tint)))
+
+;; -- Animation clips ------------------------------------------------------
+;; Pure data: an ordered list of frame *origins* (grid-unit cells) into a
+;; `SpriteSheet`, all sharing one footprint (`w-units`/`h-units` -- every
+;; frame of a given animation is the same size, only its position on the
+;; sheet moves), played back at a fixed rate, looping or not. Load once,
+;; share across every entity playing this animation -- nothing here is
+;; mutated at runtime.
+
+(struct SpriteCell [col i32 row i32])
+
+(struct AnimClip
+  [frames      SpriteCell*
+   frame-count u32
+   w-units     i32
+   h-units     i32
+   fps         f32
+   loop        bool])
+
+(fn make-anim-clip [frames SpriteCell* frame-count u32 w-units i32 h-units i32 fps f32 loop bool] AnimClip
+  (AnimClip frames frame-count w-units h-units fps loop))
+
+;; Common case: a strip of same-size frames packed contiguously along one
+;; row starting at column 0 -- e.g. character_sheet.png's one-row-per-
+;; animation layout. Frame `i`'s cell is just `(i, row)`, so this builds
+;; the `SpriteCell` list procedurally from an arena instead of writing it
+;; out by hand -- and unlike a stack-local array, memory `push`ed from
+;; `arena` survives past this function returning, which the clip's
+;; `frames` pointer needs since it's read for the lifetime of the clip.
+(fn make-row-clip
+  [arena       arena
+   row         i32
+   frame-count u32
+   w-units     i32
+   h-units     i32
+   fps         f32
+   loop        bool] AnimClip
+  (let [frames (push arena SpriteCell frame-count)]
+    (for [i 0u32 frame-count]
+      (set (nth frames i) (SpriteCell (cast i32 i) row)))
+    (make-anim-clip frames frame-count w-units h-units fps loop)))
+
+;; -- Animation playback -----------------------------------------------------
+;; The only mutable state is the playhead: which clip, which frame, how far
+;; into that frame's duration. Cheap to copy, cheap to reset -- one of these
+;; per entity that animates.
+
+(struct AnimPlayer
+  [clip    AnimClip
+   frame   u32
+   elapsed f32
+   playing bool])
+
+(fn play-anim [clip AnimClip] AnimPlayer
+  (AnimPlayer clip 0u32 0.0 true))
+
+;; `while`, not `if` -- if `dt` ever spikes (a debugger pause, a hitch), this
+;; steps through every frame that elapsed rather than under-playing the
+;; animation and letting it drift out of sync with real time.
+(fn anim-advance [player AnimPlayer* dt f32] void
+  (when (not (. player playing)) (return))
+  (+= (. player elapsed) dt)
+  (let [{fps frame-count loop} (. player clip)
+        frame-time (/ 1.0 fps)]
+    (while (>= (. player elapsed) frame-time)
+      (-= (. player elapsed) frame-time)
+      (let [next (+ (. player frame) 1u32)]
+        (if (< next frame-count)
+          (void (set (. player frame) next))
+          (if loop
+            (void (set (. player frame) 0u32))
+            (void (set (. player frame) (- frame-count 1u32))
+                  (set (. player playing) false))))))))
+
+(fn draw-anim
+  [renderer Renderer*
+   sheet    SpriteSheet
+   player   AnimPlayer
+   pos      Vec2
+   flip-x   bool
+   tint     Rgba8] void
+  (let [{:clip {frames w-units h-units} frame} player
+        {col row} (nth frames frame)]
+    (draw-sprite renderer sheet col row w-units h-units pos flip-x tint)))

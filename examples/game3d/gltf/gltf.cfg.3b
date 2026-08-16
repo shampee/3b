@@ -1,0 +1,100 @@
+(package gltf)
+;; cgltf (v1.15, MIT, https://github.com/jkuhlmann/cgltf) is a single-header
+;; glTF 2.0 parser: this ONE header carries both the declarations (what we
+;; translate) and, behind `#ifdef CGLTF_IMPLEMENTATION`, the actual
+;; implementation. That implementation is compiled separately as plain C --
+;; see cgltf_impl.c -- so this config, like gl.cfg.3b/sdl.cfg.3b/
+;; stb.cfg.3b, only ever needs to see the declarations.
+;;
+;; The 3b package is `gltf`, not `cgltf`, on purpose. Package name +
+;; `strip-struct-prefix "cgltf_"` is what the generated C type names are
+;; built from, so a `cgltf` package would turn `cgltf_data` back into
+;; `cgltf_data` -- colliding head-on with the real header that
+;; `include-first` pulls into the same translation unit, as a hard
+;; redefinition error rather than the benign incompatible-pointer warnings
+;; the sdl/gl bindings produce. (Those two only avoid it by luck of casing:
+;; `sdl_Event` doesn't collide with `SDL_Event`.) `gltf` keeps the
+;; generated names clear of cgltf's own, and reads better at the call site
+;; too: `gltf/parse-file`, `gltf/result/Success`.
+;;
+;; The header is vendored into this directory (not a system header). Both
+;; the header path below and the generated output are resolved relative to
+;; THIS FILE's directory, not the shell's CWD -- `3b translate` chdirs into
+;; the config's own directory first (see enter_config_dir in
+;; translate/translate.c) -- so "cgltf.h" is bare, and gltf.3b lands
+;; alongside it here. Regenerate from anywhere via:
+;;
+;;   ./3b translate examples/game3d/gltf/gltf.cfg.3b
+(headers ["cgltf.h"])
+
+(strip-func-prefix "cgltf_")
+(strip-struct-prefix "cgltf_")
+(strip-const-prefix "cgltf_")
+
+;; cgltf_size is `size_t`, which glibc spells `unsigned long` while 3b's u64 is
+;; `unsigned long long` -- the same width and representation, but a distinct C
+;; type, so passing one by address (cgltf_accessor_read_uint's `cgltf_size*`)
+;; warned at every call site. Pinning makes the emitted typedef name the real C
+;; type, which is transparently what cgltf asked for.
+;;
+;; It pins size_t rather than cgltf_size for two reasons: a pinned name has to
+;; be visible in the generated *header*, which sees only 3b_runtime.h's
+;; <stddef.h>/<stdint.h> (`include-first` reaches just the .c), and pinning the
+;; leaf is enough anyway -- cgltf_size's own typedef sits on top of it and C
+;; typedefs are transparent all the way down.
+;;
+;; cgltf_size consequently has to LEAVE the type-map below: a type-map
+;; substitutes u64 at each use site, which is exactly what drops the C name.
+;; That is why every `cgltf_size` field and parameter now reads `size` (the
+;; stripped name of cgltf_size's own alias) instead of `u64`.
+(pin-type [size_t u64])
+
+;; cgltf's remaining scalar typedefs. `cgltf_bool` is a plain C `int`, NOT a C99
+;; `bool` -- mapping it to 3b's `bool` would be a one-byte type standing in
+;; for a four-byte field and would corrupt every struct that contains one.
+(type-map
+  [cgltf_ssize  i64
+   cgltf_float  f32
+   cgltf_int    i32
+   cgltf_uint   u32
+   cgltf_bool   i32
+
+   ;; <stdint.h>, not a cgltf typedef, so nothing in `headers` above
+   ;; defines it -- without this entry the translator can't resolve
+   ;; cgltf_buffer_view_data's `const uint8_t*` return and skips that
+   ;; function entirely.
+   uint8_t      u8])
+
+;; `strip-const-prefix "cgltf_"` alone leaves each enumerator carrying its
+;; own enum's name again -- `cgltf/result/result_success`,
+;; `cgltf/attribute_type/attribute_type_position`. 3b already scopes
+;; enumerators as `Enum/Member`, so that prefix is pure noise at the call
+;; site. These two enums are the ones model.3b actually reads, so they get
+;; the same hand-picked PascalCase treatment sdl.cfg.3b gives EventType and
+;; GLattr; every other enum here keeps the mechanical default. Renaming
+;; whole enums rather than individual members keeps each one internally
+;; consistent, and the per-enum scoping means `Invalid` below can't collide
+;; with the `type_invalid`/`component_type_invalid` left alone elsewhere.
+(rename-const
+  [result_success         Success
+   result_data_too_short  DataTooShort
+   result_unknown_format  UnknownFormat
+   result_invalid_json    InvalidJson
+   result_invalid_gltf    InvalidGltf
+   result_invalid_options InvalidOptions
+   result_file_not_found  FileNotFound
+   result_io_error        IoError
+   result_out_of_memory   OutOfMemory
+   result_legacy_gltf     LegacyGltf
+   result_max_enum        MaxEnum
+
+   attribute_type_invalid  Invalid
+   attribute_type_position Position
+   attribute_type_normal   Normal
+   attribute_type_tangent  Tangent
+   attribute_type_texcoord Texcoord
+   attribute_type_color    Color
+   attribute_type_joints   Joints
+   attribute_type_weights  Weights
+   attribute_type_custom   Custom
+   attribute_type_max_enum MaxEnum])

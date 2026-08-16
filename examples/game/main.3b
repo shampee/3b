@@ -1,0 +1,26 @@
+(package game)
+(import sdl)
+(import gl)
+
+(fn main [argc i32 argv string*] i32
+  (let [renderer (make-renderer 1920 1080)
+        event (zero sdl/Event)
+        anims (load-character-anims (. renderer asset-arena))
+        player (make-player anims (vec2 100.0 100.0))
+        input (zero Input)
+        running true]
+
+    (while running
+      (while (sdl/poll-event (addr event))
+        (let [{type :key {key}} event]
+          (match (cast sdl/EventType type)
+            [sdl/EventType/Quit    (set running false)
+             sdl/EventType/KeyDown (input-handle-key (addr input) key true)
+             sdl/EventType/KeyUp   (input-handle-key (addr input) key false)])))
+      (frame-begin (addr renderer) (vec4 0.3 0.4 0.7 1.0))
+      (update-player (addr player) (addr input) (. renderer dt))
+      (draw-player (addr renderer) (addr player))
+      (frame-end (addr renderer)))
+
+    (destroy-renderer (addr renderer)))
+  0)

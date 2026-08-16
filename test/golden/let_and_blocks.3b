@@ -1,0 +1,13 @@
+;; `let` and `do` as expressions -- both compile to GNU statement expressions
+;; whose value is the last form, and both nest.
+(package golden)
+
+(fn nested [x i32] i32
+  (let [a i32 (* x 2)]
+    (let [b i32 (+ a 1)]
+      (do
+        (set b (+ b a))
+        b))))
+
+(fn main [] i32
+  (nested 5))

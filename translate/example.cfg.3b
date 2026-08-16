@@ -1,0 +1,98 @@
+(package gl)
+(headers ["KHR/khrplatform.h" "GL/gl.h" "GL/glext.h"])
+
+;; --- platform / preprocessor ------------------------------------------
+(ifdef
+  :common  [GL_GLEXT_PROTOTYPES 1]
+  :windows [WIN32_LEAN_AND_MEAN 1 APIENTRY __stdcall]
+  :linux   [GLX_GLXEXT_PROTOTYPES 1]
+  :macos   [GL_SILENCE_DEPRECATION 1])
+
+;; --- naming --------------------------------------------------------
+(strip-const-prefix "GL_")
+(strip-func-prefix  "gl")
+
+;; Struct and union FIELDS have no knob: they are always kebab-cased, from
+;; either C spelling (`bit_rate` and `windowID` both become `bit-rate` /
+;; `window-id`), so a binding never makes its users switch conventions
+;; mid-expression. Nothing depends on what a field is called -- mirrors are
+;; matched to the C original by offset, not by name.
+
+;; --- type mapping ---------------------------------------------------
+(type-map
+  [GLenum     u32
+   GLboolean  bool
+   GLint      i32
+   GLfloat    f32
+   GLbitfield u32])
+
+;; `pin-type` is type-map's opposite: instead of substituting the primitive
+;; at every use site, it keeps the C name as an alias that the generated C
+;; still spells. Only matters for types passed by ADDRESS -- 3b's u64 is
+;; `unsigned long long` and glibc's size_t is `unsigned long`, same width but
+;; a different C type, so `u64*` against a `size_t*` parameter warns.
+;; A name may not be in both tables; the substitution would defeat the pin.
+(pin-type
+  [size_t u64
+
+   ;; An entry may name the C spelling its typedef stands on, for a type the
+   ;; generated HEADER cannot see -- it includes 3b_runtime.h and nothing
+   ;; else, so SDL's Uint64 has to be emitted as `typedef uint64_t pkg_Uint64;`
+   ;; while the 3b side still says Uint64.
+   Uint64 u64 "uint64_t"])
+
+;; --- constant grouping (fallback: plain val) -------------------------
+(enum-group TextureTarget
+  [TEXTURE_2D TEXTURE_1D TEXTURE_3D TEXTURE_CUBE_MAP])
+(flags-group BufferBit
+  [DEPTH_BUFFER_BIT COLOR_BUFFER_BIT STENCIL_BUFFER_BIT])
+(enum-group BlendFactor (match "^(ZERO|ONE|SRC_.*|DST_.*)$"))
+
+;; --- opaque types ------------------------------------------------------
+(force-opaque [SomeConventionallyOpaqueStruct])
+
+;; --- out-params ----------------------------------------------------
+(construct-outparam sqlite3-open [param 2])
+(mutate-outparam creature-set-health [param 1])
+(arena-outparam gen-textures [count-param 1 out-param 2])
+
+;; --- exclusions / renames --------------------------------------------
+(rename-func glGetError get-error)
+(exclude-func [glDebugMessageCallback])
+(exclude-const [GL_VERSION_1_1])
+
+;; Drop every function the header marks deprecated, instead of wrapping it.
+;; Opt-in, since it is an API change -- but binding one is not free: the
+;; generated WRAPPER's body is what calls the deprecated function, so the
+;; -Wdeprecated-declarations warning lands in the generated .c whether or not
+;; anything ever calls the wrapper, and no call site of yours can silence it.
+;; Worth it for a library permanently mid-deprecation-cycle (libav).
+(skip-deprecated)
+
+;; --- pattern renames -------------------------------------------------
+;; A regex + replacement template, standing in for a whole family of
+;; hand-written renames. The template interpolates capture groups as
+;; `{N}`, optionally re-cased as `{N:style}`:
+;;
+;;   pascal  MPEG_TS -> MpegTs      snake   MpegTs -> mpeg_ts
+;;   camel   MPEG_TS -> mpegTs      kebab   MpegTs -> mpeg-ts
+;;   upper / lower               plain case mapping, separators kept
+;;
+;; Literal text around the `{...}` passes through (`"Opt{1:pascal}"`);
+;; write `{{`/`}}` for a literal brace.
+;;
+;; Matched against the same name the corresponding EXPLICIT rename form
+;; matches: the post-strip-const-prefix logical name for constants, the
+;; raw C name for functions and types. A matching pattern REPLACES the
+;; default naming rather than composing with it -- a func pattern that
+;; fires does the prefix-stripping and casing itself.
+(rename-const-pattern "^PIXEL_FORMAT_(.*)$" "{1:pascal}")
+(rename-func-pattern  "^glu(.*)$"           "glu-{1:kebab}")
+(rename-type-pattern  "^GLU(.+)$"           "{1}")
+
+;; Explicit renames always beat patterns, and the first matching pattern
+;; wins over later ones -- so the workflow is: pattern the family, run
+;; `3b translate --names <this file>` to read back every name the
+;; patterns produced, then hand-write just the ones that came out wrong.
+(rename-const [PIXEL_FORMAT_YUV420P Yuv420Planar])
+(rename-type  [GLUnurbs Nurbs])

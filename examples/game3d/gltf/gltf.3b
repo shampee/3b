@@ -1,0 +1,867 @@
+(package gltf)
+
+
+(alias size_t u64 "size_t")
+
+(enum file_type "enum cgltf_file_type"
+  [file_type_invalid 0
+   file_type_gltf 1
+   file_type_glb 2
+   file_type_max_enum 3])
+
+(enum result "enum cgltf_result"
+  [Success 0
+   DataTooShort 1
+   UnknownFormat 2
+   InvalidJson 3
+   InvalidGltf 4
+   InvalidOptions 5
+   FileNotFound 6
+   IoError 7
+   OutOfMemory 8
+   LegacyGltf 9
+   MaxEnum 10])
+
+(enum buffer_view_type "enum cgltf_buffer_view_type"
+  [buffer_view_type_invalid 0
+   buffer_view_type_indices 1
+   buffer_view_type_vertices 2
+   buffer_view_type_max_enum 3])
+
+(enum attribute_type "enum cgltf_attribute_type"
+  [Invalid 0
+   Position 1
+   Normal 2
+   Tangent 3
+   Texcoord 4
+   Color 5
+   Joints 6
+   Weights 7
+   Custom 8
+   MaxEnum 9])
+
+(enum component_type "enum cgltf_component_type"
+  [component_type_invalid 0
+   component_type_r_8 1
+   component_type_r_8u 2
+   component_type_r_16 3
+   component_type_r_16u 4
+   component_type_r_32u 5
+   component_type_r_32f 6
+   component_type_max_enum 7])
+
+(enum type "enum cgltf_type"
+  [type_invalid 0
+   type_scalar 1
+   type_vec2 2
+   type_vec3 3
+   type_vec4 4
+   type_mat2 5
+   type_mat3 6
+   type_mat4 7
+   type_max_enum 8])
+
+(enum primitive_type "enum cgltf_primitive_type"
+  [primitive_type_invalid 0
+   primitive_type_points 1
+   primitive_type_lines 2
+   primitive_type_line_loop 3
+   primitive_type_line_strip 4
+   primitive_type_triangles 5
+   primitive_type_triangle_strip 6
+   primitive_type_triangle_fan 7
+   primitive_type_max_enum 8])
+
+(enum alpha_mode "enum cgltf_alpha_mode"
+  [alpha_mode_opaque 0
+   alpha_mode_mask 1
+   alpha_mode_blend 2
+   alpha_mode_max_enum 3])
+
+(enum animation_path_type "enum cgltf_animation_path_type"
+  [animation_path_type_invalid 0
+   animation_path_type_translation 1
+   animation_path_type_rotation 2
+   animation_path_type_scale 3
+   animation_path_type_weights 4
+   animation_path_type_max_enum 5])
+
+(enum interpolation_type "enum cgltf_interpolation_type"
+  [interpolation_type_linear 0
+   interpolation_type_step 1
+   interpolation_type_cubic_spline 2
+   interpolation_type_max_enum 3])
+
+(enum camera_type "enum cgltf_camera_type"
+  [camera_type_invalid 0
+   camera_type_perspective 1
+   camera_type_orthographic 2
+   camera_type_max_enum 3])
+
+(enum light_type "enum cgltf_light_type"
+  [light_type_invalid 0
+   light_type_directional 1
+   light_type_point 2
+   light_type_spot 3
+   light_type_max_enum 4])
+
+(enum data_free_method "enum cgltf_data_free_method"
+  [data_free_method_none 0
+   data_free_method_file_release 1
+   data_free_method_memory_free 2
+   data_free_method_max_enum 3])
+
+(enum meshopt_compression_mode "enum cgltf_meshopt_compression_mode"
+  [meshopt_compression_mode_invalid 0
+   meshopt_compression_mode_attributes 1
+   meshopt_compression_mode_triangles 2
+   meshopt_compression_mode_indices 3
+   meshopt_compression_mode_max_enum 4])
+
+(enum meshopt_compression_filter "enum cgltf_meshopt_compression_filter"
+  [meshopt_compression_filter_none 0
+   meshopt_compression_filter_octahedral 1
+   meshopt_compression_filter_quaternion 2
+   meshopt_compression_filter_exponential 3
+   meshopt_compression_filter_max_enum 4])
+
+(enum filter_type "enum cgltf_filter_type"
+  [filter_type_undefined 0
+   filter_type_nearest 9728
+   filter_type_linear 9729
+   filter_type_nearest_mipmap_nearest 9984
+   filter_type_linear_mipmap_nearest 9985
+   filter_type_nearest_mipmap_linear 9986
+   filter_type_linear_mipmap_linear 9987])
+
+(enum wrap_mode "enum cgltf_wrap_mode"
+  [wrap_mode_clamp_to_edge 33071
+   wrap_mode_mirrored_repeat 33648
+   wrap_mode_repeat 10497])
+
+(struct memory_options "cgltf_memory_options"
+  [alloc-func (fn [a0 any a1 size] any)
+   free-func (fn [a0 any a1 any] void)
+   user-data any])
+
+(struct file_options "cgltf_file_options"
+  [read (fn [a0 (const memory_options*) a1 (const file_options*) a2 (const char*) a3 size* a4 any*] result)
+   release (fn [a0 (const memory_options*) a1 (const file_options*) a2 any a3 size] void)
+   user-data any])
+
+(struct options "cgltf_options"
+  [type file_type
+   json-token-count size
+   memory memory_options
+   file file_options])
+
+(struct extras "cgltf_extras"
+  [start-offset size
+   end-offset size
+   data char*])
+
+(struct extension "cgltf_extension"
+  [name char*
+   data char*])
+
+(struct buffer "cgltf_buffer"
+  [name char*
+   size size
+   uri char*
+   data any
+   data-free-method data_free_method
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct meshopt_compression "cgltf_meshopt_compression"
+  [buffer buffer*
+   offset size
+   size size
+   stride size
+   count size
+   mode meshopt_compression_mode
+   filter meshopt_compression_filter])
+
+(struct buffer_view "cgltf_buffer_view"
+  [name char*
+   buffer buffer*
+   offset size
+   size size
+   stride size
+   type buffer_view_type
+   data any
+   has-meshopt-compression i32
+   meshopt-compression meshopt_compression
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct accessor_sparse "cgltf_accessor_sparse"
+  [count size
+   indices-buffer-view buffer_view*
+   indices-byte-offset size
+   indices-component-type component_type
+   values-buffer-view buffer_view*
+   values-byte-offset size])
+
+(struct accessor "cgltf_accessor"
+  [name char*
+   component-type component_type
+   normalized i32
+   type type
+   offset size
+   count size
+   stride size
+   buffer-view buffer_view*
+   has-min i32
+   min [f32 16]
+   has-max i32
+   max [f32 16]
+   is-sparse i32
+   sparse accessor_sparse
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct attribute "cgltf_attribute"
+  [name char*
+   type attribute_type
+   index i32
+   data accessor*])
+
+(struct image "cgltf_image"
+  [name char*
+   uri char*
+   buffer-view buffer_view*
+   mime-type char*
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct sampler "cgltf_sampler"
+  [name char*
+   mag-filter filter_type
+   min-filter filter_type
+   wrap-s wrap_mode
+   wrap-t wrap_mode
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct texture "cgltf_texture"
+  [name char*
+   image image*
+   sampler sampler*
+   has-basisu i32
+   basisu-image image*
+   has-webp i32
+   webp-image image*
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct texture_transform "cgltf_texture_transform"
+  [offset [f32 2]
+   rotation f32
+   scale [f32 2]
+   has-texcoord i32
+   texcoord i32])
+
+(struct texture_view "cgltf_texture_view"
+  [texture texture*
+   texcoord i32
+   scale f32
+   has-transform i32
+   transform texture_transform])
+
+(struct pbr_metallic_roughness "cgltf_pbr_metallic_roughness"
+  [base-color-texture texture_view
+   metallic-roughness-texture texture_view
+   base-color-factor [f32 4]
+   metallic-factor f32
+   roughness-factor f32])
+
+(struct pbr_specular_glossiness "cgltf_pbr_specular_glossiness"
+  [diffuse-texture texture_view
+   specular-glossiness-texture texture_view
+   diffuse-factor [f32 4]
+   specular-factor [f32 3]
+   glossiness-factor f32])
+
+(struct clearcoat "cgltf_clearcoat"
+  [clearcoat-texture texture_view
+   clearcoat-roughness-texture texture_view
+   clearcoat-normal-texture texture_view
+   clearcoat-factor f32
+   clearcoat-roughness-factor f32])
+
+(struct transmission "cgltf_transmission"
+  [transmission-texture texture_view
+   transmission-factor f32])
+
+(struct ior "cgltf_ior"
+  [ior f32])
+
+(struct specular "cgltf_specular"
+  [specular-texture texture_view
+   specular-color-texture texture_view
+   specular-color-factor [f32 3]
+   specular-factor f32])
+
+(struct volume "cgltf_volume"
+  [thickness-texture texture_view
+   thickness-factor f32
+   attenuation-color [f32 3]
+   attenuation-distance f32])
+
+(struct sheen "cgltf_sheen"
+  [sheen-color-texture texture_view
+   sheen-color-factor [f32 3]
+   sheen-roughness-texture texture_view
+   sheen-roughness-factor f32])
+
+(struct emissive_strength "cgltf_emissive_strength"
+  [emissive-strength f32])
+
+(struct iridescence "cgltf_iridescence"
+  [iridescence-factor f32
+   iridescence-texture texture_view
+   iridescence-ior f32
+   iridescence-thickness-min f32
+   iridescence-thickness-max f32
+   iridescence-thickness-texture texture_view])
+
+(struct diffuse_transmission "cgltf_diffuse_transmission"
+  [diffuse-transmission-texture texture_view
+   diffuse-transmission-factor f32
+   diffuse-transmission-color-factor [f32 3]
+   diffuse-transmission-color-texture texture_view])
+
+(struct anisotropy "cgltf_anisotropy"
+  [anisotropy-strength f32
+   anisotropy-rotation f32
+   anisotropy-texture texture_view])
+
+(struct dispersion "cgltf_dispersion"
+  [dispersion f32])
+
+(struct material "cgltf_material"
+  [name char*
+   has-pbr-metallic-roughness i32
+   has-pbr-specular-glossiness i32
+   has-clearcoat i32
+   has-transmission i32
+   has-volume i32
+   has-ior i32
+   has-specular i32
+   has-sheen i32
+   has-emissive-strength i32
+   has-iridescence i32
+   has-diffuse-transmission i32
+   has-anisotropy i32
+   has-dispersion i32
+   pbr-metallic-roughness pbr_metallic_roughness
+   pbr-specular-glossiness pbr_specular_glossiness
+   clearcoat clearcoat
+   ior ior
+   specular specular
+   sheen sheen
+   transmission transmission
+   volume volume
+   emissive-strength emissive_strength
+   iridescence iridescence
+   diffuse-transmission diffuse_transmission
+   anisotropy anisotropy
+   dispersion dispersion
+   normal-texture texture_view
+   occlusion-texture texture_view
+   emissive-texture texture_view
+   emissive-factor [f32 3]
+   alpha-mode alpha_mode
+   alpha-cutoff f32
+   double-sided i32
+   unlit i32
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct material_mapping "cgltf_material_mapping"
+  [variant size
+   material material*
+   extras extras])
+
+(struct morph_target "cgltf_morph_target"
+  [attributes attribute*
+   attributes-count size])
+
+(struct draco_mesh_compression "cgltf_draco_mesh_compression"
+  [buffer-view buffer_view*
+   attributes attribute*
+   attributes-count size])
+
+(struct mesh_gpu_instancing "cgltf_mesh_gpu_instancing"
+  [attributes attribute*
+   attributes-count size])
+
+(struct primitive "cgltf_primitive"
+  [type primitive_type
+   indices accessor*
+   material material*
+   attributes attribute*
+   attributes-count size
+   targets morph_target*
+   targets-count size
+   extras extras
+   has-draco-mesh-compression i32
+   draco-mesh-compression draco_mesh_compression
+   mappings material_mapping*
+   mappings-count size
+   extensions-count size
+   extensions extension*])
+
+(struct mesh "cgltf_mesh"
+  [name char*
+   primitives primitive*
+   primitives-count size
+   weights f32*
+   weights-count size
+   target-names char**
+   target-names-count size
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct node "cgltf_node"
+  [name char*
+   parent node*
+   children node**
+   children-count size
+   skin skin*
+   mesh mesh*
+   camera camera*
+   light light*
+   weights f32*
+   weights-count size
+   has-translation i32
+   has-rotation i32
+   has-scale i32
+   has-matrix i32
+   translation [f32 3]
+   rotation [f32 4]
+   scale [f32 3]
+   matrix [f32 16]
+   extras extras
+   has-mesh-gpu-instancing i32
+   mesh-gpu-instancing mesh_gpu_instancing
+   extensions-count size
+   extensions extension*])
+
+(struct skin "cgltf_skin"
+  [name char*
+   joints node**
+   joints-count size
+   skeleton node*
+   inverse-bind-matrices accessor*
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct camera_perspective "cgltf_camera_perspective"
+  [has-aspect-ratio i32
+   aspect-ratio f32
+   yfov f32
+   has-zfar i32
+   zfar f32
+   znear f32
+   extras extras])
+
+(struct camera_orthographic "cgltf_camera_orthographic"
+  [xmag f32
+   ymag f32
+   zfar f32
+   znear f32
+   extras extras])
+
+(union Anon0
+  [perspective camera_perspective
+   orthographic camera_orthographic])
+
+(struct camera "cgltf_camera"
+  [name char*
+   type camera_type
+   data Anon0
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct light "cgltf_light"
+  [name char*
+   color [f32 3]
+   intensity f32
+   type light_type
+   range f32
+   spot-inner-cone-angle f32
+   spot-outer-cone-angle f32
+   extras extras])
+
+(struct scene "cgltf_scene"
+  [name char*
+   nodes node**
+   nodes-count size
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct animation_sampler "cgltf_animation_sampler"
+  [input accessor*
+   output accessor*
+   interpolation interpolation_type
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct animation_channel "cgltf_animation_channel"
+  [sampler animation_sampler*
+   target-node node*
+   target-path animation_path_type
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct animation "cgltf_animation"
+  [name char*
+   samplers animation_sampler*
+   samplers-count size
+   channels animation_channel*
+   channels-count size
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct material_variant "cgltf_material_variant"
+  [name char*
+   extras extras])
+
+(struct asset "cgltf_asset"
+  [copyright char*
+   generator char*
+   version char*
+   min-version char*
+   extras extras
+   extensions-count size
+   extensions extension*])
+
+(struct data "cgltf_data"
+  [file-type file_type
+   file-data any
+   file-size size
+   asset asset
+   meshes mesh*
+   meshes-count size
+   materials material*
+   materials-count size
+   accessors accessor*
+   accessors-count size
+   buffer-views buffer_view*
+   buffer-views-count size
+   buffers buffer*
+   buffers-count size
+   images image*
+   images-count size
+   textures texture*
+   textures-count size
+   samplers sampler*
+   samplers-count size
+   skins skin*
+   skins-count size
+   cameras camera*
+   cameras-count size
+   lights light*
+   lights-count size
+   nodes node*
+   nodes-count size
+   scenes scene*
+   scenes-count size
+   scene scene*
+   animations animation*
+   animations-count size
+   variants material_variant*
+   variants-count size
+   extras extras
+   data-extensions-count size
+   data-extensions extension*
+   extensions-used char**
+   extensions-used-count size
+   extensions-required char**
+   extensions-required-count size
+   json (const char*)
+   json-size size
+   bin (const any)
+   bin-size size
+   memory memory_options
+   file file_options])
+
+(alias size size_t)
+
+(private (extern (fn cgltf_parse [options (const options*) data (const any) size size out_data data**] result)))
+
+(fn parse
+  [options (const options*)
+   data (const any)
+   size size
+   out_data data**] result
+  (cgltf_parse options data size out_data))
+
+(private (extern (fn cgltf_parse_file [options (const options*) path (const char*) out_data data**] result)))
+
+(fn parse-file
+  [options (const options*)
+   path (const char*)
+   out_data data**] result
+  (cgltf_parse_file options path out_data))
+
+(private (extern (fn cgltf_load_buffers [options (const options*) data data* gltf_path (const char*)] result)))
+
+(fn load-buffers
+  [options (const options*)
+   data data*
+   gltf_path (const char*)] result
+  (cgltf_load_buffers options data gltf_path))
+
+(private (extern (fn cgltf_load_buffer_base64 [options (const options*) size size base64 (const char*) out_data any*] result)))
+
+(fn load-buffer-base64
+  [options (const options*)
+   size size
+   base64 (const char*)
+   out_data any*] result
+  (cgltf_load_buffer_base64 options size base64 out_data))
+
+(private (extern (fn cgltf_decode_string [string char*] size)))
+
+(fn decode-string [string char*] size
+  (cgltf_decode_string string))
+
+(private (extern (fn cgltf_decode_uri [uri char*] size)))
+
+(fn decode-uri [uri char*] size
+  (cgltf_decode_uri uri))
+
+(private (extern (fn cgltf_validate [data data*] result)))
+
+(fn validate [data data*] result
+  (cgltf_validate data))
+
+(private (extern (fn cgltf_free [data data*] void)))
+
+(fn free [data data*] void
+  (cgltf_free data))
+
+(private (extern (fn cgltf_node_transform_local [node (const node*) out_matrix f32*] void)))
+
+(fn node-transform-local
+  [node (const node*)
+   out_matrix f32*] void
+  (cgltf_node_transform_local node out_matrix))
+
+(private (extern (fn cgltf_node_transform_world [node (const node*) out_matrix f32*] void)))
+
+(fn node-transform-world
+  [node (const node*)
+   out_matrix f32*] void
+  (cgltf_node_transform_world node out_matrix))
+
+(private (extern (fn cgltf_buffer_view_data [view (const buffer_view*)] (const u8*))))
+
+(fn buffer-view-data [view (const buffer_view*)] (const u8*)
+  (cgltf_buffer_view_data view))
+
+(private (extern (fn cgltf_find_accessor [prim (const primitive*) type attribute_type index i32] (const accessor*))))
+
+(fn find-accessor
+  [prim (const primitive*)
+   type attribute_type
+   index i32] (const accessor*)
+  (cgltf_find_accessor prim type index))
+
+(private (extern (fn cgltf_accessor_read_float [accessor (const accessor*) index size out f32* element_size size] i32)))
+
+(fn accessor-read-float
+  [accessor (const accessor*)
+   index size
+   out f32*
+   element_size size] i32
+  (cgltf_accessor_read_float accessor index out element_size))
+
+(private (extern (fn cgltf_accessor_read_uint [accessor (const accessor*) index size out u32* element_size size] i32)))
+
+(fn accessor-read-uint
+  [accessor (const accessor*)
+   index size
+   out u32*
+   element_size size] i32
+  (cgltf_accessor_read_uint accessor index out element_size))
+
+(private (extern (fn cgltf_accessor_read_index [accessor (const accessor*) index size] size)))
+
+(fn accessor-read-index
+  [accessor (const accessor*)
+   index size] size
+  (cgltf_accessor_read_index accessor index))
+
+(private (extern (fn cgltf_num_components [type type] size)))
+
+(fn num-components [type type] size
+  (cgltf_num_components type))
+
+(private (extern (fn cgltf_component_size [component_type component_type] size)))
+
+(fn component-size [component_type component_type] size
+  (cgltf_component_size component_type))
+
+(private (extern (fn cgltf_calc_size [type type component_type component_type] size)))
+
+(fn calc-size
+  [type type
+   component_type component_type] size
+  (cgltf_calc_size type component_type))
+
+(private (extern (fn cgltf_accessor_unpack_floats [accessor (const accessor*) out f32* float_count size] size)))
+
+(fn accessor-unpack-floats
+  [accessor (const accessor*)
+   out f32*
+   float_count size] size
+  (cgltf_accessor_unpack_floats accessor out float_count))
+
+(private (extern (fn cgltf_accessor_unpack_indices [accessor (const accessor*) out any out_component_size size index_count size] size)))
+
+(fn accessor-unpack-indices
+  [accessor (const accessor*)
+   out any
+   out_component_size size
+   index_count size] size
+  (cgltf_accessor_unpack_indices accessor out out_component_size index_count))
+
+(private (extern (fn cgltf_copy_extras_json [data (const data*) extras (const extras*) dest char* dest_size size*] result)))
+
+(fn copy-extras-json
+  [data (const data*)
+   extras (const extras*)
+   dest char*
+   dest_size size*] result
+  (cgltf_copy_extras_json data extras dest dest_size))
+
+(private (extern (fn cgltf_mesh_index [data (const data*) object (const mesh*)] size)))
+
+(fn mesh-index
+  [data (const data*)
+   object (const mesh*)] size
+  (cgltf_mesh_index data object))
+
+(private (extern (fn cgltf_material_index [data (const data*) object (const material*)] size)))
+
+(fn material-index
+  [data (const data*)
+   object (const material*)] size
+  (cgltf_material_index data object))
+
+(private (extern (fn cgltf_accessor_index [data (const data*) object (const accessor*)] size)))
+
+(fn accessor-index
+  [data (const data*)
+   object (const accessor*)] size
+  (cgltf_accessor_index data object))
+
+(private (extern (fn cgltf_buffer_view_index [data (const data*) object (const buffer_view*)] size)))
+
+(fn buffer-view-index
+  [data (const data*)
+   object (const buffer_view*)] size
+  (cgltf_buffer_view_index data object))
+
+(private (extern (fn cgltf_buffer_index [data (const data*) object (const buffer*)] size)))
+
+(fn buffer-index
+  [data (const data*)
+   object (const buffer*)] size
+  (cgltf_buffer_index data object))
+
+(private (extern (fn cgltf_image_index [data (const data*) object (const image*)] size)))
+
+(fn image-index
+  [data (const data*)
+   object (const image*)] size
+  (cgltf_image_index data object))
+
+(private (extern (fn cgltf_texture_index [data (const data*) object (const texture*)] size)))
+
+(fn texture-index
+  [data (const data*)
+   object (const texture*)] size
+  (cgltf_texture_index data object))
+
+(private (extern (fn cgltf_sampler_index [data (const data*) object (const sampler*)] size)))
+
+(fn sampler-index
+  [data (const data*)
+   object (const sampler*)] size
+  (cgltf_sampler_index data object))
+
+(private (extern (fn cgltf_skin_index [data (const data*) object (const skin*)] size)))
+
+(fn skin-index
+  [data (const data*)
+   object (const skin*)] size
+  (cgltf_skin_index data object))
+
+(private (extern (fn cgltf_camera_index [data (const data*) object (const camera*)] size)))
+
+(fn camera-index
+  [data (const data*)
+   object (const camera*)] size
+  (cgltf_camera_index data object))
+
+(private (extern (fn cgltf_light_index [data (const data*) object (const light*)] size)))
+
+(fn light-index
+  [data (const data*)
+   object (const light*)] size
+  (cgltf_light_index data object))
+
+(private (extern (fn cgltf_node_index [data (const data*) object (const node*)] size)))
+
+(fn node-index
+  [data (const data*)
+   object (const node*)] size
+  (cgltf_node_index data object))
+
+(private (extern (fn cgltf_scene_index [data (const data*) object (const scene*)] size)))
+
+(fn scene-index
+  [data (const data*)
+   object (const scene*)] size
+  (cgltf_scene_index data object))
+
+(private (extern (fn cgltf_animation_index [data (const data*) object (const animation*)] size)))
+
+(fn animation-index
+  [data (const data*)
+   object (const animation*)] size
+  (cgltf_animation_index data object))
+
+(private (extern (fn cgltf_animation_sampler_index [animation (const animation*) object (const animation_sampler*)] size)))
+
+(fn animation-sampler-index
+  [animation (const animation*)
+   object (const animation_sampler*)] size
+  (cgltf_animation_sampler_index animation object))
+
+(private (extern (fn cgltf_animation_channel_index [animation (const animation*) object (const animation_channel*)] size)))
+
+(fn animation-channel-index
+  [animation (const animation*)
+   object (const animation_channel*)] size
+  (cgltf_animation_channel_index animation object))
+

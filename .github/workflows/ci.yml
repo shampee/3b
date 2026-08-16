@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # translate/translate.c links against libclang (used to turn C headers
+      # into 3b bindings) -- the Makefile hardcodes LLVM_PREFIX=/usr/lib/llvm-19,
+      # so install exactly that version rather than whatever clang ubuntu-latest
+      # ships by default.
+      - name: Install LLVM 19
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt-get install -y libclang-19-dev
+
+      - name: Build 3b
+        run: make
+
+      # Every suite in the tree, in one target: the test/*_test binaries
+      # (the bytecode-VM regression suites, bcio_verify, bcosprims,
+      # bcconfigprims, script_test, rename, translate_emit, int_literal,
+      # struct_cycle, unknown_type, layout, the checker/format/codegen
+      # tests), the LSP wire-protocol test, the formatter's package-level
+      # corpus sweep, backend-diff, the os-module backend-parity check and
+      # the doc check.
+      #
+      # `check` keeps going after a suite fails and reports the failed set
+      # at the end, so one red run shows the whole picture rather than
+      # stopping at the first breakage.
+      - name: Run the full test suite
+        run: make check
+
+      # Sanitizes the GENERATED program -- every example rebuilt with
+      # ASAN+UBSAN, plus TSAN for the ones using `parallel`, which is what
+      # aims a race detector at the lane fork-join pool. ASAN+UBSAN catch
+      # memory/UB bugs in emitted code and in the runtime prelude, the class
+      # the misaligned-DynHdr bug belonged to (see bbb_arena_dyn_grow).
+      #
+      # This replaces two steps that passed `SANITIZE_FLAGS=...` to the old
+      # in-process `3b test` suite, which never read that variable at all.
+      # The flags reach gcc through `BBB_EXTRA_CFLAGS` now -- a real build.c
+      # hook, verified by an out-of-bounds example the sweep catches.
+      - name: Run the examples under sanitizers
+        run: make sanitize-examples
+
+      # The one example backend-diff can't compare, still built and run
+      # natively so it doesn't rot -- `lanes` uses `parallel`, which the VM
+      # driver doesn't support (noted in backend_diff.sh's skip list, and it
+      # stops needing a line here once that gap closes). `creatures` used to
+      # be here too, for being multi-file; the VM driver compiles a whole
+      # package now, so backend-diff compares it like any other.
+      # examples/game and examples/game3d are intentionally not built in CI
+      # at all -- they need SDL3/OpenGL dev packages not reliably available
+      # via apt.
+      - name: Build and run the VM-incompatible examples
+        run: |
+          for dir in lanes; do
+            echo "=== examples/$dir ==="
+            (cd "examples/$dir" && ../../3b run .)
+          done
+
+      # Rebuild the COMPILER ITSELF (lexer/parser/checker/codegen/base.h)
+      # with ASAN+UBSAN and re-run the suite through it -- this catches bugs
+      # in 3b's own execution, as distinct from the generated program's
+      # runtime.
+      #
+      # Keep this LAST. `make sanitize` cleans first and leaves INSTRUMENTED
+      # object files behind, which a plain `make` afterwards happily reuses
+      # and then fails to link (undefined `__asan_*`) -- recovering a usable
+      # `3b` costs a full `make clean && make`. Running it at the end is what
+      # lets every step above share one plain build instead of paying for
+      # that second compiler rebuild.
+      # `sanitize-compiler` is what drives the instrumented binary the way the
+      # tool is really used (every example, through BOTH backends). Before it
+      # existed this step ran the in-process `3b test` suite, which never
+      # compiled a package off disk -- so it stayed green while
+      # `./3b-sanitize run` aborted on the first example it was pointed at.
+      - name: Build and run compiler under ASAN+UBSAN
+        run: |
+          make sanitize
+          ./3b-sanitize test
+          make sanitize-compiler

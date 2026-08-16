@@ -1,0 +1,49 @@
+;; The lane fork-join system: `parallel`/`parallel-for` split work across a
+;; fixed, process-wide pool of OS threads (`lane-count` of them). Each lane
+;; owns a disjoint slot in `lane-results` (indexed by `lane-index`), so no
+;; lane ever races another -- see `lane-range`'s own doc comment in
+;; codegen.c for the split math. `lane-sync` is a barrier; `lane-arena` is
+;; this lane's own private scratch arena, safe to push into without racing
+;; another lane.
+(package lanes)
+
+(var lane-results [i32 64])
+
+(fn lane-parallel-sum [n u32] void
+  (parallel [total n]
+    (var local-sum i32 0)
+    (parallel-for [i total]
+      (void (+= local-sum (cast i32 i))))
+    (void (set (nth lane-results (lane-index)) local-sum))))
+
+;; "decide a task for each lane" -- no extra syntax needed, just `match` on
+;; `(lane-index)` inside a plain `parallel` block.
+(fn lane-task-per-lane [] void
+  (parallel []
+    (match (lane-index)
+      [0u32 (println "lane 0 reporting in")
+       else (void (let [a (lane-arena)]
+                    (push a i32)))])
+    (lane-sync)))
+
+(fn main [] i32
+  (var ok bool true)
+
+  (lane-parallel-sum 1000u32)
+  (var total i32 0)
+  (val lc u32 (lane-count))
+  (for [li 0 (cast i32 lc)]
+    (+= total (nth lane-results li)))
+  ;; Deliberately does NOT print `lc`. How many lanes ran is the one thing
+  ;; about this program that is not reproducible: natively it is
+  ;; `Max(1, core_count - 1)`, so it already differs between machines, and on
+  ;; the bytecode VM it is always 1 (see bcgen.c's LANES note). The TOTAL is
+  ;; what the lane system promises to keep identical regardless, which is
+  ;; exactly what makes this example worth diffing across backends.
+  (println "lane-parallel-sum: total = {} (expect 499500, the sum of 0..999 split across the lanes)" total)
+  (when (not (= total 499500)) (set ok false))
+
+  (lane-task-per-lane)
+  (println "lane-task-per-lane() ran without crashing")
+
+  (if ok 0 1))

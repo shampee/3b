@@ -1,0 +1,11 @@
+(package gl)
+
+;; Hand-written, unlike gl.3b (translator output) -- not touched by
+;; `3b translate`. Implementation: ../glad_shim.c.
+(private (extern (fn b3_glad_load_gl [] i32)))
+
+;; Loads every OpenGL function pointer via GLAD (see ../glad/gl.h,
+;; ../glad_impl.c). Must be called once, right after the GL context is made
+;; current, before any other gl/ function. Returns false on failure.
+(fn glad-load [] bool
+  (!= (b3_glad_load_gl) 0))

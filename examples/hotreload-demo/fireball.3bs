@@ -1,0 +1,4 @@
+(package fireball)
+
+(fn on-cast [power i32] i32
+  (* power 3))

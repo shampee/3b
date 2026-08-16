@@ -1,0 +1,294 @@
+(package game3d)
+(import os)
+
+;; Whole-scene persistence for editor.3b -- F5 (save-level) / F9 (load-
+;; level), see update-editor. Round-trips brushes (every BrushKind), point
+;; lights, the camera, ambient, and the sun -- everything the editor can
+;; actually see/build. Only the ground and every Thing (models/scripts,
+;; see scene.3b's own header comment on why those carry real function
+;; pointers a text format has no way to name) stay exactly what main.3b's
+;; own startup code set up -- F9 replaces the level CONTENT under that
+;; fixed ground+cast, it doesn't replace the whole scene.
+;;
+;; Format: one line per record, whitespace-separated fields, first field
+;; a tag ("brush"/"light"/"camera"/"ambient"/"sun"). A brush line always
+;; carries EVERY BrushKind's fields (half-x/half-y/half-z/height/radius,
+;; and a texture tag even though only Box/Ramp/Sphere ever draw one)
+;; regardless of its own kind, same "every field always present, only
+;; some are meaningful" convention Brush itself already uses (see
+;; scene.3b's own struct comment) -- makes both this file and Brush's own
+;; shape trivially 1:1, no per-kind record layout to keep in sync.
+;; "camera"/"ambient"/"sun" are singletons (at most one line each, unlike
+;; "brush"/"light" which repeat) -- a save always writes exactly one of
+;; each, and a load missing one (an older save from before this file grew
+;; them) just leaves that piece of `scene` at whatever main.3b's own
+;; startup already set it to, same graceful-degradation behavior a
+;; malformed/short brush or light line already gets. Not meant to survive
+;; hand-editing beyond the obvious (numbers are `str`'s plain %g
+;; formatting, see codegen.c's own cg_print_specifier) -- this is a save
+;; format for the editor to read back, not a level-design authoring
+;; language.
+
+(val default-level-path string "level.txt")
+
+;; Splits `s` on every occurrence of `sep`, dropping empty tokens (so
+;; repeated separators -- e.g. multiple spaces between fields, or a
+;; trailing newline -- never produce a spurious "" entry). Used for both
+;; line-splitting (sep "\n") and field-splitting (sep " ") below; a
+;; single generic function rather than two near-identical ones, since
+;; both call sites want the exact same "skip empties" behavior. Every
+;; pushed token is a VIEW into `s` (string-substr, no copy) -- fine here
+;; since `contents` (load-level's own arena-owned read-file result)
+;; outlives every token derived from it.
+(fn split-tokens [arena arena s string sep string] [string]
+  (var tokens [string])
+  (var pos u64 0u64)
+  (let [total (len s) sep-len (len sep)]
+    (while (< pos total)
+      (let [remaining (string-substr s pos total)
+            rel (string-find remaining sep 0u64 0u32)]
+        (if (< rel (len remaining))
+          (do
+            (when (> rel 0u64) (vector-push arena tokens (string-substr s pos (+ pos rel))))
+            (set pos (+ (+ pos rel) sep-len)))
+          (do
+            (vector-push arena tokens remaining)
+            (set pos total))))))
+  tokens)
+
+;; `fields[i]` parsed as f32, 0.0 on any failure (a malformed field in a
+;; hand-edited or truncated file) -- this is a dev-tool save format, not
+;; something fed untrusted input, so silently defaulting rather than
+;; rejecting the whole line is the simplest useful behavior.
+(fn field-f32 [fields [string] i u64] f32
+  (let [[ok v] (string-to-f32 (nth fields i))] v))
+
+(fn brush-kind-name [kind BrushKind] string
+  (match kind
+    [BrushKind/Box  "box"
+     BrushKind/Ramp "ramp"
+     BrushKind/Hole "hole"
+     else           "sphere"]))
+
+(fn brush-kind-from-name [name string] (bool BrushKind)
+  (if (= name "box") (return true BrushKind/Box)
+    (if (= name "ramp") (return true BrushKind/Ramp)
+      (if (= name "hole") (return true BrushKind/Hole)
+        (if (= name "sphere") (return true BrushKind/Sphere)
+          (return false BrushKind/Box))))))
+
+;; Only Point/Spot ever appear here -- scene.lights.points never holds a
+;; Directional light (the sun is the separate sun-to-line/load-sun-line
+;; pair below), same restriction light-to-line's own comment notes.
+(fn light-kind-name [kind LightKind] string
+  (if (= kind LightKind/Spot) "spot" "point"))
+
+(fn light-kind-from-name [name string] LightKind
+  (if (= name "spot") LightKind/Spot LightKind/Point))
+
+;; A brush's texture-id is a raw GL id, only stable for the run that
+;; created it (see scene.3b's own texture-checker/texture-brick comment)
+;; -- resolved against those two fields both directions, same "compare
+;; against the scene's own fields, never a hardcoded value" reasoning
+;; editor.3b's next-brush-texture already uses.
+(fn texture-name [scene Scene* id u32] string
+  (if (= id (. scene texture-checker)) "checker"
+    (if (= id (. scene texture-brick)) "brick"
+      (if (= id (. scene texture-dots)) "dots"
+        "none"))))
+
+(fn texture-id-from-name [scene Scene* name string] u32
+  (if (= name "checker") (. scene texture-checker)
+    (if (= name "brick") (. scene texture-brick)
+      (if (= name "dots") (. scene texture-dots)
+        0u32))))
+
+;; "brush" <kind> <offset.x/y/z> <yaw> <half-x> <half-y> <half-z> <height>
+;; <radius> <albedo.x/y/z> <shininess> <specular> <emissive.x/y/z>
+;; <texture:none|checker|brick> -- 20 fields total (tag included), always
+;; every BrushKind's own fields, see this file's own header comment.
+(fn brush-to-line [arena arena scene Scene* b Brush] string
+  (str arena "brush " (brush-kind-name (. b kind)) " "
+       (. b offset x) " " (. b offset y) " " (. b offset z) " "
+       (. b yaw) " "
+       (. b half-x) " " (. b half-y) " " (. b half-z) " " (. b height) " " (. b radius) " "
+       (. b material albedo x) " " (. b material albedo y) " " (. b material albedo z) " "
+       (. b material shininess) " " (. b material specular) " "
+       (. b material emissive x) " " (. b material emissive y) " " (. b material emissive z) " "
+       (texture-name scene (. b texture-id)) "\n"))
+
+;; "light" <pos.x/y/z> <color.x/y/z> <intensity> <radius> <cast-shadow:0|1>
+;; <enabled:0|1> <kind:point|spot> <dir.x/y/z> <cone-inner> <cone-outer> --
+;; 17 fields. scene.lights.points holds Point AND Spot (never Directional
+;; -- the sun is a separate field this format doesn't touch, see this
+;; file's own header comment); `dir`/cone-inner/cone-outer are only
+;; meaningful for Spot (light.3b's own Light comment) but always written,
+;; same "round-trip the whole struct, don't special-case" spirit
+;; brush-to-line already has for e.g. a Box's unused `radius`.
+(fn light-to-line [arena arena l Light] string
+  (str arena "light "
+       (. l pos x) " " (. l pos y) " " (. l pos z) " "
+       (. l color x) " " (. l color y) " " (. l color z) " "
+       (. l intensity) " " (. l radius) " "
+       (if (. l cast-shadow) 1 0) " "
+       (if (. l enabled) 1 0) " "
+       (light-kind-name (. l kind)) " "
+       (. l dir x) " " (. l dir y) " " (. l dir z) " "
+       (. l cone-inner) " " (. l cone-outer) "\n"))
+
+(fn load-brush-line [scene Scene* arena arena fields [string]] void
+  (when (< (len fields) 20u64) (return))
+  (let [[ok kind] (brush-kind-from-name (nth fields 1u64))]
+    (when (not ok) (return))
+    (let [offset (vec3 (field-f32 fields 2u64) (field-f32 fields 3u64) (field-f32 fields 4u64))
+          yaw    (field-f32 fields 5u64)
+          half-x (field-f32 fields 6u64)
+          half-y (field-f32 fields 7u64)
+          half-z (field-f32 fields 8u64)
+          height (field-f32 fields 9u64)
+          radius (field-f32 fields 10u64)
+          mat (Material
+                {:albedo (vec3 (field-f32 fields 11u64) (field-f32 fields 12u64) (field-f32 fields 13u64))
+                 :shininess (field-f32 fields 14u64)
+                 :specular (field-f32 fields 15u64)
+                 :emissive (vec3 (field-f32 fields 16u64) (field-f32 fields 17u64) (field-f32 fields 18u64))})
+          tex (texture-id-from-name scene (nth fields 19u64))]
+      (match kind
+        [BrushKind/Box    (add-box-brush scene arena half-x half-y half-z mat tex offset yaw)
+         BrushKind/Ramp   (add-ramp-brush scene arena half-x half-z height mat tex offset yaw)
+         BrushKind/Hole   (add-hole-brush scene arena half-x half-y half-z offset yaw)
+         BrushKind/Sphere (add-sphere-brush scene arena radius mat tex offset yaw)]))))
+
+(fn load-light-line [scene Scene* fields [string]] void
+  (when (< (len fields) 11u64) (return))
+  (let [pos         (vec3 (field-f32 fields 1u64) (field-f32 fields 2u64) (field-f32 fields 3u64))
+        color       (vec3 (field-f32 fields 4u64) (field-f32 fields 5u64) (field-f32 fields 6u64))
+        intensity   (field-f32 fields 7u64)
+        radius      (field-f32 fields 8u64)
+        cast-shadow (!= (field-f32 fields 9u64) 0.0)
+        enabled     (!= (field-f32 fields 10u64) 0.0)]
+    ;; kind/dir/cone-inner/cone-outer are newer fields -- fall back to a
+    ;; plain Point (same shape point-light's own zeroed dir/180-degree
+    ;; cone already defaults to) for a save file from before they existed,
+    ;; same "don't reject, default" spirit field-f32 itself already has.
+    (var l Light
+      (if (>= (len fields) 17u64)
+        (spot-light pos
+          (vec3 (field-f32 fields 12u64) (field-f32 fields 13u64) (field-f32 fields 14u64))
+          color intensity radius
+          (field-f32 fields 15u64) (field-f32 fields 16u64) cast-shadow)
+        (point-light pos color intensity radius cast-shadow)))
+    (when (>= (len fields) 17u64)
+      (set (. l kind) (light-kind-from-name (nth fields 11u64))))
+    (set (. l enabled) enabled)
+    (add-point-light (& scene lights) l)))
+
+;; "camera" <target.x/y/z> <distance> <yaw> <pitch> <fov> <near-z> <far-z>
+;; -- 10 fields, every Camera field (camera.3b).
+(fn camera-to-line [arena arena c Camera] string
+  (str arena "camera "
+       (. c target x) " " (. c target y) " " (. c target z) " "
+       (. c distance) " " (. c yaw) " " (. c pitch) " " (. c fov) " "
+       (. c near-z) " " (. c far-z) "\n"))
+
+(fn load-camera-line [scene Scene* fields [string]] void
+  (when (< (len fields) 10u64) (return))
+  (set (. scene camera)
+    (Camera
+      {:target   (vec3 (field-f32 fields 1u64) (field-f32 fields 2u64) (field-f32 fields 3u64))
+       :distance (field-f32 fields 4u64)
+       :yaw      (field-f32 fields 5u64)
+       :pitch    (field-f32 fields 6u64)
+       :fov      (field-f32 fields 7u64)
+       :near-z   (field-f32 fields 8u64)
+       :far-z    (field-f32 fields 9u64)})))
+
+;; "ambient" <r> <g> <b> -- 4 fields. `scene.lights.ambient` is a bare
+;; Vec3, no editor control adjusts it live (yet) -- round-tripped anyway
+;; so a save always reflects the WHOLE lighting setup, not just the sun.
+(fn ambient-to-line [arena arena c Vec3] string
+  (str arena "ambient " (. c x) " " (. c y) " " (. c z) "\n"))
+
+(fn load-ambient-line [scene Scene* fields [string]] void
+  (when (< (len fields) 4u64) (return))
+  (set (. scene lights ambient)
+    (vec3 (field-f32 fields 1u64) (field-f32 fields 2u64) (field-f32 fields 3u64))))
+
+;; "sun" <dir.x/y/z> <color.x/y/z> <intensity> <cast-shadow:0|1>
+;; <enabled:0|1> -- 10 fields. `scene.lights.sun` is always
+;; LightKind/Directional (see light.3b's own dir-light constructor) -- no
+;; kind tag needed, and `pos`/`radius` (Point-only, see Light's own struct
+;; comment) aren't written.
+(fn sun-to-line [arena arena l Light] string
+  (str arena "sun "
+       (. l dir x) " " (. l dir y) " " (. l dir z) " "
+       (. l color x) " " (. l color y) " " (. l color z) " "
+       (. l intensity) " "
+       (if (. l cast-shadow) 1 0) " "
+       (if (. l enabled) 1 0) "\n"))
+
+(fn load-sun-line [scene Scene* fields [string]] void
+  (when (< (len fields) 10u64) (return))
+  (let [dir         (vec3 (field-f32 fields 1u64) (field-f32 fields 2u64) (field-f32 fields 3u64))
+        color       (vec3 (field-f32 fields 4u64) (field-f32 fields 5u64) (field-f32 fields 6u64))
+        intensity   (field-f32 fields 7u64)
+        cast-shadow (!= (field-f32 fields 8u64) 0.0)
+        enabled     (!= (field-f32 fields 9u64) 0.0)]
+    (var l Light (dir-light dir color intensity cast-shadow))
+    (set (. l enabled) enabled)
+    (set (. scene lights sun) l)))
+
+;; Writes the camera/ambient/sun (one line each) plus every brush and
+;; point light currently in `scene` to `path` -- see this file's own
+;; header comment for what's deliberately NOT included. `body` is built
+;; by repeated string-cat rather than one `str` call, since the brush/
+;; light COUNT varies at runtime (a `str` call's argument list is fixed
+;; at compile time) -- fine at the brush/light counts an editor session
+;; actually produces (dozens, not thousands), not a hot per-frame path.
+(fn save-level [scene Scene* arena arena path string] bool
+  (var body string "")
+  (set body (string-cat arena body (camera-to-line arena (. scene camera))))
+  (set body (string-cat arena body (ambient-to-line arena (. scene lights ambient))))
+  (set body (string-cat arena body (sun-to-line arena (. scene lights sun))))
+  (for [b (. scene brushes)]
+    (set body (string-cat arena body (brush-to-line arena scene b))))
+  (for [i 0u32 (. scene lights point-count)]
+    (set body (string-cat arena body (light-to-line arena (nth (. scene lights points) i)))))
+  (let [ok (os/write-file path body)]
+    (if ok
+      (println "save-level: wrote {} brush(es), {} light(s) to {}"
+        (len (. scene brushes)) (. scene lights point-count) path)
+      (println "save-level: failed to write {}" path))
+    ok))
+
+;; Replaces `scene`'s brushes, point lights, camera, ambient, and sun with
+;; whatever `path` last saved -- false (scene left untouched) if the file
+;; is missing/empty. Existing brushes' GL meshes are destroyed first (same
+;; convention editor-delete-selected already uses per-brush) so reloading
+;; never leaks the ones being replaced; Hole brushes never had a real one
+;; (see BrushKind/Brush's own comment).
+(fn load-level [scene Scene* arena arena path string] bool
+  (let [contents (os/read-file arena path)]
+    (when (<= (len contents) 0u64)
+      (println "load-level: {} not found or empty" path)
+      (return false))
+
+    (for [b (. scene brushes)]
+      (when (!= (. b kind) BrushKind/Hole) (destroy-mesh (. b mesh))))
+    (set (. scene brushes) (zero [Brush]))
+    (set (. scene lights point-count) 0u32)
+
+    (for [line (split-tokens arena contents "\n")]
+      (let [fields (split-tokens arena line " ")]
+        (when (> (len fields) 0u64)
+          (let [tag (nth fields 0u64)]
+            (when (= tag "brush") (load-brush-line scene arena fields))
+            (when (= tag "light") (load-light-line scene fields))
+            (when (= tag "camera") (load-camera-line scene fields))
+            (when (= tag "ambient") (load-ambient-line scene fields))
+            (when (= tag "sun") (load-sun-line scene fields))))))
+
+    (rebuild-all-wall-meshes scene arena)
+    (println "load-level: loaded {} brush(es), {} light(s) from {}"
+      (len (. scene brushes)) (. scene lights point-count) path)
+    true))

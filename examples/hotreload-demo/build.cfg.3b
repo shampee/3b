@@ -1,0 +1,8 @@
+(binary "hotreload-demo")
+
+;; Neither `os` nor `vm` need any manifest entries at all -- both are
+;; embedded native packages (compiler.c's compile_package falls back to
+;; them when no real `os/`/`vm/` directory resolves), and `vm` additionally
+;; gets liblib3b.a auto-linked + its own ABI header auto-`-include`d by
+;; build.c whenever it's among a project's packages. See
+;; native_pkgs/os/os.3b and native_pkgs/vm/vm.3b's own top-of-file notes.

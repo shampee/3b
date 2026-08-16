@@ -1,0 +1,11 @@
+;; Name mangling (`-` is not legal in a C identifier) and plain arithmetic.
+(package golden)
+
+(fn add-two [a i32 b i32] i32
+  (+ a b))
+
+(fn mixed-ops [a i32 b i32] i32
+  (- (* a b) (/ a (+ b 1))))
+
+(fn main [] i32
+  (add-two (mixed-ops 6 7) 1))

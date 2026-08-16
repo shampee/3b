@@ -1,0 +1,156 @@
+(package vm)
+
+;; Native-3b binding for script_native.h/.c (script_native.o, part of
+;; liblib3b.a) -- lets a `3b build`-compiled game load, call, and hot-
+;; reload `.3b`/`.3bs` gameplay scripts. Hand-written, like
+;; native_pkgs/os/os.3b or ../game/gl/glad_load.3b -- NOT `3b translate`
+;; output.
+;;
+;; EMBEDDED IN THE COMPILER ITSELF, not a real project directory --
+;; `(import vm)` needs no `vm/` folder anywhere in a project (compiler.c's
+;; compile_package falls back to this file, baked into the `3b` binary
+;; via Makefile's NATIVE_PKG_EMBED_FILES, whenever no real `vm/` directory
+;; resolves). Everything a project would otherwise need to hand-configure
+;; is automatic too: build.c's build_invoke_toolchain links liblib3b.a
+;; (self-located next to whichever `3b` binary is actually running --
+;; see self_liblib3b_path) and `-include`s script_native_abi.h (a
+;; minimal, self-contained mirror of script_native.h's real declarations,
+;; also embedded, materialized fresh into a project's own output/ every
+;; build) whenever `vm` is one of the packages being compiled. A project
+;; using `(import vm)` needs ZERO build.cfg.3b entries for any of this.
+;; See examples/hotreload-demo/ for a real, working example.
+;;
+;; NAMED "vm", NOT "script" -- a public `load`/`call0`/etc. in a package
+;; named `script` would generate C symbols `script_load`/`script_call0`/...
+;; (codegen.c mangles every public fn as `<package>_<name>`), which would
+;; collide OUTRIGHT with the REAL `script_load`/`script_call`/... functions
+;; script.c itself already defines (also linked in via liblib3b.a) -- same
+;; class of bug the translate-binding-name-collision project memory
+;; already warns about, just hit by a hand-written package name this time
+;; instead of a translated one.
+;;
+;; See script_native.h's own top-of-file note for the real scope/limits:
+;; call arguments/results are plain i64 (numbers, or a packed handle
+;; value) only -- no string/struct marshaling across this boundary yet --
+;; and there's no way yet for a script loaded this way to call BACK into
+;; host-registered functions (it can fully compute over its own
+;; handle/number arguments and return a value, just not mutate host state
+;; mid-call).
+;;
+;; `engine` below is an opaque `NativeScriptEngine*` -- same `any`
+;; convention sdl.3b already uses for e.g. `SDL_Window*` (a bare pointer
+;; value, not `any*`).
+
+(private (extern (fn native_script_engine_create [] any)))
+(private (extern (fn native_script_engine_destroy [engine any] void)))
+(private (extern (fn native_script_load [engine any path string out_index u32*] bool)))
+(private (extern (fn native_script_call0
+    [engine any handle_index u32 fn_name string
+     out_has_value bool* out_value i64*] bool)))
+(private (extern (fn native_script_call1
+    [engine any handle_index u32 fn_name string a0 i64
+     out_has_value bool* out_value i64*] bool)))
+(private (extern (fn native_script_call2
+    [engine any handle_index u32 fn_name string a0 i64 a1 i64
+     out_has_value bool* out_value i64*] bool)))
+(private (extern (fn native_script_call3
+    [engine any handle_index u32 fn_name string a0 i64 a1 i64 a2 i64
+     out_has_value bool* out_value i64*] bool)))
+(private (extern (fn native_script_call4
+    [engine any handle_index u32 fn_name string a0 i64 a1 i64 a2 i64 a3 i64
+     out_has_value bool* out_value i64*] bool)))
+(private (extern (fn native_script_poll_reload [engine any handle_index u32] bool)))
+(private (extern (fn native_script_unload [engine any handle_index u32] void)))
+
+;; A getter/single-setter/triple-setter shape (see script_native.h's own
+;; note on why exactly these three) -- always `u64` index in, `u32` out or
+;; in, NEVER a real f32 across this boundary (Direct-mode host imports are
+;; integer/pointer-only -- see bytecode.h's BcHostImportKind_Direct). A
+;; float-valued field crosses as its raw bit pattern -- see f32-to-bits/
+;; bits-to-f32 (scene.3b) for the reinterpret both sides use to agree on
+;; what those bits mean.
+(alias Getter   (fn [idx u64] u32))
+(alias Setter1  (fn [idx u64 v u32] void))
+(alias Setter3  (fn [idx u64 x u32 y u32 z u32] void))
+
+(private (extern (fn native_script_register_u64_to_u32 [engine any name string cb Getter] bool)))
+(private (extern (fn native_script_register_u64_u32_to_void [engine any name string cb Setter1] bool)))
+(private (extern (fn native_script_register_u64_u32x3_to_void [engine any name string cb Setter3] bool)))
+
+;; Registers `cb` (any ordinary top-level `fn` with the matching real
+;; signature) so a script loaded through `engine` can call back into it BY
+;; `name` -- see script_native.h's own top-of-file note on the design
+;; (call this AFTER create, BEFORE loading any script that declares a
+;; matching `(extern (fn ...))`). Returns false if `name` was already
+;; registered.
+(fn register-getter [engine any name string cb Getter] bool
+  (native_script_register_u64_to_u32 engine name cb))
+
+(fn register-setter1 [engine any name string cb Setter1] bool
+  (native_script_register_u64_u32_to_void engine name cb))
+
+(fn register-setter3 [engine any name string cb Setter3] bool
+  (native_script_register_u64_u32x3_to_void engine name cb))
+
+(fn create [] any
+  (native_script_engine_create))
+
+(fn destroy [engine any] void
+  (native_script_engine_destroy engine))
+
+;; Loads `path` (a `.3b`/`.3bs` script) into `engine`, returning a handle
+;; usable with call0..call4/poll-reload/unload. `ok` false means a
+;; diagnostic was already printed to stderr (see script.h's own
+;; script_load) -- the returned handle is 0 (never a valid handle) then.
+(fn load [engine any path string] (bool u32)
+  (var index u32 0u32)
+  (return (native_script_load engine path (addr index)) index))
+
+;; call0..call4: invoke `fn-name` inside the script at `handle` with 0..4
+;; plain i64 arguments (numbers or packed handle values). `ok` is false
+;; for a stale handle, an unknown function name, a wrong argument count,
+;; a script that stopped on a runtime error mid-call (script.h's own
+;; BcResult.trapped -- a division by zero, say), OR a real void function
+;; (BcResult.has_value == false) -- the caller can't tell those apart from
+;; the return value alone; check stderr for which one happened, same
+;; convention script.h's own script_call already has.
+;;
+;; A game calling into a hot-reloaded script every frame should treat a
+;; false `ok` as "this script isn't usable right now" and fall back, NOT
+;; as the value 0: that's exactly the case where a trap would otherwise
+;; ride along as a plausible-looking number.
+(fn call0 [engine any handle u32 fn-name string] (bool i64)
+  (var has-value bool false)
+  (var value i64 0i64)
+  (return (and (native_script_call0 engine handle fn-name (addr has-value) (addr value)) has-value) value))
+
+(fn call1 [engine any handle u32 fn-name string a0 i64] (bool i64)
+  (var has-value bool false)
+  (var value i64 0i64)
+  (return (and (native_script_call1 engine handle fn-name a0 (addr has-value) (addr value)) has-value) value))
+
+(fn call2 [engine any handle u32 fn-name string a0 i64 a1 i64] (bool i64)
+  (var has-value bool false)
+  (var value i64 0i64)
+  (return (and (native_script_call2 engine handle fn-name a0 a1 (addr has-value) (addr value)) has-value) value))
+
+(fn call3 [engine any handle u32 fn-name string a0 i64 a1 i64 a2 i64] (bool i64)
+  (var has-value bool false)
+  (var value i64 0i64)
+  (return (and (native_script_call3 engine handle fn-name a0 a1 a2 (addr has-value) (addr value)) has-value) value))
+
+(fn call4 [engine any handle u32 fn-name string a0 i64 a1 i64 a2 i64 a3 i64] (bool i64)
+  (var has-value bool false)
+  (var value i64 0i64)
+  (return (and (native_script_call4 engine handle fn-name a0 a1 a2 a3 (addr has-value) (addr value)) has-value) value))
+
+;; Re-checks `handle`'s own source file on disk, recompiling+swapping in
+;; place ONLY if it changed -- returns true iff a reload actually
+;; happened. A failed recompile (a real error in the edit) leaves the
+;; last-good version running and returns false, same as script.h's own
+;; script_poll_reload -- safe to call every frame for every loaded script.
+(fn poll-reload [engine any handle u32] bool
+  (native_script_poll_reload engine handle))
+
+(fn unload [engine any handle u32] void
+  (native_script_unload engine handle))

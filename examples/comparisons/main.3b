@@ -1,0 +1,64 @@
+;; `=`/`!=`/`<`/`<=`/`>`/`>=` on `string` and structs, on top of the
+;; numeric/bool/char/pointer/enum comparisons that already worked. `string`
+;; equality routes through `bbb_str8_match`, ordering through the
+;; strcmp-style `bbb_str8_compare` (both always exact -- no fuzzy-match
+;; flags, same reasoning as never epsilon-comparing floats). A struct is
+;; comparable if every one of its OWN fields (recursively) is -- the
+;; compiler synthesizes a field-wise `_eq`/`_cmp` pair per comparable
+;; struct; ordering is lexicographic by DECLARED field order, same
+;; convention as a derived tuple/record ordering in most languages that
+;; have one. A struct with a Vector/Map/Set/handle field, or a union, or an
+;; anonymous member, stays deliberately NOT comparable (see
+;; type_ref_is_deep_comparable, 3b.c).
+(package comparisons)
+
+(struct Point [x i32 y i32])
+(struct Segment [from Point to Point])
+(struct Player [name string level i32])
+
+(fn main [] i32
+  (var ok bool true)
+
+  ;; string
+  (println "'abc' < 'abd' = {}" (< "abc" "abd"))
+  (when (not (< "abc" "abd")) (set ok false))
+  (println "'abc' < 'ab' = {}" (< "abc" "ab")) ;; a prefix sorts before its own extension
+  (when (< "abc" "ab") (set ok false))
+  (when (not (= "same" "same")) (set ok false))
+  (when (!= "same" "same") (set ok false))
+
+  ;; struct equality
+  (val p1 Point (Point {:x 1 :y 2}))
+  (val p2 Point (Point {:x 1 :y 2}))
+  (val p3 Point (Point {:x 1 :y 3}))
+  (println "p1 = p2 (same fields) = {}" (= p1 p2))
+  (when (not (= p1 p2)) (set ok false))
+  (println "p1 = p3 (y differs) = {}" (= p1 p3))
+  (when (= p1 p3) (set ok false))
+  (when (not (!= p1 p3)) (set ok false))
+
+  ;; struct ordering -- lexicographic: `x` decides first, `y` only breaks a tie
+  (println "p1 < p3 (x tied, y decides) = {}" (< p1 p3))
+  (when (not (< p1 p3)) (set ok false))
+  (val p4 Point (Point {:x 0 :y 99}))
+  (println "p4 < p1 (x decides outright) = {}" (< p4 p1))
+  (when (not (< p4 p1)) (set ok false))
+
+  ;; nested struct field -- Segment's own `_eq`/`_cmp` compose through Point's
+  (val s1 Segment (Segment {:from p1 :to p3}))
+  (val s2 Segment (Segment {:from p1 :to p3}))
+  (val s3 Segment (Segment {:from p1 :to p4}))
+  (println "s1 = s2 (equal nested points) = {}" (= s1 s2))
+  (when (not (= s1 s2)) (set ok false))
+  (println "s1 = s3 (differing nested point) = {}" (= s1 s3))
+  (when (= s1 s3) (set ok false))
+
+  ;; struct with a string field
+  (val alice Player (Player {:name "alice" :level 5}))
+  (val alice2 Player (Player {:name "alice" :level 5}))
+  (val bob Player (Player {:name "bob" :level 1}))
+  (when (not (= alice alice2)) (set ok false))
+  (println "alice < bob (name decides) = {}" (< alice bob))
+  (when (not (< alice bob)) (set ok false))
+
+  (if ok 0 1))

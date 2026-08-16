@@ -1,0 +1,43 @@
+;; The `rng` package (native_pkgs/rng/rng.3b) -- a small, deterministic
+;; PRNG (PCG32), embedded in the compiler itself, so `(import rng)` needs
+;; no `rng/` directory anywhere in this project (see that file's own
+;; top-of-file note). This example doesn't reuse the name `rng` for its
+;; OWN package -- doing so would collide with the embedded package of the
+;; same name (compiler.c rejects two different directories claiming the
+;; same package name, and the embedded one always exists).
+(package dice)
+(import rng)
+
+(fn main [] i32
+  (var ok bool true)
+
+  ;; Same seed -> same sequence, every time -- useful for reproducible
+  ;; test runs or "seed of the day" style features.
+  (var state u64 (rng/create 12345u64))
+
+  (println "-- rolling a d6 five times --")
+  (for [i 0 5]
+    (println "roll {} = {}" (+ i 1) (rng/range-i32 (addr state) 1 6)))
+
+  (println "-- flipping a coin ten times --")
+  (var heads i32 0)
+  (for [i 0 10]
+    (if (rng/chance (addr state) 0.5)
+      (do (println "  heads") (void (set heads (+ heads 1))))
+      (println "  tails")))
+  (println "heads: {}/10" heads)
+
+  (println "-- a random point in a 100x100 square --")
+  (var x f32 (rng/range-f32 (addr state) 0.0 100.0))
+  (var y f32 (rng/range-f32 (addr state) 0.0 100.0))
+  (println "point = ({}, {})" x y)
+  (when (or (< x 0.0) (>= x 100.0)) (set ok false))
+  (when (or (< y 0.0) (>= y 100.0)) (set ok false))
+
+  ;; Determinism check: re-seeding with the SAME value reproduces the
+  ;; SAME first roll.
+  (var replay u64 (rng/create 12345u64))
+  (var first-roll i32 (rng/range-i32 (addr replay) 1 6))
+  (println "replay of roll 1 = {} (expect it to match the very first roll above)" first-roll)
+
+  (if ok 0 1))

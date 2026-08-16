@@ -1,0 +1,108 @@
+;; What 3b's integer types do at their EDGES: wraparound at each width,
+;; unsigned-vs-signed division/ordering, and the shifts. Every answer here
+;; is C's -- a 3b integer is the C integer of the same name, so `u8`
+;; arithmetic wraps modulo 256 and a `u64` past 2^63 is still a large
+;; positive number rather than a negative one.
+;;
+;; This is also the example that pins the two BACKENDS together on all of
+;; that (see test/backend_diff.sh, `make backend-diff`). The bytecode VM
+;; holds every integer in a 64-bit register whatever its declared width,
+;; so none of the wrapping below is free there the way it is in generated
+;; C -- it has to be done deliberately, and this is what notices when it
+;; isn't. Each case listed here is one that HAS been wrong on the VM.
+;;
+;; Each operand is a TYPED val rather than a literal written into the
+;; expression: `(* 65536u32 65536u32)` is folded by the C compiler in its
+;; own `int` (signed overflow, undefined) before a `u32` is ever involved,
+;; whereas `(* a a)` on two `u32` vals is real unsigned arithmetic and
+;; defined to wrap. The values are the point here, so they're computed the
+;; way that actually means what it says.
+(package integers)
+
+(fn main [] i32
+  (var ok bool true)
+
+  ;; -- wraparound, one width at a time. The results are exact: `u8` keeps
+  ;; the low 8 bits, `u16` the low 16, and so on.
+  (val u8-a u8 250u8)
+  (val u8-wrap u8 (+ u8-a 10u8))
+  (println "250u8 + 10 = {} (expect 4 -- wraps modulo 256)" u8-wrap)
+  (when (!= u8-wrap 4u8) (set ok false))
+
+  (val u16-a u16 1000u16)
+  (val u16-wrap u16 (* u16-a 100u16))
+  (println "1000u16 * 100 = {} (expect 34464 -- 100000 modulo 65536)" u16-wrap)
+  (when (!= u16-wrap 34464u16) (set ok false))
+
+  (val u32-a u32 65536u32)
+  (val u32-wrap u32 (* u32-a u32-a))
+  (println "65536u32 * 65536 = {} (expect 0 -- 2^32 keeps none of its bits)" u32-wrap)
+  (when (!= u32-wrap 0u32) (set ok false))
+
+  ;; Signed wraparound comes back NEGATIVE -- the top bit is the sign bit,
+  ;; and a narrower type's value is sign-extended when it's read.
+  (val i8-a i8 127i8)
+  (val i8-wrap i8 (+ i8-a 1i8))
+  (println "127i8 + 1 = {} (expect -128 -- the sign bit is what carried in)" i8-wrap)
+  (when (!= i8-wrap -128i8) (set ok false))
+
+  ;; `0 - x` on an unsigned type is x's two's complement, not a negative
+  ;; number: there is no room for a sign in a `u32`.
+  (val four u32 4u32)
+  (val neg-u32 u32 (- 0u32 four))
+  (println "0u32 - 4 = {} (expect 4294967292)" neg-u32)
+  (when (!= neg-u32 4294967292u32) (set ok false))
+
+  ;; `bit-not` likewise stays inside its own width.
+  (val zero-u8 u8 0u8)
+  (val not-u8 u8 (bit-not zero-u8))
+  (println "bit-not 0u8 = {} (expect 255, not a 64-bit -1)" not-u8)
+  (when (!= not-u8 255u8) (set ok false))
+
+  ;; -- shifts. Bits shifted off the top are GONE, at the type's own width.
+  (val three-billion u32 3000000000u32)
+  (val shl-off u32 (bit-shl three-billion 4u32))
+  (println "3000000000u32 << 4 = {} (expect 755359744 -- the top bits fall off)" shl-off)
+  (when (!= shl-off 755359744u32) (set ok false))
+
+  ;; A right shift on an UNSIGNED value shifts in zeros, even with the top
+  ;; bit set. (On a signed one it shifts in copies of the sign bit -- the
+  ;; two are different instructions, not the same one on different data.)
+  (val big u64 18446744073709551615u64) ;; U64_MAX -- every bit set
+  (val shr-u64 u64 (bit-shr big 60u64))
+  (println "U64_MAX >> 60 = {} (expect 15 -- zeros shift in, not sign bits)" shr-u64)
+  (when (!= shr-u64 15u64) (set ok false))
+
+  (val neg i64 -16i64)
+  (val shr-i64 i64 (bit-shr neg 2i64))
+  (println "-16i64 >> 2 = {} (expect -4 -- an arithmetic shift keeps the sign)" shr-i64)
+  (when (!= shr-i64 -4i64) (set ok false))
+
+  ;; -- division and ordering read the SIGN of the type, not of the bits.
+  ;; U64_MAX's bit pattern is -1 as an i64; as the u64 it actually is, it's
+  ;; the largest value there is.
+  (val div-u64 u64 (/ big 3u64))
+  (println "U64_MAX / 3 = {} (expect 6148914691236517205)" div-u64)
+  (when (!= div-u64 6148914691236517205u64) (set ok false))
+
+  (val mod-u64 u64 (% big 10u64))
+  (println "U64_MAX % 10 = {} (expect 5)" mod-u64)
+  (when (!= mod-u64 5u64) (set ok false))
+
+  (println "U64_MAX > 1 = {} (expect true -- it is not a negative number)" (> big 1u64))
+  (when (not (> big 1u64)) (set ok false))
+  (when (< big 1u64) (set ok false))
+
+  ;; -- narrowing conversions truncate to the target's width, and a `cast`
+  ;; is how you ask for that in as many words.
+  (val three-hundred i32 300i32)
+  (val truncated u8 (cast u8 three-hundred))
+  (println "(cast u8 300) = {} (expect 44 -- 300 modulo 256)" truncated)
+  (when (!= truncated 44u8) (set ok false))
+
+  (val two-hundred i32 200i32)
+  (val widened i32 (cast i32 (cast i8 two-hundred)))
+  (println "(cast i8 200) widened back = {} (expect -56 -- 200 doesn't fit i8)" widened)
+  (when (!= widened -56i32) (set ok false))
+
+  (if ok 0 1))

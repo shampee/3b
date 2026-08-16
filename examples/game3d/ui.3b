@@ -1,0 +1,102 @@
+(package game3d)
+
+;; A small IMMEDIATE-MODE widget API: every ui-* function below both
+;; DRAWS its own current state AND reports interaction for THIS frame in
+;; the same call (a clicked ui-rect returns true the one frame it was
+;; clicked; ui-slider-1d/-2d return the dragged value directly) -- there
+;; is no retained widget tree, no per-widget id/state to manage. A panel
+;; is just a normal 3b function that calls a few of these in a row, same
+;; as editor.3b's draw-editor-grid/draw-editor-gizmo already draw the 3D
+;; scene overlays procedurally every frame.
+;;
+;; This is a DELIBERATE exception to the rest of editor.3b's own update-
+;; editor (mutates state from input) vs draw-editor-* (reads state, only
+;; draws) split: a ui-rect/-slider call mutates state (whatever a click/
+;; drag on it drives) from WITHIN the draw phase, because that's the
+;; entire point of immediate-mode UI -- interaction and drawing are the
+;; SAME call, not two passes kept in sync by hand. The one place this
+;; needs care is CLICK ROUTING: a click on a panel must not ALSO fall
+;; through to update-editor's own scene/light picking underneath it --
+;; see ui-panel-consumes-click? below, which update-editor calls BEFORE
+;; its own pick-handling (during the update PHASE, ahead of any drawing
+;; this frame) specifically so that ordering stays correct.
+;;
+;; Every coordinate here is a screen PIXEL, Y-down, origin top-left --
+;; the same convention renderer.3b's begin-ui/draw-ui-quad and text.3b's
+;; draw-text already use, so a panel built from these composes with
+;; draw-text labels with no coordinate-space translation anywhere.
+
+;; True if (x, y) falls within the closed rect [x0,x1]x[y0,y1] -- the one
+;; hit-test every other function below is built from.
+(fn ui-rect-contains [x f32 y f32 x0 f32 y0 f32 x1 f32 y1 f32] bool
+  (and (>= x x0) (<= x x1) (>= y y0) (<= y y1)))
+
+;; Draws a flat OR textured rect (texture-id 0 = flat `color`, same
+;; convention draw-textured-model/draw-ui-quad already use) and reports
+;; whether IT was clicked THIS frame (input.pick -- the one-shot "mouse1
+;; went down this frame" flag every other one-shot editor action already
+;; keys off of, see input.3b's own pick/pick-x/pick-y comment) -- the one
+;; primitive a texture swatch, a color swatch, and a plain button
+;; background all reduce to, just different `color`/`texture-id` args.
+(fn ui-rect
+  [renderer Renderer* input Input* x0 f32 y0 f32 x1 f32 y1 f32 color Vec4 texture-id u32] bool
+  (begin-ui renderer)
+  (draw-ui-quad renderer x0 y0 x1 y1 0.0 0.0 1.0 1.0 color texture-id)
+  (end-ui renderer)
+  (and (. input pick) (ui-rect-contains (. input pick-x) (. input pick-y) x0 y0 x1 y1)))
+
+;; Draws a genuine full-color image (draw-ui-quad-rgb -- renderer.3b's
+;; own comment on why ui-rect's texture-id can't do this: it only ever
+;; samples a texture's RED channel as alpha, discarding G/B, correct for
+;; an icon/font coverage map but not a real gradient/photo). No click
+;; return of its own, same "draws only" shape as ui-label above -- a
+;; caller that also needs drag input over the same rect (editor.3b's
+;; color picker, ui-slider-1d/-2d over the SAME x0..y1 this just drew)
+;; asks for it separately, same "one rect, two calls" split ui-rect's own
+;; texture swatches don't need but a slider-driven gradient does.
+(fn ui-image [renderer Renderer* x0 f32 y0 f32 x1 f32 y1 f32 texture-id u32] void
+  (begin-ui renderer)
+  (draw-ui-quad-rgb renderer x0 y0 x1 y1 0.0 0.0 1.0 1.0 (vec4 1.0 1.0 1.0 1.0) texture-id)
+  (end-ui renderer))
+
+;; Positioned text, no click handling of its own -- a stable ui.3b name
+;; for "draw a label" (today a straight passthrough to text.3b's own
+;; draw-text) so callers never need to know THAT'S what's underneath, the
+;; same reason ui-rect wraps draw-ui-quad rather than every panel calling
+;; it directly.
+(fn ui-label [renderer Renderer* font Font* text string x f32 y f32 color Vec4] void
+  (draw-text renderer font text x y color))
+
+;; A horizontal drag-to-scrub control over [x0,x1] (at whatever visual
+;; height [y0,y1] the caller draws its own background/gradient at --
+;; this function draws NOTHING itself, purely input) -- returns the new
+;; 0..1 position while mouse1 is HELD and currently within the rect,
+;; else `value` unchanged. Continuous (input.mouse-x/mouse1-down), not
+;; one-shot like ui-rect's own pick -- a slider is a drag, not a click.
+;; Caller just does `(set my-hue (ui-slider-1d input ... my-hue))` every
+;; frame; no separate "did a drag start here" state to track, at the
+;; cost of the value freezing (not jumping) if the mouse strays outside
+;; [y0,y1] mid-drag -- an acceptable tradeoff for how narrow these
+;; strips are in practice, see ui-slider-2d's identical shape below.
+(fn ui-slider-1d [input Input* x0 f32 y0 f32 x1 f32 y1 f32 value f32] f32
+  (if (and (. input mouse1-down) (ui-rect-contains (. input mouse-x) (. input mouse-y) x0 y0 x1 y1))
+    (clamp (/ (- (. input mouse-x) x0) (- x1 x0)) 0.0 1.0)
+    value))
+
+;; Same shape as ui-slider-1d, both axes -- the SV square today, any
+;; future 2D control (a position pad, a curve handle) later.
+(fn ui-slider-2d [input Input* x0 f32 y0 f32 x1 f32 y1 f32 value Vec2] Vec2
+  (if (and (. input mouse1-down) (ui-rect-contains (. input mouse-x) (. input mouse-y) x0 y0 x1 y1))
+    (vec2
+      (clamp (/ (- (. input mouse-x) x0) (- x1 x0)) 0.0 1.0)
+      (clamp (/ (- (. input mouse-y) y0) (- y1 y0)) 0.0 1.0))
+    value))
+
+;; True if THIS frame's one-shot click (input.pick) lands inside
+;; [x0,x1]x[y0,y1] -- update-editor's own click-routing guard calls this
+;; BEFORE its normal scene/light pick-handling (see this file's own
+;; header comment for why the ordering matters), once per open panel, so
+;; a swatch/slider click never also re-picks whatever 3D geometry sits
+;; behind that panel on screen.
+(fn ui-panel-consumes-click? [input Input* x0 f32 y0 f32 x1 f32 y1 f32] bool
+  (and (. input pick) (ui-rect-contains (. input pick-x) (. input pick-y) x0 y0 x1 y1)))

@@ -1,0 +1,171 @@
+(package game3d)
+(import gl)
+
+;; A GLSL program built from source already in memory. Unlike
+;; examples/game/shader.3b there's no file loading here -- this demo
+;; keeps its two shaders as string literals in renderer.3b, so the whole
+;; example stays a single binary with no asset directory to find at
+;; runtime.
+
+;; skinned-shader's own uniform set (frag-src's ~18 plus vert-src's
+;; u_model/u_view_proj plus skinned-vert-src's own u_joints, then
+;; shadow.3b's point-light-shadow uniforms on top) is the largest of any
+;; single shader in this demo -- comfortably under 32, with headroom for
+;; a few more before this ever needs bumping again.
+(val max-cached-uniforms u32 32u32)
+
+(struct Shader
+  [program           u32
+   valid             bool
+   ;; A linked GL program's uniform locations never change for its whole
+   ;; lifetime, so each name only needs to be resolved via
+   ;; gl/get-uniform-location ONCE -- see resolve-uniform-location below.
+   ;; Zero-initialized (uniform-count = 0) by every path that produces a
+   ;; Shader today, (zero Shader) included, so no separate init is needed.
+   uniform-names     [char* 32]
+   uniform-locations [i32 32]
+   uniform-count     u32])
+
+(fn make-shader [vert-src (const char*) frag-src (const char*)] Shader
+  (let [vert (compile-shader gl/VERTEX_SHADER vert-src)
+        frag (compile-shader gl/FRAGMENT_SHADER frag-src)]
+    (when (or (not vert) (not frag))
+      (when vert (gl/delete-shader vert))
+      (when frag (gl/delete-shader frag))
+      (return (zero Shader)))
+    (let [program (link-shader vert frag)]
+      (gl/delete-shader vert)
+      (gl/delete-shader frag)
+      (when (not program) (return (zero Shader)))
+      (let [shader (zero Shader)]
+        (set (. shader program) program)
+        (set (. shader valid) true)
+        shader))))
+
+(fn destroy-shader [shader Shader*] void
+  (when (. shader program) (gl/delete-program (. shader program)))
+  (mem-zero shader (sizeof Shader)))
+
+(fn bind-shader [shader Shader*] void (gl/use-program (. shader program)))
+
+(private
+  ;; libc. 3b emits a real prototype for this, so there's no implicit-
+  ;; declaration warning and no need to pull in <string.h> -- same
+  ;; pattern model.3b already uses for strlen/strchr.
+  (extern (fn strcmp [a (const char*) b (const char*)] i32))
+
+  (val info-log-size u32 1024u32)
+
+  (fn compile-shader [type u32 src (const char*)] u32
+    (let [id (gl/create-shader type)
+          compile-ok 0]
+      ;; `(addr src)` is already `(const char*)*`, which is exactly what
+      ;; glShaderSource's `const GLchar* const*` wants -- no cast needed.
+      (gl/shader-source id 1 (addr src) nil)
+      (gl/compile-shader id)
+      (gl/get-shaderiv id gl/COMPILE_STATUS (addr compile-ok))
+      (when (not compile-ok)
+        (scratch [t]
+          (let [log (push0 t char info-log-size)]
+            (gl/get-shader-info-log id (cast i32 info-log-size) nil log)
+            (println "[shader] compile failed: {}" log)))
+        (gl/delete-shader id)
+        (return 0u32))
+      id))
+
+  (fn link-shader [vert u32 frag u32] u32
+    (let [id (gl/create-program)
+          link-ok 0]
+      (gl/attach-shader id vert)
+      (gl/attach-shader id frag)
+      (gl/link-program id)
+      (gl/get-programiv id gl/LINK_STATUS (addr link-ok))
+      (when (not link-ok)
+        (scratch [t]
+          (let [log (push0 t char info-log-size)]
+            (gl/get-program-info-log id (cast i32 info-log-size) nil log)
+            (println "[shader] link failed: {}" log)))
+        (gl/delete-program id)
+        (return 0u32))
+      id))
+
+  ;; A linked program's uniform locations never change, so this only ever
+  ;; calls gl/get-uniform-location once per distinct NAME per shader --
+  ;; every set-* function below routes through here instead of calling it
+  ;; directly. Linear-scans the cache via strcmp (NOT pointer equality --
+  ;; C string-literal pooling across call sites is implementation-defined,
+  ;; not guaranteed, especially at this project's -O0 build, so two
+  ;; `(cstring "u_model")` call sites are not reliably the same address).
+  ;; At most a handful of short strcmps against ~17 short names -- cheap
+  ;; regardless, and strictly better than the GL round-trip it replaces.
+  (fn resolve-uniform-location [shader Shader* name (const char*)] i32
+    (for [i 0u32 (. shader uniform-count)]
+      (when (= (strcmp (nth (. shader uniform-names) i) name) 0)
+        (return (nth (. shader uniform-locations) i))))
+    (let [loc (gl/get-uniform-location (. shader program) name)]
+      ;; If the cache is somehow full (more distinct uniform names than
+      ;; max-cached-uniforms), this just stops caching NEW names and keeps
+      ;; resolving them via GL every time -- degrades to the old
+      ;; behavior for the overflow instead of corrupting the array.
+      (when (< (. shader uniform-count) max-cached-uniforms)
+        ;; `uniform-names` is a plain (non-const) cache -- every caller passes a
+        ;; `(const char*)` (documenting that IT doesn't mutate the name string),
+        ;; so storing one here discards that promise on purpose: this cache
+        ;; genuinely never mutates through the pointer either (only strcmp's
+        ;; read-only comparison touches it later), same reasoning
+        ;; compile-shader's own `(cast char** ...)` already relies on.
+        (set (nth (. shader uniform-names) (. shader uniform-count)) (cast char* name))
+        (set (nth (. shader uniform-locations) (. shader uniform-count)) loc)
+        (++ (. shader uniform-count)))
+      loc)))
+
+;; Uniform setters. Every one of these resolves the location through
+;; resolve-uniform-location (cached after the first call, per shader per
+;; name) rather than calling gl/get-uniform-location directly.
+
+(fn set-i32 [shader Shader* name (const char*) v i32] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (>= loc 0) (gl/uniform1i loc v))))
+
+(fn set-f32 [shader Shader* name (const char*) v f32] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (>= loc 0) (gl/uniform1f loc v))))
+
+(fn set-vec2 [shader Shader* name (const char*) v Vec2] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (>= loc 0) (gl/uniform2f loc (. v x) (. v y)))))
+
+(fn set-vec3 [shader Shader* name (const char*) v Vec3] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (>= loc 0) (gl/uniform3f loc (. v x) (. v y) (. v z)))))
+
+(fn set-vec4 [shader Shader* name (const char*) v Vec4] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (>= loc 0) (gl/uniform4f loc (. v x) (. v y) (. v z) (. v w)))))
+
+(fn set-mat4 [shader Shader* name (const char*) m Mat4] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (>= loc 0) (gl/uniform-matrix4fv loc 1 false (. m v)))))
+
+;; Array-uniform setters: one GL call fills the whole `uniform vec3
+;; u_name[N]` / `uniform float u_name[N]` array, so the per-element
+;; `u_name[0]`, `u_name[1]`, ... location lookups never have to happen.
+
+(fn set-f32-array [shader Shader* name (const char*) v (const f32*) count u32] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (and (>= loc 0) (> count 0u32)) (gl/uniform1fv loc (cast i32 count) v))))
+
+(fn set-vec3-array [shader Shader* name (const char*) v (const f32*) count u32] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (and (>= loc 0) (> count 0u32)) (gl/uniform3fv loc (cast i32 count) v))))
+
+;; Fills a `uniform mat4 name[N]` (skin.3b's joint-matrix palette) in one
+;; call. `matrices` is `(const Mat4*)` rather than `(const f32*)` like the
+;; other array setters -- a Mat4 array is byte-identical to a flat run of
+;; 16*count floats (same union layout set-mat4 already relies on), so the
+;; cast straight to `f32*` below is exactly the same trick, just applied
+;; to N matrices instead of one.
+(fn set-mat4-array [shader Shader* name (const char*) matrices (const Mat4*) count u32] void
+  (let [loc (resolve-uniform-location shader name)]
+    (when (and (>= loc 0) (> count 0u32))
+      (gl/uniform-matrix4fv loc (cast i32 count) false (cast f32* matrices)))))

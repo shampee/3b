@@ -1,0 +1,14 @@
+;; Pointer parameters, `deref`, `addr`, and a fixed-size array with `nth`.
+(package golden)
+
+(fn bump [p i32*] i32
+  (set (deref p) (+ (deref p) 1))
+  (deref p))
+
+(fn third [xs [i32 4]] i32
+  (nth xs 2))
+
+(fn main [] i32
+  (var n i32 10)
+  (val arr [i32 4] [1 2 3 4])
+  (+ (bump (addr n)) (third arr)))

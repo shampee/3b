@@ -1,0 +1,481 @@
+(package game3d)
+(import gltf)
+(import gl)
+
+;; Skeletal animation, stage 1: a joint hierarchy plus GPU linear-blend
+;; skinning (LBS) -- the standard technique. No animation-CLIP playback
+;; here yet (this asset doesn't have one; see model.3b's own header
+;; comment) -- `skeleton-pose` below takes each joint's CURRENT local
+;; transform as plain input, so a future clip player only has to fill that
+;; array from sampled keyframes; the hierarchy walk and the shader are
+;; already everything they need to be.
+;;
+;; The four ideas this file is built from:
+;;   - BIND POSE is the pose the mesh's vertices were authored in.
+;;   - Each joint has an INVERSE BIND MATRIX: converts a vertex from mesh
+;;     space into that joint's own local space, as it was at bind time.
+;;   - A joint's GLOBAL transform is its own local transform (translate *
+;;     rotate * scale) times its PARENT's global transform, all the way
+;;     up the hierarchy.
+;;   - The SKINNING MATRIX for joint j is `global(j) * inverse-bind(j)`.
+;;     At bind pose, global(j) is exactly the inverse of inverse-bind(j),
+;;     so this collapses to the identity matrix -- which is exactly why a
+;;     freshly-loaded, never-posed skeleton has to render pixel-identical
+;;     to an unskinned mesh. If it doesn't, something above is wrong.
+
+(val max-joints u32 96u32) ; this model has 71; headroom for slightly bigger rigs
+
+(struct Joint
+  [parent       i32   ; index into the SAME Skeleton.joints array, -1 = root
+   inverse-bind Mat4
+   local-bind   Mat4])
+
+(struct Skeleton
+  [joints      Joint*
+   joint-count u32])
+
+;; Builds a Skeleton from one glTF skin. `mesh-node` is the node that owns
+;; the mesh this skin deforms -- the reference frame the mesh's raw
+;; (unskinned) vertex positions already live in.
+;;
+;; A joint whose true glTF parent ISN'T itself in the skin's joint list
+;; (common: exporters put an "Armature" node above the whole rig, often
+;; shared with the mesh node too) gets parent = -1 here, i.e. its
+;; ancestor chain above the skin's own joints is dropped rather than
+;; walked. That's not a simplifying guess -- it's exactly what the
+;; standard skinning formula requires:
+;;
+;;   skinMatrix = inverse(meshNodeGlobal) * jointGlobal * inverseBind
+;;
+;; Any node that's a COMMON ancestor of both the mesh node and the joint
+;; appears in both `meshNodeGlobal` and `jointGlobal` and cancels out of
+;; that product EXACTLY, regardless of what its transform actually is --
+;; dropping it from both sides (mesh-node reference frame for vertices,
+;; and here for joints) is equivalent to including it. Checked against
+;; CesiumMan, whose mesh node and skeleton root do share one (a
+;; 90-degree-rotated "Armature") -- it renders correctly under this rule.
+;;
+;; The one thing that WOULD break this is a parent node that is NOT a
+;; common ancestor of the mesh node -- i.e. actually a different branch
+;; of the scene graph -- AND carries a real transform. That combination is
+;; checked for below and printed loudly rather than silently mis-rendered,
+;; since it'd genuinely need the excluded transform folded into local-bind
+;; to be correct.
+;;
+;; A node on a different branch that carries NO transform is the harmless
+;; case, and is why that check tests both things: RiggedFigure parents its
+;; skeleton under a bare `Armature` grouping node that is a sibling of the
+;; mesh node rather than an ancestor of it, but which has no transform of
+;; its own at all, so dropping it changes nothing (node-transform-is-
+;; identity, below).
+;;
+;; Only called while cgltf's `data` is still alive (before model.3b's
+;; `load-model` frees it) -- everything a Skeleton needs is copied out
+;; into `arena` here.
+(fn load-skeleton [arena arena skin gltf/skin* mesh-node gltf/node*] Skeleton
+  (let [joint-count (cast u32 (. skin joints-count))
+        joints (push0 arena Joint (max joint-count 1u32))]
+    (scratch [t]
+      (let [ibm (push t f32 (* (max joint-count 1u32) 16u32))]
+        (gltf/accessor-unpack-floats (. skin inverse-bind-matrices) ibm
+          (cast u64 (* joint-count 16u32)))
+        (for [i 0u32 joint-count]
+          (let [node (nth (. skin joints) i)
+                joint (addr (nth joints i))
+                parent-node (. node parent)]
+            (set (. joint parent) (find-joint-before skin parent-node i))
+            (when (and (< (. joint parent) 0) parent-node (!= parent-node mesh-node)
+                       (not (node-is-ancestor-of parent-node mesh-node))
+                       (not (node-transform-is-identity parent-node)))
+              (println
+                "[skeleton] joint {}: parent node is neither in the skin's joint list NOR an ancestor of the mesh node -- its transform is being silently dropped, and that's NOT provably safe here"
+                i))
+            (set (. joint local-bind) (node-local-matrix node))
+            (set (. joint inverse-bind) (deref (cast Mat4* (addr (nth ibm (* i 16u32))))))))))
+
+    ;; How main.3b's wiggle-joint index gets picked, without leaving 3b:
+    ;; print each joint's bind-pose GLOBAL position once at load, and read
+    ;; off one near an extremity. Still worth printing even for a rig whose
+    ;; joints ARE named (RiggedFigure's are) -- a name says which limb a
+    ;; joint belongs to but not where along it the joint sits, and it's the
+    ;; far end of a limb that makes a hand-driven wiggle obvious on screen.
+    ;; A plain forward pass, same shape as skeleton-pose below, just
+    ;; stopping one step short (global transform, not yet multiplied by
+    ;; inverse-bind).
+    (scratch [t]
+      (let [global (push t Mat4 (max joint-count 1u32))]
+        (for [i 0u32 joint-count]
+          (let [joint (addr (nth joints i))
+                p (. joint parent)]
+            (set (nth global i)
+              (if (< p 0) (. joint local-bind) (mul-mat4 (nth global (cast u32 p)) (. joint local-bind))))
+            (println "[skeleton] joint {} (parent {}): bind pos = ({}, {}, {})"
+              i p (. (nth global i) m3) (. (nth global i) m7) (. (nth global i) m11))))))
+    (Skeleton joints joint-count)))
+
+(private
+  ;; -1 if `node` is nil, or isn't among joints[0 .. before) (the ones
+  ;; already assigned an index in THIS pass -- every asset checked so far
+  ;; lists parents before children, so a plain linear scan over the
+  ;; already-seen prefix is enough; see skin.3b's own load-skeleton for
+  ;; the loud fallback if that assumption is ever wrong).
+  (fn find-joint-before [skin gltf/skin* node gltf/node* before u32] i32
+    (when (not node) (return -1))
+    (for [k 0u32 before]
+      (when (= (nth (. skin joints) k) node) (return (cast i32 k))))
+    -1)
+
+  ;; Is `candidate` somewhere in `node`'s OWN ancestor chain? Walks up via
+  ;; cgltf's real `parent` pointers -- bounded defensively (a glTF node
+  ;; graph is a tree, so this should terminate long before 256 steps on
+  ;; anything sane; the bound just turns a malformed/cyclic file into a
+  ;; wrong answer instead of a hang).
+  (fn node-is-ancestor-of [candidate gltf/node* node gltf/node*] bool
+    (var current gltf/node* node)
+    (for [depth 0u32 256u32]
+      (when (not current) (return false))
+      (when (= current candidate) (return true))
+      (set current (. current parent)))
+    false)
+
+  ;; Does this node contribute no transform at all? cgltf sets none of the
+  ;; four has_* flags for a node authored without one, and node-local-matrix
+  ;; below returns plain identity in exactly that case -- so dropping such a
+  ;; node from a transform chain is provably a no-op, whatever its position
+  ;; in the graph. That's what lets load-skeleton's "dropped a node that
+  ;; isn't a common ancestor" warning stay quiet for the common pure-grouping
+  ;; node (an `Armature` holding a skeleton, say) while still firing for one
+  ;; carrying real transform data.
+  (fn node-transform-is-identity [node gltf/node*] bool
+    (not (or (. node has-matrix) (. node has-translation)
+             (. node has-rotation) (. node has-scale))))
+
+  ;; TRS -> Mat4 (or the raw baked matrix, if the node has one -- this
+  ;; asset's joints never do, but cgltf exposes both shapes).
+  (fn node-local-matrix [node gltf/node*] Mat4
+    (when (. node has-matrix)
+      (return (deref (cast Mat4* (& node matrix)))))
+    (let [translation (if (. node has-translation)
+                         (vec3 (nth (. node translation) 0) (nth (. node translation) 1) (nth (. node translation) 2))
+                         (vec3 0.0 0.0 0.0))
+          rotation (if (. node has-rotation)
+                     (quat-to-mat4 (nth (. node rotation) 0) (nth (. node rotation) 1)
+                                   (nth (. node rotation) 2) (nth (. node rotation) 3))
+                     (mat4 1.0))
+          scale (if (. node has-scale)
+                  (vec3 (nth (. node scale) 0) (nth (. node scale) 1) (nth (. node scale) 2))
+                  (vec3 1.0 1.0 1.0))]
+      (mul-mat4 (mul-mat4 (make-translate-mat4 translation) rotation) (make-scale-mat4 scale))))
+
+  ;; Standard unit-quaternion (x,y,z,w) -> rotation-matrix formula, written
+  ;; in the same field-by-field style as math.3b's own make-rotate-mat4
+  ;; (whose axis-angle output this was checked against): only the 3x3
+  ;; rotation block is set, the rest stays at (mat4 1.0)'s identity.
+  (fn quat-to-mat4 [x f32 y f32 z f32 w f32] Mat4
+    (let [result (mat4 1.0)
+          xx (* x x) yy (* y y) zz (* z z)
+          xy (* x y) xz (* x z) yz (* y z)
+          xw (* x w) yw (* y w) zw (* z w)]
+      (set (. result m0) (- 1.0 (* 2.0 (+ yy zz))))
+      (set (. result m1) (* 2.0 (- xy zw)))
+      (set (. result m2) (* 2.0 (+ xz yw)))
+      (set (. result m4) (* 2.0 (+ xy zw)))
+      (set (. result m5) (- 1.0 (* 2.0 (+ xx zz))))
+      (set (. result m6) (* 2.0 (- yz xw)))
+      (set (. result m8) (* 2.0 (- xz yw)))
+      (set (. result m9) (* 2.0 (+ yz xw)))
+      (set (. result m10) (- 1.0 (* 2.0 (+ xx yy))))
+      result)))
+
+;; Fills `out-local` (caller-owned, one Mat4 per joint) with every joint's
+;; BIND-pose local transform -- i.e. exactly what was loaded, unmodified.
+;; A future keyframe-driven pose would fill this same array differently;
+;; everything downstream (skeleton-pose) doesn't care where it came from.
+(fn skeleton-copy-bind-pose [skeleton Skeleton* out-local Mat4*] void
+  (for [i 0u32 (. skeleton joint-count)]
+    (set (nth out-local i) (. (nth (. skeleton joints) i) local-bind))))
+
+;; The actual hierarchy walk: `local` holds each joint's CURRENT local
+;; transform (bind pose, or bind pose with something overwritten -- see
+;; main.3b's per-frame update); `out-joint-matrices` receives the
+;; resulting skinning matrix per joint, ready to upload as-is to
+;; `u_joints[]`. A single forward pass is correct because every joint's
+;; parent index is guaranteed < its own (checked at load time above).
+(fn skeleton-pose [skeleton Skeleton* local (const Mat4*) out-joint-matrices Mat4*] void
+  (scratch [t]
+    (let [global (push t Mat4 (max (. skeleton joint-count) 1u32))]
+      (for [i 0u32 (. skeleton joint-count)]
+        (let [joint (addr (nth (. skeleton joints) i))
+              p (. joint parent)]
+          (set (nth global i)
+            (if (< p 0) (nth local i) (mul-mat4 (nth global (cast u32 p)) (nth local i))))
+          (set (nth out-joint-matrices i) (mul-mat4 (nth global i) (. joint inverse-bind))))))))
+
+;; Skeletal animation, stage 3: real animation-clip playback, sampled
+;; from a glTF `animation` -- one entry (channel) per (joint, TRS path)
+;; being animated, each a keyframe curve (sampler) of times -> values.
+;;
+;; CesiumMan.gltf (a Khronos glTF sample asset, CC-BY, see
+;; LICENSE-cesium.md) is what this was built and checked against: one clip,
+;; LINEAR interpolation only, all 19 joints carrying complete translation/
+;; rotation/scale tracks over 46 shared keyframes.
+;;
+;; The "file carries no animations at all" path (has-clip false, pose-clip
+;; falling back to the bind pose) is still handled, but no longer exercised
+;; by either model main.3b loads -- RiggedFigure.gltf carries a clip too,
+;; it's just deliberately ignored there in favour of pose-hand-wiggle. Any
+;; clip-less file dropped in via editor.3b's model browser still exercises
+;; it live.
+(struct AnimationClip
+  [duration       f32
+   keyframe-count u32
+   times          f32*   ; keyframe-count floats -- shared by every track
+                          ; below (verified true for CesiumMan; a channel
+                          ; whose OWN keyframe count doesn't match prints
+                          ; a loud warning at load time rather than
+                          ; silently sampling it on the wrong clock)
+   translations   Vec3*  ; [joint][keyframe], row-major: index = joint*keyframe-count + k
+   rotations      Vec4*  ; quaternion xyzw, same [joint][keyframe] layout
+   scales         Vec3*  ; same layout
+   has-track      bool*] ; one per joint -- false means "no channel at all
+                          ; for this joint in this clip", so sample-clip
+                          ; falls back to that joint's bind-local pose
+                          ; rather than reading uninitialized track data
+  )
+
+;; Builds an AnimationClip for `skeleton` from `data->animations[anim-index]`.
+;; `skin` (the SAME one `skeleton` was built from) is needed again here
+;; purely to map a channel's target NODE back to a joint INDEX -- Skeleton
+;; itself doesn't keep node pointers around, since they'd dangle once
+;; model.3b frees cgltf's `data`. Like load-skeleton, only valid to call
+;; while `data` is still alive.
+(fn load-animation-clip
+  [arena arena
+   data gltf/data*
+   skin gltf/skin*
+   skeleton Skeleton*
+   anim-index u32] AnimationClip
+  (let [clip (zero AnimationClip)
+        joint-count (. skeleton joint-count)]
+    (when (or (= joint-count 0u32) (>= (cast u64 anim-index) (. data animations-count)))
+      (return clip))
+    (let [anim (addr (nth (. data animations) anim-index))]
+      (when (= (. anim channels-count) 0u64) (return clip))
+
+      ;; Every channel here is checked against the FIRST channel's
+      ;; keyframe count/times (see the struct comment above) -- read
+      ;; those once, up front.
+      (let [first-sampler (. (nth (. anim channels) 0u64) sampler)
+            keyframe-count (cast u32 (. first-sampler input count))
+            times (push0 arena f32 (max keyframe-count 1u32))
+            track-count (max (* joint-count keyframe-count) 1u32)
+            translations (push0 arena Vec3 track-count)
+            rotations    (push0 arena Vec4 track-count)
+            scales       (push0 arena Vec3 track-count)
+            has-track    (push0 arena bool (max joint-count 1u32))]
+        (gltf/accessor-unpack-floats (. first-sampler input) times (cast u64 keyframe-count))
+
+        ;; Neutral defaults for any (joint, keyframe) slot a channel never
+        ;; writes -- identity rotation, unit scale -- same defensive idea
+        ;; node-local-matrix already applies to a STATIC bind pose, just
+        ;; per-keyframe here.
+        (for [i 0u32 track-count]
+          (set (nth rotations i) (vec4 0.0 0.0 0.0 1.0))
+          (set (nth scales i) (vec3 1.0 1.0 1.0)))
+
+        (for [ci 0u64 (. anim channels-count)]
+          (let [channel (addr (nth (. anim channels) ci))
+                joint-index (find-joint-before skin (. channel target-node) joint-count)]
+            (when (>= joint-index 0)
+              (let [sampler (. channel sampler)
+                    row (* (cast u32 joint-index) keyframe-count)]
+                (when (!= (. sampler input count) (cast u64 keyframe-count))
+                  (println
+                    "[animation] channel {} (joint {}): this channel's keyframe count {} doesn't match the clip's shared {} -- it will be sampled on the WRONG clock"
+                    ci joint-index (. sampler input count) keyframe-count))
+                (when (!= (. sampler interpolation) gltf/interpolation_type/interpolation_type_linear)
+                  (println
+                    "[animation] channel {} (joint {}): interpolation other than LINEAR isn't implemented -- sampled as if it were LINEAR"
+                    ci joint-index))
+                (set (nth has-track (cast u32 joint-index)) true)
+                (match (. channel target-path)
+                  [gltf/animation_path_type/animation_path_type_translation
+                   (unpack-vec3-track sampler translations row keyframe-count)
+                   gltf/animation_path_type/animation_path_type_rotation
+                   (unpack-vec4-track sampler rotations row keyframe-count)
+                   gltf/animation_path_type/animation_path_type_scale
+                   (unpack-vec3-track sampler scales row keyframe-count)])))))
+
+        (set (. clip duration) (if (> keyframe-count 0u32) (nth times (- keyframe-count 1u32)) 0.0))
+        (set (. clip keyframe-count) keyframe-count)
+        (set (. clip times) times)
+        (set (. clip translations) translations)
+        (set (. clip rotations) rotations)
+        (set (. clip scales) scales)
+        (set (. clip has-track) has-track)
+        clip))))
+
+(private
+  ;; Unpacks one channel's keyframe values (a tightly-packed VEC3/VEC4
+  ;; accessor, one element per keyframe) directly into this joint's ROW
+  ;; within the clip's [joint][keyframe] array -- via a scratch buffer,
+  ;; since accessor-unpack-floats always writes contiguously, but the
+  ;; destination row is a STRIDE `keyframe-count` apart from the next
+  ;; joint's. Called once per channel at load time (57 times, for
+  ;; CesiumMan) -- not a per-frame cost.
+  (fn unpack-vec3-track [sampler gltf/animation_sampler* dest Vec3* row u32 keyframe-count u32] void
+    (scratch [t]
+      (let [values (push t f32 (* (max keyframe-count 1u32) 3u32))]
+        (gltf/accessor-unpack-floats (. sampler output) values (cast u64 (* keyframe-count 3u32)))
+        (for [k 0u32 keyframe-count]
+          (let [p (* k 3u32)]
+            (set (nth dest (+ row k)) (vec3 (nth values p) (nth values (+ p 1u32)) (nth values (+ p 2u32)))))))))
+
+  (fn unpack-vec4-track [sampler gltf/animation_sampler* dest Vec4* row u32 keyframe-count u32] void
+    (scratch [t]
+      (let [values (push t f32 (* (max keyframe-count 1u32) 4u32))]
+        (gltf/accessor-unpack-floats (. sampler output) values (cast u64 (* keyframe-count 4u32)))
+        (for [k 0u32 keyframe-count]
+          (let [p (* k 4u32)]
+            (set (nth dest (+ row k))
+              (vec4 (nth values p) (nth values (+ p 1u32)) (nth values (+ p 2u32)) (nth values (+ p 3u32)))))))))
+
+  ;; Index k such that times[k] <= t < times[k+1], clamped at both ends.
+  ;; Linear scan -- keyframe counts here are small (tens, not thousands),
+  ;; so this is simpler than bisecting and costs nothing measurable.
+  (fn find-keyframe [times (const f32*) keyframe-count u32 t f32] u32
+    (when (<= t (nth times 0u32)) (return 0u32))
+    (for [k 0u32 (- keyframe-count 1u32)]
+      (when (< t (nth times (+ k 1u32))) (return k)))
+    (- keyframe-count 2u32))
+
+  ;; Normalized quaternion lerp -- glTF's spec-defined meaning of LINEAR
+  ;; interpolation for a rotation channel (component-wise lerp then
+  ;; renormalize), not full spherical (SLERP) interpolation. `a`/`b` are
+  ;; flipped to the SAME hemisphere first (if their dot product is
+  ;; negative) -- skipping that step would interpolate the "long way
+  ;; around" the quaternion sphere for roughly half of all keyframe pairs.
+  (fn nlerp-quat [a Vec4 b Vec4 t f32] Vec4
+    (let [d (+ (* (. a x) (. b x)) (* (. a y) (. b y)) (* (. a z) (. b z)) (* (. a w) (. b w)))
+          b2 (if (< d 0.0) (vec4 (- (. b x)) (- (. b y)) (- (. b z)) (- (. b w))) b)
+          mixed (mix-vec4 a b2 t)
+          len (sqrt (+ (* (. mixed x) (. mixed x)) (* (. mixed y) (. mixed y))
+                       (* (. mixed z) (. mixed z)) (* (. mixed w) (. mixed w))))]
+      (if (> len 0.0001) (scale-vec4 mixed (/ 1.0 len)) mixed)))
+
+  ;; This joint's local transform at time `t` -- keyframe lookup +
+  ;; lerp/nlerp per TRS component, then composed exactly like
+  ;; node-local-matrix's static TRS -> Mat4 (translate * rotate * scale).
+  (fn compose-joint-pose [clip AnimationClip* joint-index u32 t f32] Mat4
+    (let [keyframe-count (. clip keyframe-count)
+          k (find-keyframe (. clip times) keyframe-count t)
+          t0 (nth (. clip times) k)
+          t1 (nth (. clip times) (+ k 1u32))
+          alpha (if (> (- t1 t0) 0.0001) (clamp (/ (- t t0) (- t1 t0)) 0.0 1.0) 0.0)
+          row (* joint-index keyframe-count)
+          translation (mix-vec3 (nth (. clip translations) (+ row k)) (nth (. clip translations) (+ row (+ k 1u32))) alpha)
+          rotation (nlerp-quat (nth (. clip rotations) (+ row k)) (nth (. clip rotations) (+ row (+ k 1u32))) alpha)
+          scale (mix-vec3 (nth (. clip scales) (+ row k)) (nth (. clip scales) (+ row (+ k 1u32))) alpha)]
+      (mul-mat4
+        (mul-mat4 (make-translate-mat4 translation) (quat-to-mat4 (. rotation x) (. rotation y) (. rotation z) (. rotation w)))
+        (make-scale-mat4 scale)))))
+
+;; Samples `clip` at `time` (wrapped to the clip's own duration -- always
+;; loops) into `out-local`, one Mat4 per joint: keyframe-interpolated for
+;; any joint the clip actually animates, that joint's plain bind-local
+;; otherwise. Same output shape as skeleton-copy-bind-pose -- this is
+;; its animated counterpart, and skeleton-pose downstream doesn't need
+;; to know which one produced its input.
+(fn sample-clip [clip AnimationClip* skeleton Skeleton* time f32 out-local Mat4*] void
+  (let [t (if (> (. clip duration) 0.0) (mod time (. clip duration)) 0.0)]
+    (for [i 0u32 (. skeleton joint-count)]
+      (set (nth out-local i)
+        (if (nth (. clip has-track) i)
+          (compose-joint-pose clip i t)
+          (. (nth (. skeleton joints) i) local-bind))))))
+
+;; Position + normal + UV + up-to-4 joint influences, interleaved. A
+;; sibling of mesh.3b's Vertex3D/Mesh, not an extension of it: the two
+;; have genuinely different vertex layouts (3 vs 5 attributes) and
+;; different GPU programs draw them (renderer.3b's skinned-shader vs.
+;; shader) -- matching this project's "no generics, a parallel
+;; explicitly-typed sibling instead" rule already used for handles
+;; themselves.
+(struct SkinnedVertex3D
+  [pos     Vec3
+   normal  Vec3
+   uv      Vec2
+   joints  [f32 4]   ; joint indices -- stored as float (see model.3b's
+                      ; build-primitive: cgltf hands non-normalized
+                      ; integer accessors back as exact float values),
+                      ; cast to int in the vertex shader
+   weights [f32 4]])
+
+(struct SkinnedMesh
+  [vao         u32
+   vbo         u32
+   ibo         u32
+   index-count u32])
+
+(handle SkinnedMesh)
+
+(fn make-skinned-mesh
+  [vertices     (const SkinnedVertex3D*)
+   vertex-count u32
+   indices      (const u32*)
+   index-count  u32] SkinnedMesh^
+  (let [handle (handle-alloc SkinnedMesh)
+        mesh   (handle-deref handle)]
+    (when (not mesh)
+      (println "make-skinned-mesh: mesh pool is full")
+      (return handle))
+    (mem-zero mesh (sizeof SkinnedMesh))
+    (set (. mesh index-count) index-count)
+
+    (gl/gen-vertex-arrays 1 (& mesh vao))
+    (gl/gen-buffers 1 (& mesh vbo))
+    (gl/gen-buffers 1 (& mesh ibo))
+    (gl/bind-vertex-array (. mesh vao))
+
+    (gl/bind-buffer gl/ARRAY_BUFFER (. mesh vbo))
+    (gl/buffer-data gl/ARRAY_BUFFER
+      (cast i64 (* (sizeof SkinnedVertex3D u32) vertex-count)) (cast any vertices) gl/STATIC_DRAW)
+
+    (gl/bind-buffer gl/ELEMENT_ARRAY_BUFFER (. mesh ibo))
+    (gl/buffer-data gl/ELEMENT_ARRAY_BUFFER
+      (cast i64 (* (sizeof u32 u32) index-count)) (cast any indices) gl/STATIC_DRAW)
+
+    (gl/enable-vertex-attrib-array 0u32)
+    (gl/vertex-attrib-pointer
+      0u32 3i32 gl/FLOAT false (cast i32 (sizeof SkinnedVertex3D)) (cast any (member-offset SkinnedVertex3D pos)))
+    (gl/enable-vertex-attrib-array 1u32)
+    (gl/vertex-attrib-pointer
+      1u32 3i32 gl/FLOAT false (cast i32 (sizeof SkinnedVertex3D)) (cast any (member-offset SkinnedVertex3D normal)))
+    (gl/enable-vertex-attrib-array 2u32)
+    (gl/vertex-attrib-pointer
+      2u32 2i32 gl/FLOAT false (cast i32 (sizeof SkinnedVertex3D)) (cast any (member-offset SkinnedVertex3D uv)))
+    (gl/enable-vertex-attrib-array 3u32)
+    (gl/vertex-attrib-pointer
+      3u32 4i32 gl/FLOAT false (cast i32 (sizeof SkinnedVertex3D)) (cast any (member-offset SkinnedVertex3D joints)))
+    (gl/enable-vertex-attrib-array 4u32)
+    (gl/vertex-attrib-pointer
+      4u32 4i32 gl/FLOAT false (cast i32 (sizeof SkinnedVertex3D)) (cast any (member-offset SkinnedVertex3D weights)))
+
+    (gl/bind-vertex-array 0u32)
+    handle))
+
+(fn destroy-skinned-mesh [handle SkinnedMesh^] void
+  (let [mesh (handle-deref handle)]
+    (when (not mesh) (return))
+    (when (. mesh vao) (gl/delete-vertex-arrays 1 (& mesh vao)))
+    (when (. mesh vbo) (gl/delete-buffers 1 (& mesh vbo)))
+    (when (. mesh ibo) (gl/delete-buffers 1 (& mesh ibo)))
+    (mem-zero mesh (sizeof SkinnedMesh))
+    (handle-free handle)))
+
+(fn draw-skinned-mesh [handle SkinnedMesh^] void
+  (let [mesh (handle-deref handle)]
+    (when (not mesh) (return))
+    (gl/bind-vertex-array (. mesh vao))
+    (gl/draw-elements gl/TRIANGLES (cast i32 (. mesh index-count)) gl/UNSIGNED_INT (cast any nil))
+    (gl/bind-vertex-array 0u32)))

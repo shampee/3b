@@ -1,0 +1,165 @@
+(package stbimg)
+
+(val VERSION i32 1)
+(val default i32 0)
+(val grey i32 1)
+(val grey_alpha i32 2)
+(val rgb i32 3)
+(val rgb_alpha i32 4)
+
+(struct stbi_io_callbacks "stbi_io_callbacks"
+  [read (fn [a0 any a1 char* a2 i32] i32)
+   skip (fn [a0 any a1 i32] void)
+   eof (fn [a0 any] i32)])
+
+(private (extern (fn stbi_load_from_memory [buffer (const u8*) len i32 x i32* y i32* channels_in_file i32* desired_channels i32] u8*)))
+
+(fn load-from-memory
+  [buffer (const u8*)
+   len i32
+   x i32*
+   y i32*
+   channels_in_file i32*
+   desired_channels i32] u8*
+  (stbi_load_from_memory buffer len x y channels_in_file desired_channels))
+
+(private (extern (fn stbi_load [filename (const char*) x i32* y i32* channels_in_file i32* desired_channels i32] u8*)))
+
+(fn load
+  [filename (const char*)
+   x i32*
+   y i32*
+   channels_in_file i32*
+   desired_channels i32] u8*
+  (stbi_load filename x y channels_in_file desired_channels))
+
+(private (extern (fn stbi_load_16_from_memory [buffer (const u8*) len i32 x i32* y i32* channels_in_file i32* desired_channels i32] u16*)))
+
+(fn load-16-from-memory
+  [buffer (const u8*)
+   len i32
+   x i32*
+   y i32*
+   channels_in_file i32*
+   desired_channels i32] u16*
+  (stbi_load_16_from_memory buffer len x y channels_in_file desired_channels))
+
+(private (extern (fn stbi_load_16 [filename (const char*) x i32* y i32* channels_in_file i32* desired_channels i32] u16*)))
+
+(fn load-16
+  [filename (const char*)
+   x i32*
+   y i32*
+   channels_in_file i32*
+   desired_channels i32] u16*
+  (stbi_load_16 filename x y channels_in_file desired_channels))
+
+(private (extern (fn stbi_loadf_from_memory [buffer (const u8*) len i32 x i32* y i32* channels_in_file i32* desired_channels i32] f32*)))
+
+(fn loadf-from-memory
+  [buffer (const u8*)
+   len i32
+   x i32*
+   y i32*
+   channels_in_file i32*
+   desired_channels i32] f32*
+  (stbi_loadf_from_memory buffer len x y channels_in_file desired_channels))
+
+(private (extern (fn stbi_loadf [filename (const char*) x i32* y i32* channels_in_file i32* desired_channels i32] f32*)))
+
+(fn loadf
+  [filename (const char*)
+   x i32*
+   y i32*
+   channels_in_file i32*
+   desired_channels i32] f32*
+  (stbi_loadf filename x y channels_in_file desired_channels))
+
+(private (extern (fn stbi_hdr_to_ldr_gamma [gamma f32] void)))
+
+(fn hdr-to-ldr-gamma [gamma f32] void
+  (stbi_hdr_to_ldr_gamma gamma))
+
+(private (extern (fn stbi_hdr_to_ldr_scale [scale f32] void)))
+
+(fn hdr-to-ldr-scale [scale f32] void
+  (stbi_hdr_to_ldr_scale scale))
+
+(private (extern (fn stbi_ldr_to_hdr_gamma [gamma f32] void)))
+
+(fn ldr-to-hdr-gamma [gamma f32] void
+  (stbi_ldr_to_hdr_gamma gamma))
+
+(private (extern (fn stbi_ldr_to_hdr_scale [scale f32] void)))
+
+(fn ldr-to-hdr-scale [scale f32] void
+  (stbi_ldr_to_hdr_scale scale))
+
+(private (extern (fn stbi_is_hdr_from_memory [buffer (const u8*) len i32] i32)))
+
+(fn is-hdr-from-memory
+  [buffer (const u8*)
+   len i32] i32
+  (stbi_is_hdr_from_memory buffer len))
+
+(private (extern (fn stbi_is_hdr [filename (const char*)] i32)))
+
+(fn is-hdr [filename (const char*)] i32
+  (stbi_is_hdr filename))
+
+(private (extern (fn stbi_failure_reason [] (const char*))))
+
+(fn failure-reason [] (const char*)
+  (stbi_failure_reason))
+
+(private (extern (fn stbi_image_free [retval_from_stbi_load any] void)))
+
+(fn image-free [retval_from_stbi_load any] void
+  (stbi_image_free retval_from_stbi_load))
+
+(private (extern (fn stbi_info_from_memory [buffer (const u8*) len i32 x i32* y i32* comp i32*] i32)))
+
+(fn info-from-memory
+  [buffer (const u8*)
+   len i32
+   x i32*
+   y i32*
+   comp i32*] i32
+  (stbi_info_from_memory buffer len x y comp))
+
+(private (extern (fn stbi_is_16_bit_from_memory [buffer (const u8*) len i32] i32)))
+
+(fn is-16-bit-from-memory
+  [buffer (const u8*)
+   len i32] i32
+  (stbi_is_16_bit_from_memory buffer len))
+
+(private (extern (fn stbi_info [filename (const char*) x i32* y i32* comp i32*] i32)))
+
+(fn info
+  [filename (const char*)
+   x i32*
+   y i32*
+   comp i32*] i32
+  (stbi_info filename x y comp))
+
+(private (extern (fn stbi_is_16_bit [filename (const char*)] i32)))
+
+(fn is-16-bit [filename (const char*)] i32
+  (stbi_is_16_bit filename))
+
+(private (extern (fn stbi_set_unpremultiply_on_load [flag_true_if_should_unpremultiply i32] void)))
+
+(fn set-unpremultiply-on-load [flag_true_if_should_unpremultiply i32] void
+  (stbi_set_unpremultiply_on_load flag_true_if_should_unpremultiply))
+
+(private (extern (fn stbi_convert_iphone_png_to_rgb [flag_true_if_should_convert i32] void)))
+
+(fn convert-iphone-png-to-rgb [flag_true_if_should_convert i32] void
+  (stbi_convert_iphone_png_to_rgb flag_true_if_should_convert))
+
+(private (extern (fn stbi_set_flip_vertically_on_load [flag_true_if_should_flip i32] void)))
+
+(fn set-flip-vertically-on-load [flag_true_if_should_flip i32] void
+  (stbi_set_flip_vertically_on_load flag_true_if_should_flip))
+

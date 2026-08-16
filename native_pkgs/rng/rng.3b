@@ -1,0 +1,57 @@
+(package rng)
+
+;; A small, fast, statistically solid PRNG (PCG32 -- see
+;; https://www.pcg-random.org) -- NOT cryptographically secure, fine for
+;; games/simulations/procedural generation. Deterministic: the SAME seed
+;; always produces the SAME sequence, useful for reproducible runs/tests.
+;; Pure 3b arithmetic, no C FFI at all -- unlike os/vm, this works
+;; identically wherever it's embedded (see this package's own top-of-file
+;; note in whichever driver/compiler embeds it).
+;;
+;; The entire generator is ONE u64 -- NOT a struct -- deliberately: this
+;; package is embedded on BOTH the native and `.3bs` bytecode-VM backends
+;; (see script.c's own g_known_modules), and neither backend's cross-
+;; package import mechanism can splice a STRUCT TYPE across the boundary
+;; today (only function signatures get spliced -- confirmed by trying the
+;; struct-based version of this API first and hitting exactly that wall
+;; on the `.3bs` side). A single scalar sidesteps the limitation entirely
+;; and is arguably simpler to use anyway: "the generator's state is just
+;; a u64 you own." This only ever uses ONE fixed output stream (PCG32
+;; supports selectable streams via a second `inc` value; not exposed
+;; here -- a real, separate feature if independent streams are ever
+;; needed).
+
+;; Seeds a fresh generator. The SAME `seed` always produces the SAME
+;; sequence from every following `next-*`/`range-*`/`chance` call.
+(fn create [seed u64] u64
+  (var state u64 0u64)
+  (set state (+ (* state 6364136223846793005u64) 1442695040888963407u64))
+  (set state (+ state seed))
+  (set state (+ (* state 6364136223846793005u64) 1442695040888963407u64))
+  state)
+
+;; The next raw 32-bit value, advancing `*state` in place.
+(fn next-u32 [state u64*] u32
+  (let [old-state  (deref state)
+        xorshifted (cast u32 (bit-shr (bit-xor (bit-shr old-state 18u64) old-state) 27u64))
+        rot        (cast u32 (bit-shr old-state 59u64))]
+    (set (deref state) (+ (* old-state 6364136223846793005u64) 1442695040888963407u64))
+    (bit-or (bit-shr xorshifted rot) (bit-shl xorshifted (bit-and (- 0u32 rot) 31u32)))))
+
+;; A float in [0, 1).
+(fn next-f32 [state u64*] f32
+  (/ (cast f32 (next-u32 state)) 4294967296.0))
+
+;; An integer in [lo, hi], INCLUSIVE on both ends -- a six-sided die is
+;; `(range-i32 state 1 6)`.
+(fn range-i32 [state u64* lo i32 hi i32] i32
+  (let [span (cast u32 (+ (- hi lo) 1))]
+    (+ lo (cast i32 (% (next-u32 state) span)))))
+
+;; A float in [lo, hi).
+(fn range-f32 [state u64* lo f32 hi f32] f32
+  (+ lo (* (- hi lo) (next-f32 state))))
+
+;; true with probability `p` (0.0 = never, 1.0 = always).
+(fn chance [state u64* p f32] bool
+  (< (next-f32 state) p))

@@ -1,0 +1,41 @@
+;; The `"c-spelling"` operand a struct/enum carries when `3b translate` emits
+;; it as a MIRROR of a C type, and the casts codegen reads it to write.
+;;
+;; A mirror is a real, independent C struct laid out identically to the
+;; library's -- `golden_Doc`, not `cgltf_data`. Identical layout is not
+;; identical type, so at the one place the two meet, a call into the library
+;; itself, gcc sees the wrong pointer type and warns once per argument. The
+;; pin is what lets those calls cast. Note where the casts are NOT: `peek`
+;; calls `load`, an ordinary 3b function whose prototype is spelled in this
+;; package's own types. See cg_ffi_cast_open.
+(package golden)
+
+(struct Doc "cgltf_data"
+  [size i64])
+
+(enum Status "enum cgltf_result"
+  [Ok Err])
+
+;; `out` is `any*` -- C's `void**`, which converts to a real `T**` in NEITHER
+;; direction, and which the binding cannot name a real type for, `any` being
+;; precisely it declining to model one. That cast goes through `void*`.
+(extern (fn c-load [doc Doc* out any*] Status))
+
+;; A `const` parameter below the outermost pointer level: 3b's checker ignores
+;; constness entirely, so it passes a `Doc**` here happily, while C refuses.
+(extern (fn c-name [docs (const Doc**)] (const char*)))
+
+(fn load [doc Doc* out any*] Status
+  (c-load doc out))
+
+(fn name-of [docs Doc**] (const char*)
+  (c-name docs))
+
+(fn peek [doc Doc*] Status
+  (load doc (cast any* nil)))
+
+(fn main [] i32
+  (var d Doc (zero Doc))
+  (var p Doc* (addr d))
+  (name-of (addr p))
+  (match (peek (addr d)) [Status/Ok 0 else 1]))

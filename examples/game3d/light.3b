@@ -1,0 +1,192 @@
+(package game3d)
+
+;; One directional "sun" plus a handful of point lights, plus a flat
+;; ambient term. The fragment shader in renderer.3b consumes exactly this
+;; shape.
+;;
+;; Light is a "fat struct" rather than two separate DirLight/PointLight
+;; types: one flat struct with every kind's fields side by side and a
+;; `kind` tag saying which of them are actually meaningful (3b has no
+;; algebraic sum types -- see examples/creatures/creature.3b's identical
+;; kind-field pattern, and [[handles-design-no-generics]]). dir-light/
+;; point-light below are the constructors -- struct literals must name
+;; every field (no partial init), so they're what keep call sites from
+;; having to write out irrelevant fields (e.g. `radius` for a sun).
+
+(val max-point-lights u32 4u32)
+;; How many of those point/spot lights can cast a real shadow at once --
+;; see find-shadow-point-lights below and renderer.3b's Renderer.point-
+;; shadows (3 discrete PointShadowMap/cubemap budget, not one per light).
+(val max-point-shadows u32 3u32)
+
+(enum LightKind
+  [Directional
+   Point
+   ;; Cone-shaped, aimed -- editor.3b's light panel flips a selected
+   ;; Point/Spot light between the two (Directional stays sun-only,
+   ;; there's no "spawn a second sun"). Uses `pos` and `radius` exactly
+   ;; like Point (same falloff-to-zero-at-radius shape), PLUS `dir`
+   ;; (light -> aim direction -- see `dir`'s own comment, this is the
+   ;; OPPOSITE convention from Directional's surface -> light) and
+   ;; `cone-inner`/`cone-outer` below.
+   Spot])
+
+(struct Light
+  [kind        LightKind
+   pos         Vec3   ; Point/Spot only
+   ;; Directional: points FROM the surface TOWARD the light -- i.e. it's
+   ;; already the L vector the shading maths wants, not the direction
+   ;; light travels. Spot: the OPPOSITE convention -- the direction the
+   ;; spot is AIMED (light -> scene), the way an artist thinks about
+   ;; pointing a fixture. Unused (zero) for Point.
+   dir         Vec3
+   color       Vec3
+   intensity   f32
+   ;; Point/Spot only -- where the light's contribution reaches zero; the
+   ;; falloff between 0 and `radius` is the usual inverse-square,
+   ;; windowed so it actually hits zero at the edge instead of trailing
+   ;; off forever (see flatten-lights/renderer.3b's frag-src).
+   radius      f32
+   ;; Spot only -- half-angles in DEGREES from `dir`'s own axis: fully lit
+   ;; inside `cone-inner`, smoothly fading to zero at `cone-outer`. Point
+   ;; lights set both to 180 (cos(180 deg) = -1, i.e. "no fragment is ever
+   ;; outside this cone") so flatten-lights/the frag shader can treat
+   ;; every point/spot light identically with zero kind branching -- see
+   ;; flatten-lights' own comment.
+   cone-inner  f32
+   cone-outer  f32
+   ;; Whether this light's contribution is shadow-tested. The sun always
+   ;; has its own dedicated shadow map (shadow.3b's ShadowMap); Point/Spot
+   ;; lights share a small fixed budget of `max-point-shadows` real
+   ;; cubemap shadows per frame (find-shadow-point-lights below picks
+   ;; which ones, first-enabled-wins, up to that budget).
+   cast-shadow bool
+   ;; Whether this light contributes anything at all -- editor.3b's `V`
+   ;; toggles it on the selected light (or the sun, same "nothing/a brush
+   ;; selected" fallback `T` already uses for cast-shadow). A disabled
+   ;; light stays fully alive (still selectable/movable/deletable, still
+   ;; saved by level.3b) -- flatten-lights below just excludes it from
+   ;; the shader upload, and set-frame-uniforms-raw (renderer.3b) zeroes
+   ;; the sun's own contribution the same way, both WITHOUT deleting or
+   ;; hiding the light itself, unlike Delete.
+   enabled     bool])
+
+(fn dir-light [dir Vec3 color Vec3 intensity f32 cast-shadow bool] Light
+  (Light {:kind LightKind/Directional :pos (vec3 0.0 0.0 0.0) :dir dir
+          :color color :intensity intensity :radius 0.0
+          :cone-inner 180.0 :cone-outer 180.0 :cast-shadow cast-shadow :enabled true}))
+
+(fn point-light [pos Vec3 color Vec3 intensity f32 radius f32 cast-shadow bool] Light
+  (Light {:kind LightKind/Point :pos pos :dir (vec3 0.0 0.0 0.0)
+          :color color :intensity intensity :radius radius
+          :cone-inner 180.0 :cone-outer 180.0 :cast-shadow cast-shadow :enabled true}))
+
+(fn spot-light
+  [pos Vec3 dir Vec3 color Vec3 intensity f32 radius f32
+   cone-inner f32 cone-outer f32 cast-shadow bool] Light
+  (Light {:kind LightKind/Spot :pos pos :dir dir
+          :color color :intensity intensity :radius radius
+          :cone-inner cone-inner :cone-outer cone-outer :cast-shadow cast-shadow :enabled true}))
+
+(struct Lights
+  [ambient     Vec3
+   sun         Light
+   points      [Light 4]
+   point-count u32])
+
+(fn add-point-light [lights Lights* light Light] void
+  (when (>= (. lights point-count) max-point-lights)
+    (println "add-point-light: at the {}-light limit already" max-point-lights)
+    (return))
+  (set (nth (. lights points) (. lights point-count)) light)
+  (++ (. lights point-count)))
+
+;; Swap-remove -- same convention editor.3b's editor-delete-selected
+;; already uses for scene.brushes (order doesn't matter for a light any
+;; more than it does for a brush; nothing indexes `points` by anything
+;; but its own current slot). A no-op past the end.
+(fn remove-point-light [lights Lights* i u32] void
+  (when (>= i (. lights point-count)) (return))
+  (let [last (- (. lights point-count) 1u32)]
+    (set (nth (. lights points) i) (nth (. lights points) last))
+    (set (. lights point-count) last)))
+
+;; The shader takes the point lights as three parallel arrays
+;; (`uniform vec3 u_light_pos[4]`, ...) rather than an array of structs,
+;; so each one can be uploaded in a single glUniform*v call. Flattening
+;; into that layout is this struct's job.
+(struct LightUpload
+  [pos           [f32 12]  ; 4 * vec3
+   color         [f32 12]
+   radius        [f32 4]
+   ;; Spot-only, harmless (unused by the shader's spot test) for Point --
+   ;; `dir` mirrors Light's own light-to-aim convention, `cone-cos-*` are
+   ;; cos(radians(cone-inner/outer)) so the frag shader's smoothstep never
+   ;; needs a trig call per-fragment.
+   dir           [f32 12]
+   cone-cos-inner [f32 4]
+   cone-cos-outer [f32 4]
+   count  u32])
+
+;; Up to `max-point-shadows` ENABLED lights with cast-shadow set (storage
+;; order, same "first wins" convention scene.3b's own picking functions
+;; already use for an exact-overlap tie), each budgeted its own real
+;; cubemap shadow (renderer.3b's Renderer.point-shadows, 3 of them --
+;; shadow.3b's own PointShadowMap header comment explains why this is a
+;; small fixed budget rather than one per light). Works for BOTH Point
+;; and Spot kinds (see light.3b's own LightKind/Spot comment) -- the
+;; cubemap technique doesn't care whether the light it's centred on is
+;; omnidirectional or a cone, it's still correct, just renders a bit more
+;; than a cone-shaped light strictly needs.
+;;
+;; Each pick's `index` is that light's own slot within flatten-lights'
+;; own PACKED upload array -- NOT its raw `points[]` slot, since a
+;; disabled light earlier in storage order shifts every later one down by
+;; one in that packed array, and renderer.3b's frag shader needs to match
+;; each shadow up against the exact `u_light_pos[i]`/`u_light_color[i]`
+;; slot it ends up at. `count` 0 if no light currently qualifies --
+;; callers then skip the whole point-shadow render pass for the frame.
+(struct ShadowPick [pos Vec3 index i32])
+(struct ShadowPicks [items [ShadowPick 3] count i32])
+
+(fn find-shadow-point-lights [lights Lights*] ShadowPicks
+  (let [total (clamp-top (. lights point-count) max-point-lights)]
+    (var picks ShadowPicks (zero ShadowPicks))
+    (var packed-index i32 0)
+    (for [i 0u32 total]
+      (let [light (addr (nth (. lights points) i))]
+        (when (. light enabled)
+          (when (and (. light cast-shadow) (< (. picks count) (cast i32 max-point-shadows)))
+            (set (nth (. picks items) (. picks count)) (ShadowPick {:pos (. light pos) :index packed-index}))
+            (+= (. picks count) 1))
+          (+= packed-index 1))))
+    picks))
+
+;; Disabled points are skipped entirely (not just zeroed) -- `out` is a
+;; SEPARATE write cursor from the scan index `i`, so the upload arrays
+;; stay tightly packed [0, out) and u_light_count (the shader's own loop
+;; bound) never even sees a gap where a disabled light used to be.
+(fn flatten-lights [lights Lights*] LightUpload
+  (let [upload (zero LightUpload)
+        total (clamp-top (. lights point-count) max-point-lights)]
+    (var out u32 0u32)
+    (for [i 0u32 total]
+      (let [light (addr (nth (. lights points) i))]
+        (when (. light enabled)
+          (let [j (* out 3u32)
+                color (scale-vec3 (. light color) (. light intensity))]
+            (set (nth (. upload pos) (+ j 0u32)) (. light pos x))
+            (set (nth (. upload pos) (+ j 1u32)) (. light pos y))
+            (set (nth (. upload pos) (+ j 2u32)) (. light pos z))
+            (set (nth (. upload color) (+ j 0u32)) (. color x))
+            (set (nth (. upload color) (+ j 1u32)) (. color y))
+            (set (nth (. upload color) (+ j 2u32)) (. color z))
+            (set (nth (. upload radius) out) (. light radius))
+            (set (nth (. upload dir) (+ j 0u32)) (. light dir x))
+            (set (nth (. upload dir) (+ j 1u32)) (. light dir y))
+            (set (nth (. upload dir) (+ j 2u32)) (. light dir z))
+            (set (nth (. upload cone-cos-inner) out) (cos (radians (. light cone-inner))))
+            (set (nth (. upload cone-cos-outer) out) (cos (radians (. light cone-outer))))
+            (+= out 1u32)))))
+    (set (. upload count) out)
+    upload))

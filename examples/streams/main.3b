@@ -1,0 +1,94 @@
+;; Streams -- incremental file I/O, the counterpart to `os/read-file`/
+;; `os/write-file`'s whole-buffer-at-once shape. `stream` is a language
+;; PRIMITIVE (like `arena`/`string`), so it crosses the `(import os)`
+;; boundary and can be passed around freely; everything you can DO with
+;; one lives in the `os` module, except formatted writing, which is the
+;; ordinary `print`/`println` builtin with a leading stream argument.
+(package streams)
+(import os)
+
+(val path string "streams-demo.txt")
+
+;; Writes a small file three different ways: a formatted line (the print
+;; builtin, aimed at a stream instead of stdout), a raw string, and raw
+;; bytes straight out of a buffer.
+(fn write-demo [] bool
+  (let [f (os/open path os/mode-write)]
+    ;; A failed open is a NULL stream -- `not` on it works exactly like it
+    ;; does on a pointer, no separate ok-flag to unpack.
+    (when (not f)
+      (println (os/stderr) "cannot open {} for writing" path)
+      (return false))
+
+    (println f "# {} written by the streams example" path)
+    (for [i 0 3]
+      (println f "line {} of {}" (+ i 1) 3))
+
+    (os/write-string f "raw string, no newline appended -- ")
+
+    (var bytes [u8 6])
+    (for [i 0 6] (set (nth bytes i) (cast u8 (+ 65 i)))) ;; "ABCDEF"
+    (os/write f (cast any (addr bytes)) 6u64)
+    (os/write-string f "\n")
+
+    ;; The close, not the writes, is where a full disk would show up.
+    (when (not (os/close f))
+      (println (os/stderr) "close failed for {}" path)
+      (return false))
+    true))
+
+;; Reads the same file back line by line. The loop is driven by `at-end?`
+;; rather than by testing the returned string, since an empty line and
+;; end-of-file both come back as an empty string.
+(fn read-demo [] i32
+  (let [f (os/open path os/mode-read)]
+    (when (not f)
+      (println (os/stderr) "cannot open {} for reading" path)
+      (return -1))
+
+    (var lines i32 0)
+    (scratch [temp]
+      (while (not (os/at-end? f))
+        (let [line (os/read-line temp f)]
+          (when (> (string-len line) 0u64)
+            (println "  read: {}" line)
+            (++ lines)))))
+
+    (os/close f)
+    lines))
+
+;; Seek/tell -- reads the 6 raw bytes back out of the middle of the file
+;; without re-reading everything before them.
+(fn seek-demo [] bool
+  (let [f (os/open path os/mode-read)]
+    (when (not f) (return false))
+
+    (when (not (os/seek f -7i64 os/seek-end))
+      (os/close f)
+      (return false))
+
+    (println "  offset after seek: {}" (os/tell f))
+    (var buf [u8 7])
+    (let [got (os/read f (cast any (addr buf)) 6u64)]
+      (println "  tail bytes read: {}" got)
+      (set (nth buf 6) 0u8)
+      (println "  tail contents: {}" (cast char* (addr buf)))
+      (os/close f)
+      (= got 6u64))))
+
+(fn main [] i32
+  (println "writing {}" path)
+  (when (not (write-demo)) (return 1))
+
+  (println "reading it back")
+  (let [lines (read-demo)]
+    (println "  {} non-empty line(s)" lines)
+    (when (not (= lines 5)) (return 1)))
+
+  (println "seeking")
+  (when (not (seek-demo)) (return 1))
+
+  ;; stdout as an ordinary stream value -- the same `print` that writes to
+  ;; a file writes here, which is the point of the overload.
+  (println (os/stdout) "done")
+  0)

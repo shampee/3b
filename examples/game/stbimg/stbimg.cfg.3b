@@ -1,0 +1,91 @@
+(package stbimg)
+;; stb_image.h (v2.30, public domain, https://github.com/nothings/stb) is a
+;; single-header library: this ONE header carries both the declarations
+;; (what we translate) and, behind `#ifdef STB_IMAGE_IMPLEMENTATION`, the
+;; actual implementation. That implementation is compiled separately as
+;; plain C -- see ../stbimg_impl.c -- so this config, like gl.cfg.3b/
+;; sdl.cfg.3b, only ever needs to see the declarations.
+;;
+;; Package/directory named `stbimg` (not `stb`, the name this used to
+;; have) for clarity against stbtt/ (stb_truetype) next door -- but NOT
+;; `stbi`, the more obvious-looking choice: 3b's C name-mangling scheme
+;; is `<package>_<name-after-strip-func-prefix>`, and this library's own
+;; C prefix (strip-func-prefix below) already IS "stbi_" -- naming the
+;; PACKAGE `stbi` too reconstructs that exact same prefix, so every
+;; generated wrapper (`stbi_load_from_memory`, `stbi_hdr_to_ldr_gamma`,
+;; ...) collides with the REAL function of the identical name from
+;; `-include`d stb_image.h, and the wrapper's own body calls ITSELF
+;; instead of the real function (both have the same C symbol, so there's
+;; only one to call) -- no compile error, just a link-time "multiple
+;; definition" for every symbol, caught live via `3b build` after trying
+;; `stbi` first -- the cgltf -> gltf rename hit this exact shape before
+;; (see gltf.cfg.3b's own comment), same fix here: pick anything that
+;; ISN'T the library's own prefix.
+;;
+;; The header is vendored into this directory (not a system header).
+;; `cmd_translate`/`cmd_extract` (translate.c's `enter_config_dir`) chdir
+;; INTO this config's own directory before resolving headers, so the path
+;; below is relative to THIS directory -- regenerate via `3b translate
+;; --translate stbimg/stbimg.cfg.3b`, invoked from anywhere (only the
+;; config's own directory matters, not CWD) -- output lands at
+;; stbimg/stbimg.3b either way, since the config's directory is already
+;; named after its own package. (See stbtt/stbtt.cfg.3b's own comment for
+;; why this note replaces an older, now-stale "`-I.`, run with CWD=game/"
+;; version -- confirmed stale via `3b translate --extract` failing the
+;; same way before this fix.)
+(headers ["stb_image.h"])
+(strip-func-prefix "stbi_")
+(strip-const-prefix "STBI_")
+(type-map
+  [stbi_uc u8
+   stbi_us u16])
+;; `char const *filename`-based loaders (stbi_load, stbi_info, ...) are
+;; kept -- everything else is excluded:
+;;
+;; The `FILE*`-based overloads (stbi_load_from_file, stbi_info_from_file,
+;; stbi_is_hdr_from_file, stbi_is_16_bit_from_file, stbi_load_from_file_16,
+;; stbi_loadf_from_file) aren't listed below at all -- `FILE` is a system
+;; type from a header this config doesn't translate, so the tool's own
+;; unresolvable-type check already drops them automatically (regenerating
+;; prints one skip diagnostic per symbol to stderr; that's expected).
+(exclude-func [
+  ;; Take a `stbi_io_callbacks*` (a struct of 3 function pointers) for a
+  ;; caller-supplied custom read/skip/eof source. The struct itself still
+  ;; gets emitted (its function-pointer fields collapse to `any`, same as
+  ;; any other function pointer -- doc: right layout, but there's no way
+  ;; to hand it a real C-ABI function pointer from 3b code), so it's not
+  ;; practically constructible from this side either way. Not needed: the
+  ;; game loads images from a path or an in-memory buffer, both covered
+  ;; by the plain overloads below.
+  stbi_load_from_callbacks
+  stbi_load_16_from_callbacks
+  stbi_loadf_from_callbacks
+  stbi_is_hdr_from_callbacks
+  stbi_info_from_callbacks
+  stbi_is_16_bit_from_callbacks
+
+  ;; Windows-only (`wchar_t` path conversion) and thread-local variants of
+  ;; the plain setters just below them -- neither applies to this Linux
+  ;; game.
+  stbi_convert_wchar_to_utf8
+  stbi_set_unpremultiply_on_load_thread
+  stbi_convert_iphone_png_to_rgb_thread
+  stbi_set_flip_vertically_on_load_thread
+
+  ;; Animated-GIF loader: its `int **delays` out-param (an ARENA-ALLOCATED
+  ;; ARRAY of per-frame delays, one array of image data per frame) needs a
+  ;; real outparam rule to be usable/safe from 3b, not just a raw `i32**`.
+  ;; Not needed by the game (no GIF assets); add an `arena-outparam` rule
+  ;; here if that changes.
+  stbi_load_gif_from_memory
+
+  ;; zlib client used internally by the PNG decoder, exposed as public API
+  ;; for unrelated raw-zlib use cases. Not needed: the game only ever
+  ;; wants decoded pixels, never raw zlib streams.
+  stbi_zlib_decode_malloc_guesssize
+  stbi_zlib_decode_malloc_guesssize_headerflag
+  stbi_zlib_decode_malloc
+  stbi_zlib_decode_buffer
+  stbi_zlib_decode_noheader_malloc
+  stbi_zlib_decode_noheader_buffer
+])

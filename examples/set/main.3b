@@ -1,0 +1,62 @@
+;; Set<T>: a Map<T, no-value> -- the same monomorphized hash table as Map,
+;; minus the value slot (see TypeKind_Set's own comment in 3b.h). Exercises
+;; both a string-keyed and a numeric-keyed instantiation.
+(package set)
+
+(fn main [] i32
+  (var ok bool true)
+  (val a arena (create))
+
+  (var s1 (Set string))
+  (let [added-a (set-add a s1 "a")]
+    (println "set-add 'a' (first time) = {} (expect true)" added-a)
+    (when (not added-a) (set ok false)))
+  (set-add a s1 "b")
+  (set-add a s1 "c")
+
+  (let [added-a-again (set-add a s1 "a")]
+    (println "set-add 'a' (again) = {} (expect false, already present)" added-a-again)
+    (when added-a-again (set ok false)))
+
+  (println "contains 'b'? {}" (set-contains? s1 "b"))
+  (when (not (set-contains? s1 "b")) (set ok false))
+  (when (set-contains? s1 "missing") (set ok false))
+
+  (set-remove s1 "b")
+  (println "contains 'b' after remove? {}" (set-contains? s1 "b"))
+  (when (set-contains? s1 "b") (set ok false))
+  (when (not (set-contains? s1 "a")) (set ok false))
+
+  ;; numeric-keyed, large enough to force at least one resize
+  (var s2 (Set i32))
+  (for [i 0 200]
+    (set-add a s2 i))
+  (var s2-ok bool true)
+  (for [i 0 200]
+    (when (not (set-contains? s2 i)) (set s2-ok false)))
+  (println "s2-ok (200 numeric elements, incl. resize) = {}" s2-ok)
+  (when (not s2-ok) (set ok false))
+  (when (set-contains? s2 99999) (set ok false))
+
+  ;; iteration -- both `[x s]` (element only) and `[[i x] s]` (index +
+  ;; element, index is an arbitrary slot-walk position, not 0..N-1 order)
+  (var count i32 0)
+  (var elem-sum i32 0)
+  (for [x s2]
+    (set count (+ count 1))
+    (set elem-sum (+ elem-sum x)))
+  (println "iteration (element-only): count = {} (expect 200), elem-sum = {} (expect 19900)" count elem-sum)
+  (when (not (= count 200)) (set ok false))
+  (when (not (= elem-sum 19900)) (set ok false))
+
+  (var count2 i32 0)
+  (var elem-sum2 i32 0)
+  (for [[i x] s2]
+    (set count2 (+ count2 1))
+    (set elem-sum2 (+ elem-sum2 x)))
+  (println "iteration ([i x]): count = {} (expect 200), elem-sum = {} (expect 19900)" count2 elem-sum2)
+  (when (not (= count2 200)) (set ok false))
+  (when (not (= elem-sum2 19900)) (set ok false))
+
+  (destroy a)
+  (if ok 0 1))

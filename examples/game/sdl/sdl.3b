@@ -1,0 +1,1807 @@
+(package sdl)
+
+(val WINDOW_FULLSCREEN u32 0x0000000000000001u32)
+(val WINDOW_OPENGL u32 0x0000000000000002u32)
+(val WINDOW_OCCLUDED u32 0x0000000000000004u32)
+(val WINDOW_HIDDEN u32 0x0000000000000008u32)
+(val WINDOW_BORDERLESS u32 0x0000000000000010u32)
+(val WINDOW_RESIZABLE u32 0x0000000000000020u32)
+(val WINDOW_MINIMIZED u32 0x0000000000000040u32)
+(val WINDOW_MAXIMIZED u32 0x0000000000000080u32)
+(val WINDOW_MOUSE_GRABBED u32 0x0000000000000100u32)
+(val WINDOW_INPUT_FOCUS u32 0x0000000000000200u32)
+(val WINDOW_MOUSE_FOCUS u32 0x0000000000000400u32)
+(val WINDOW_EXTERNAL u32 0x0000000000000800u32)
+(val WINDOW_MODAL u32 0x0000000000001000u32)
+(val WINDOW_HIGH_PIXEL_DENSITY u32 0x0000000000002000u32)
+(val WINDOW_MOUSE_CAPTURE u32 0x0000000000004000u32)
+(val WINDOW_MOUSE_RELATIVE_MODE u32 0x0000000000008000u32)
+(val WINDOW_ALWAYS_ON_TOP u32 0x0000000000010000u32)
+(val WINDOW_UTILITY u32 0x0000000000020000u32)
+(val WINDOW_TOOLTIP u32 0x0000000000040000u32)
+(val WINDOW_POPUP_MENU u32 0x0000000000080000u32)
+(val WINDOW_KEYBOARD_GRABBED u32 0x0000000000100000u32)
+(val WINDOW_VULKAN u32 0x0000000010000000u32)
+(val WINDOW_METAL u32 0x0000000020000000u32)
+(val WINDOW_TRANSPARENT u32 0x0000000040000000u32)
+(val WINDOW_NOT_FOCUSABLE u32 0x0000000080000000u32)
+(val WINDOWPOS_UNDEFINED_MASK u32 0x1FFF0000u32)
+(val WINDOWPOS_UNDEFINED i32 0)
+(val WINDOWPOS_CENTERED_MASK u32 0x2FFF0000u32)
+(val WINDOWPOS_CENTERED i32 0)
+(val GL_CONTEXT_PROFILE_CORE u32 0x0001u32)
+(val GL_CONTEXT_PROFILE_COMPATIBILITY u32 0x0002u32)
+(val GL_CONTEXT_PROFILE_ES u32 0x0004u32)
+(val GL_CONTEXT_DEBUG_FLAG u32 0x0001u32)
+(val GL_CONTEXT_FORWARD_COMPATIBLE_FLAG u32 0x0002u32)
+(val GL_CONTEXT_ROBUST_ACCESS_FLAG u32 0x0004u32)
+(val GL_CONTEXT_RESET_ISOLATION_FLAG u32 0x0008u32)
+(val GL_CONTEXT_RELEASE_BEHAVIOR_NONE u32 0x0000u32)
+(val GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH u32 0x0001u32)
+(val GL_CONTEXT_RESET_NO_NOTIFICATION u32 0x0000u32)
+(val GL_CONTEXT_RESET_LOSE_CONTEXT u32 0x0001u32)
+(val WINDOW_SURFACE_VSYNC_DISABLED i32 0)
+(val SDLK_UNKNOWN u32 0x00000000u32)
+(val SDLK_RETURN u32 0x0000000du32)
+(val SDLK_ESCAPE u32 0x0000001bu32)
+(val SDLK_BACKSPACE u32 0x00000008u32)
+(val SDLK_TAB u32 0x00000009u32)
+(val SDLK_SPACE u32 0x00000020u32)
+(val SDLK_EXCLAIM u32 0x00000021u32)
+(val SDLK_DBLAPOSTROPHE u32 0x00000022u32)
+(val SDLK_HASH u32 0x00000023u32)
+(val SDLK_DOLLAR u32 0x00000024u32)
+(val SDLK_PERCENT u32 0x00000025u32)
+(val SDLK_AMPERSAND u32 0x00000026u32)
+(val SDLK_APOSTROPHE u32 0x00000027u32)
+(val SDLK_LEFTPAREN u32 0x00000028u32)
+(val SDLK_RIGHTPAREN u32 0x00000029u32)
+(val SDLK_ASTERISK u32 0x0000002au32)
+(val SDLK_PLUS u32 0x0000002bu32)
+(val SDLK_COMMA u32 0x0000002cu32)
+(val SDLK_MINUS u32 0x0000002du32)
+(val SDLK_PERIOD u32 0x0000002eu32)
+(val SDLK_SLASH u32 0x0000002fu32)
+(val SDLK_0 u32 0x00000030u32)
+(val SDLK_1 u32 0x00000031u32)
+(val SDLK_2 u32 0x00000032u32)
+(val SDLK_3 u32 0x00000033u32)
+(val SDLK_4 u32 0x00000034u32)
+(val SDLK_5 u32 0x00000035u32)
+(val SDLK_6 u32 0x00000036u32)
+(val SDLK_7 u32 0x00000037u32)
+(val SDLK_8 u32 0x00000038u32)
+(val SDLK_9 u32 0x00000039u32)
+(val SDLK_COLON u32 0x0000003au32)
+(val SDLK_SEMICOLON u32 0x0000003bu32)
+(val SDLK_LESS u32 0x0000003cu32)
+(val SDLK_EQUALS u32 0x0000003du32)
+(val SDLK_GREATER u32 0x0000003eu32)
+(val SDLK_QUESTION u32 0x0000003fu32)
+(val SDLK_AT u32 0x00000040u32)
+(val SDLK_LEFTBRACKET u32 0x0000005bu32)
+(val SDLK_BACKSLASH u32 0x0000005cu32)
+(val SDLK_RIGHTBRACKET u32 0x0000005du32)
+(val SDLK_CARET u32 0x0000005eu32)
+(val SDLK_UNDERSCORE u32 0x0000005fu32)
+(val SDLK_GRAVE u32 0x00000060u32)
+(val SDLK_A u32 0x00000061u32)
+(val SDLK_B u32 0x00000062u32)
+(val SDLK_C u32 0x00000063u32)
+(val SDLK_D u32 0x00000064u32)
+(val SDLK_E u32 0x00000065u32)
+(val SDLK_F u32 0x00000066u32)
+(val SDLK_G u32 0x00000067u32)
+(val SDLK_H u32 0x00000068u32)
+(val SDLK_I u32 0x00000069u32)
+(val SDLK_J u32 0x0000006au32)
+(val SDLK_K u32 0x0000006bu32)
+(val SDLK_L u32 0x0000006cu32)
+(val SDLK_M u32 0x0000006du32)
+(val SDLK_N u32 0x0000006eu32)
+(val SDLK_O u32 0x0000006fu32)
+(val SDLK_P u32 0x00000070u32)
+(val SDLK_Q u32 0x00000071u32)
+(val SDLK_R u32 0x00000072u32)
+(val SDLK_S u32 0x00000073u32)
+(val SDLK_T u32 0x00000074u32)
+(val SDLK_U u32 0x00000075u32)
+(val SDLK_V u32 0x00000076u32)
+(val SDLK_W u32 0x00000077u32)
+(val SDLK_X u32 0x00000078u32)
+(val SDLK_Y u32 0x00000079u32)
+(val SDLK_Z u32 0x0000007au32)
+(val SDLK_LEFTBRACE u32 0x0000007bu32)
+(val SDLK_PIPE u32 0x0000007cu32)
+(val SDLK_RIGHTBRACE u32 0x0000007du32)
+(val SDLK_TILDE u32 0x0000007eu32)
+(val SDLK_DELETE u32 0x0000007fu32)
+(val SDLK_PLUSMINUS u32 0x000000b1u32)
+(val SDLK_CAPSLOCK u32 0x40000039u32)
+(val SDLK_F1 u32 0x4000003au32)
+(val SDLK_F2 u32 0x4000003bu32)
+(val SDLK_F3 u32 0x4000003cu32)
+(val SDLK_F4 u32 0x4000003du32)
+(val SDLK_F5 u32 0x4000003eu32)
+(val SDLK_F6 u32 0x4000003fu32)
+(val SDLK_F7 u32 0x40000040u32)
+(val SDLK_F8 u32 0x40000041u32)
+(val SDLK_F9 u32 0x40000042u32)
+(val SDLK_F10 u32 0x40000043u32)
+(val SDLK_F11 u32 0x40000044u32)
+(val SDLK_F12 u32 0x40000045u32)
+(val SDLK_PRINTSCREEN u32 0x40000046u32)
+(val SDLK_SCROLLLOCK u32 0x40000047u32)
+(val SDLK_PAUSE u32 0x40000048u32)
+(val SDLK_INSERT u32 0x40000049u32)
+(val SDLK_HOME u32 0x4000004au32)
+(val SDLK_PAGEUP u32 0x4000004bu32)
+(val SDLK_END u32 0x4000004du32)
+(val SDLK_PAGEDOWN u32 0x4000004eu32)
+(val SDLK_RIGHT u32 0x4000004fu32)
+(val SDLK_LEFT u32 0x40000050u32)
+(val SDLK_DOWN u32 0x40000051u32)
+(val SDLK_UP u32 0x40000052u32)
+(val SDLK_NUMLOCKCLEAR u32 0x40000053u32)
+(val SDLK_KP_DIVIDE u32 0x40000054u32)
+(val SDLK_KP_MULTIPLY u32 0x40000055u32)
+(val SDLK_KP_MINUS u32 0x40000056u32)
+(val SDLK_KP_PLUS u32 0x40000057u32)
+(val SDLK_KP_ENTER u32 0x40000058u32)
+(val SDLK_KP_1 u32 0x40000059u32)
+(val SDLK_KP_2 u32 0x4000005au32)
+(val SDLK_KP_3 u32 0x4000005bu32)
+(val SDLK_KP_4 u32 0x4000005cu32)
+(val SDLK_KP_5 u32 0x4000005du32)
+(val SDLK_KP_6 u32 0x4000005eu32)
+(val SDLK_KP_7 u32 0x4000005fu32)
+(val SDLK_KP_8 u32 0x40000060u32)
+(val SDLK_KP_9 u32 0x40000061u32)
+(val SDLK_KP_0 u32 0x40000062u32)
+(val SDLK_KP_PERIOD u32 0x40000063u32)
+(val SDLK_APPLICATION u32 0x40000065u32)
+(val SDLK_POWER u32 0x40000066u32)
+(val SDLK_KP_EQUALS u32 0x40000067u32)
+(val SDLK_F13 u32 0x40000068u32)
+(val SDLK_F14 u32 0x40000069u32)
+(val SDLK_F15 u32 0x4000006au32)
+(val SDLK_F16 u32 0x4000006bu32)
+(val SDLK_F17 u32 0x4000006cu32)
+(val SDLK_F18 u32 0x4000006du32)
+(val SDLK_F19 u32 0x4000006eu32)
+(val SDLK_F20 u32 0x4000006fu32)
+(val SDLK_F21 u32 0x40000070u32)
+(val SDLK_F22 u32 0x40000071u32)
+(val SDLK_F23 u32 0x40000072u32)
+(val SDLK_F24 u32 0x40000073u32)
+(val SDLK_EXECUTE u32 0x40000074u32)
+(val SDLK_HELP u32 0x40000075u32)
+(val SDLK_MENU u32 0x40000076u32)
+(val SDLK_SELECT u32 0x40000077u32)
+(val SDLK_STOP u32 0x40000078u32)
+(val SDLK_AGAIN u32 0x40000079u32)
+(val SDLK_UNDO u32 0x4000007au32)
+(val SDLK_CUT u32 0x4000007bu32)
+(val SDLK_COPY u32 0x4000007cu32)
+(val SDLK_PASTE u32 0x4000007du32)
+(val SDLK_FIND u32 0x4000007eu32)
+(val SDLK_MUTE u32 0x4000007fu32)
+(val SDLK_VOLUMEUP u32 0x40000080u32)
+(val SDLK_VOLUMEDOWN u32 0x40000081u32)
+(val SDLK_KP_COMMA u32 0x40000085u32)
+(val SDLK_KP_EQUALSAS400 u32 0x40000086u32)
+(val SDLK_ALTERASE u32 0x40000099u32)
+(val SDLK_SYSREQ u32 0x4000009au32)
+(val SDLK_CANCEL u32 0x4000009bu32)
+(val SDLK_CLEAR u32 0x4000009cu32)
+(val SDLK_PRIOR u32 0x4000009du32)
+(val SDLK_RETURN2 u32 0x4000009eu32)
+(val SDLK_SEPARATOR u32 0x4000009fu32)
+(val SDLK_OUT u32 0x400000a0u32)
+(val SDLK_OPER u32 0x400000a1u32)
+(val SDLK_CLEARAGAIN u32 0x400000a2u32)
+(val SDLK_CRSEL u32 0x400000a3u32)
+(val SDLK_EXSEL u32 0x400000a4u32)
+(val SDLK_KP_00 u32 0x400000b0u32)
+(val SDLK_KP_000 u32 0x400000b1u32)
+(val SDLK_THOUSANDSSEPARATOR u32 0x400000b2u32)
+(val SDLK_DECIMALSEPARATOR u32 0x400000b3u32)
+(val SDLK_CURRENCYUNIT u32 0x400000b4u32)
+(val SDLK_CURRENCYSUBUNIT u32 0x400000b5u32)
+(val SDLK_KP_LEFTPAREN u32 0x400000b6u32)
+(val SDLK_KP_RIGHTPAREN u32 0x400000b7u32)
+(val SDLK_KP_LEFTBRACE u32 0x400000b8u32)
+(val SDLK_KP_RIGHTBRACE u32 0x400000b9u32)
+(val SDLK_KP_TAB u32 0x400000bau32)
+(val SDLK_KP_BACKSPACE u32 0x400000bbu32)
+(val SDLK_KP_A u32 0x400000bcu32)
+(val SDLK_KP_B u32 0x400000bdu32)
+(val SDLK_KP_C u32 0x400000beu32)
+(val SDLK_KP_D u32 0x400000bfu32)
+(val SDLK_KP_E u32 0x400000c0u32)
+(val SDLK_KP_F u32 0x400000c1u32)
+(val SDLK_KP_XOR u32 0x400000c2u32)
+(val SDLK_KP_POWER u32 0x400000c3u32)
+(val SDLK_KP_PERCENT u32 0x400000c4u32)
+(val SDLK_KP_LESS u32 0x400000c5u32)
+(val SDLK_KP_GREATER u32 0x400000c6u32)
+(val SDLK_KP_AMPERSAND u32 0x400000c7u32)
+(val SDLK_KP_DBLAMPERSAND u32 0x400000c8u32)
+(val SDLK_KP_VERTICALBAR u32 0x400000c9u32)
+(val SDLK_KP_DBLVERTICALBAR u32 0x400000cau32)
+(val SDLK_KP_COLON u32 0x400000cbu32)
+(val SDLK_KP_HASH u32 0x400000ccu32)
+(val SDLK_KP_SPACE u32 0x400000cdu32)
+(val SDLK_KP_AT u32 0x400000ceu32)
+(val SDLK_KP_EXCLAM u32 0x400000cfu32)
+(val SDLK_KP_MEMSTORE u32 0x400000d0u32)
+(val SDLK_KP_MEMRECALL u32 0x400000d1u32)
+(val SDLK_KP_MEMCLEAR u32 0x400000d2u32)
+(val SDLK_KP_MEMADD u32 0x400000d3u32)
+(val SDLK_KP_MEMSUBTRACT u32 0x400000d4u32)
+(val SDLK_KP_MEMMULTIPLY u32 0x400000d5u32)
+(val SDLK_KP_MEMDIVIDE u32 0x400000d6u32)
+(val SDLK_KP_PLUSMINUS u32 0x400000d7u32)
+(val SDLK_KP_CLEAR u32 0x400000d8u32)
+(val SDLK_KP_CLEARENTRY u32 0x400000d9u32)
+(val SDLK_KP_BINARY u32 0x400000dau32)
+(val SDLK_KP_OCTAL u32 0x400000dbu32)
+(val SDLK_KP_DECIMAL u32 0x400000dcu32)
+(val SDLK_KP_HEXADECIMAL u32 0x400000ddu32)
+(val SDLK_LCTRL u32 0x400000e0u32)
+(val SDLK_LSHIFT u32 0x400000e1u32)
+(val SDLK_LALT u32 0x400000e2u32)
+(val SDLK_LGUI u32 0x400000e3u32)
+(val SDLK_RCTRL u32 0x400000e4u32)
+(val SDLK_RSHIFT u32 0x400000e5u32)
+(val SDLK_RALT u32 0x400000e6u32)
+(val SDLK_RGUI u32 0x400000e7u32)
+(val SDLK_MODE u32 0x40000101u32)
+(val SDLK_SLEEP u32 0x40000102u32)
+(val SDLK_WAKE u32 0x40000103u32)
+(val SDLK_CHANNEL_INCREMENT u32 0x40000104u32)
+(val SDLK_CHANNEL_DECREMENT u32 0x40000105u32)
+(val SDLK_MEDIA_PLAY u32 0x40000106u32)
+(val SDLK_MEDIA_PAUSE u32 0x40000107u32)
+(val SDLK_MEDIA_RECORD u32 0x40000108u32)
+(val SDLK_MEDIA_FAST_FORWARD u32 0x40000109u32)
+(val SDLK_MEDIA_REWIND u32 0x4000010au32)
+(val SDLK_MEDIA_NEXT_TRACK u32 0x4000010bu32)
+(val SDLK_MEDIA_PREVIOUS_TRACK u32 0x4000010cu32)
+(val SDLK_MEDIA_STOP u32 0x4000010du32)
+(val SDLK_MEDIA_EJECT u32 0x4000010eu32)
+(val SDLK_MEDIA_PLAY_PAUSE u32 0x4000010fu32)
+(val SDLK_MEDIA_SELECT u32 0x40000110u32)
+(val SDLK_AC_NEW u32 0x40000111u32)
+(val SDLK_AC_OPEN u32 0x40000112u32)
+(val SDLK_AC_CLOSE u32 0x40000113u32)
+(val SDLK_AC_EXIT u32 0x40000114u32)
+(val SDLK_AC_SAVE u32 0x40000115u32)
+(val SDLK_AC_PRINT u32 0x40000116u32)
+(val SDLK_AC_PROPERTIES u32 0x40000117u32)
+(val SDLK_AC_SEARCH u32 0x40000118u32)
+(val SDLK_AC_HOME u32 0x40000119u32)
+(val SDLK_AC_BACK u32 0x4000011au32)
+(val SDLK_AC_FORWARD u32 0x4000011bu32)
+(val SDLK_AC_STOP u32 0x4000011cu32)
+(val SDLK_AC_REFRESH u32 0x4000011du32)
+(val SDLK_AC_BOOKMARKS u32 0x4000011eu32)
+(val SDLK_SOFTLEFT u32 0x4000011fu32)
+(val SDLK_SOFTRIGHT u32 0x40000120u32)
+(val SDLK_CALL u32 0x40000121u32)
+(val SDLK_ENDCALL u32 0x40000122u32)
+(val SDLK_LEFT_TAB u32 0x20000001u32)
+(val SDLK_LEVEL5_SHIFT u32 0x20000002u32)
+(val SDLK_MULTI_KEY_COMPOSE u32 0x20000003u32)
+(val SDLK_LMETA u32 0x20000004u32)
+(val SDLK_RMETA u32 0x20000005u32)
+(val SDLK_LHYPER u32 0x20000006u32)
+(val SDLK_RHYPER u32 0x20000007u32)
+(val KMOD_NONE u32 0x0000u32)
+(val KMOD_LSHIFT u32 0x0001u32)
+(val KMOD_RSHIFT u32 0x0002u32)
+(val KMOD_LEVEL5 u32 0x0004u32)
+(val KMOD_LCTRL u32 0x0040u32)
+(val KMOD_RCTRL u32 0x0080u32)
+(val KMOD_LALT u32 0x0100u32)
+(val KMOD_RALT u32 0x0200u32)
+(val KMOD_LGUI u32 0x0400u32)
+(val KMOD_RGUI u32 0x0800u32)
+(val KMOD_NUM u32 0x1000u32)
+(val KMOD_CAPS u32 0x2000u32)
+(val KMOD_MODE u32 0x4000u32)
+(val KMOD_SCROLL u32 0x8000u32)
+(val INIT_AUDIO u32 0x00000010u32)
+(val INIT_VIDEO u32 0x00000020u32)
+(val INIT_JOYSTICK u32 0x00000200u32)
+(val INIT_HAPTIC u32 0x00001000u32)
+(val INIT_GAMEPAD u32 0x00002000u32)
+(val INIT_EVENTS u32 0x00004000u32)
+(val INIT_SENSOR u32 0x00008000u32)
+(val INIT_CAMERA u32 0x00010000u32)
+(val MS_PER_SECOND i32 1000)
+(val US_PER_SECOND i32 1000000)
+(val NS_PER_SECOND i32 1000000000)
+(val NS_PER_MS i32 1000000)
+(val NS_PER_US i32 1000)
+
+(alias size_t u64 "size_t")
+
+(alias intptr_t i64 "intptr_t")
+
+(alias Uint64 u64 "uint64_t")
+
+(enum SystemTheme "enum SDL_SystemTheme"
+  [SYSTEM_THEME_UNKNOWN 0
+   SYSTEM_THEME_LIGHT 1
+   SYSTEM_THEME_DARK 2])
+
+(enum DisplayOrientation "enum SDL_DisplayOrientation"
+  [Unknown 0
+   Landscape 1
+   LandscapeFlipped 2
+   Portrait 3
+   PortraitFlipped 4])
+
+(enum FlashOperation "enum SDL_FlashOperation"
+  [Cancel 0
+   Briefly 1
+   UntilFocused 2])
+
+(enum GLAttr "enum SDL_GLAttr"
+  [RedSize 0
+   GreenSize 1
+   BlueSize 2
+   AlphaSize 3
+   BufferSize 4
+   Doublebuffer 5
+   DepthSize 6
+   StencilSize 7
+   AccumRedSize 8
+   AccumGreenSize 9
+   AccumBlueSize 10
+   AccumAlphaSize 11
+   Stereo 12
+   Multisamplebuffers 13
+   Multisamplesamples 14
+   AcceleratedVisual 15
+   RetainedBacking 16
+   ContextMajorVersion 17
+   ContextMinorVersion 18
+   ContextFlags 19
+   ContextProfileMask 20
+   ShareWithCurrentContext 21
+   FramebufferSrgbCapable 22
+   ContextReleaseBehavior 23
+   ContextResetNotification 24
+   ContextNoError 25
+   Floatbuffers 26
+   EglPlatform 27])
+
+(enum HitTestResult "enum SDL_HitTestResult"
+  [Normal 0
+   Draggable 1
+   ResizeTopleft 2
+   ResizeTop 3
+   ResizeTopright 4
+   ResizeRight 5
+   ResizeBottomright 6
+   ResizeBottom 7
+   ResizeBottomleft 8
+   ResizeLeft 9])
+
+(enum EventType "enum SDL_EventType"
+  [First 0
+   Quit 256
+   Terminating 257
+   LowMemory 258
+   WillEnterBackground 259
+   DidEnterBackground 260
+   WillEnterForeground 261
+   DidEnterForeground 262
+   LocaleChanged 263
+   SystemThemeChanged 264
+   DisplayOrientation 337
+   DisplayAdded 338
+   DisplayRemoved 339
+   DisplayMoved 340
+   DisplayDesktopModeChanged 341
+   DisplayCurrentModeChanged 342
+   DisplayContentScaleChanged 343
+   DisplayFirst 337
+   DisplayLast 343
+   WindowShown 514
+   WindowHidden 515
+   WindowExposed 516
+   WindowMoved 517
+   WindowResized 518
+   WindowPixelSizeChanged 519
+   WindowMetalViewResized 520
+   WindowMinimized 521
+   WindowMaximized 522
+   WindowRestored 523
+   WindowMouseEnter 524
+   WindowMouseLeave 525
+   WindowFocusGained 526
+   WindowFocusLost 527
+   WindowCloseRequested 528
+   WindowHitTest 529
+   WindowIccprofChanged 530
+   WindowDisplayChanged 531
+   WindowDisplayScaleChanged 532
+   WindowSafeAreaChanged 533
+   WindowOccluded 534
+   WindowEnterFullscreen 535
+   WindowLeaveFullscreen 536
+   WindowDestroyed 537
+   WindowHdrStateChanged 538
+   WindowFirst 514
+   WindowLast 538
+   KeyDown 768
+   KeyUp 769
+   TextEditing 770
+   TextInput 771
+   KeymapChanged 772
+   KeyboardAdded 773
+   KeyboardRemoved 774
+   TextEditingCandidates 775
+   MouseMotion 1024
+   MouseButtonDown 1025
+   MouseButtonUp 1026
+   MouseWheel 1027
+   MouseAdded 1028
+   MouseRemoved 1029
+   JoystickAxisMotion 1536
+   JoystickBallMotion 1537
+   JoystickHatMotion 1538
+   JoystickButtonDown 1539
+   JoystickButtonUp 1540
+   JoystickAdded 1541
+   JoystickRemoved 1542
+   JoystickBatteryUpdated 1543
+   JoystickUpdateComplete 1544
+   GamepadAxisMotion 1616
+   GamepadButtonDown 1617
+   GamepadButtonUp 1618
+   GamepadAdded 1619
+   GamepadRemoved 1620
+   GamepadRemapped 1621
+   GamepadTouchpadDown 1622
+   GamepadTouchpadMotion 1623
+   GamepadTouchpadUp 1624
+   GamepadSensorUpdate 1625
+   GamepadUpdateComplete 1626
+   GamepadSteamHandleUpdated 1627
+   FingerDown 1792
+   FingerUp 1793
+   FingerMotion 1794
+   FingerCanceled 1795
+   ClipboardUpdate 2304
+   DropFile 4096
+   DropText 4097
+   DropBegin 4098
+   DropComplete 4099
+   DropPosition 4100
+   AudioDeviceAdded 4352
+   AudioDeviceRemoved 4353
+   AudioDeviceFormatChanged 4354
+   SensorUpdate 4608
+   PenProximityIn 4864
+   PenProximityOut 4865
+   PenDown 4866
+   PenUp 4867
+   PenButtonDown 4868
+   PenButtonUp 4869
+   PenMotion 4870
+   PenAxis 4871
+   CameraDeviceAdded 5120
+   CameraDeviceRemoved 5121
+   CameraDeviceApproved 5122
+   CameraDeviceDenied 5123
+   RenderTargetsReset 8192
+   RenderDeviceReset 8193
+   RenderDeviceLost 8194
+   Private0 16384
+   Private1 16385
+   Private2 16386
+   Private3 16387
+   PollSentinel 32512
+   User 32768
+   Last 65535
+   EnumPadding 2147483647])
+
+(enum EventAction "enum SDL_EventAction"
+  [Add 0
+   Peek 1
+   Get 2])
+
+(enum AppResult "enum SDL_AppResult"
+  [Continue 0
+   Success 1
+   Failure 2])
+
+(struct DisplayMode "SDL_DisplayMode"
+  [display-id DisplayID
+   format i32
+   w i32
+   h i32
+   pixel-density f32
+   refresh-rate f32
+   refresh-rate-numerator i32
+   refresh-rate-denominator i32
+   internal any])
+
+(struct Point "struct SDL_Point"
+  [x i32
+   y i32])
+
+(struct CommonEvent "SDL_CommonEvent"
+  [type u32
+   reserved u32
+   timestamp Uint64])
+
+(struct DisplayEvent "SDL_DisplayEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   display-id DisplayID
+   data1 i32
+   data2 i32])
+
+(struct WindowEvent "SDL_WindowEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   data1 i32
+   data2 i32])
+
+(struct KeyboardDeviceEvent "SDL_KeyboardDeviceEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32])
+
+(struct KeyboardEvent "SDL_KeyboardEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   scancode i32
+   key Keycode
+   mod Keymod
+   raw u16
+   down bool
+   repeat bool])
+
+(struct TextEditingEvent "SDL_TextEditingEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   text (const char*)
+   start i32
+   length i32])
+
+(struct TextEditingCandidatesEvent "SDL_TextEditingCandidatesEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   candidates (const char**)
+   num-candidates i32
+   selected-candidate i32
+   horizontal bool
+   padding1 u8
+   padding2 u8
+   padding3 u8])
+
+(struct TextInputEvent "SDL_TextInputEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   text (const char*)])
+
+(struct MouseDeviceEvent "SDL_MouseDeviceEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32])
+
+(struct MouseMotionEvent "SDL_MouseMotionEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   state u32
+   x f32
+   y f32
+   xrel f32
+   yrel f32])
+
+(struct MouseButtonEvent "SDL_MouseButtonEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   button u8
+   down bool
+   clicks u8
+   padding u8
+   x f32
+   y f32])
+
+(struct MouseWheelEvent "SDL_MouseWheelEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   x f32
+   y f32
+   direction i32
+   mouse-x f32
+   mouse-y f32
+   integer-x i32
+   integer-y i32])
+
+(struct JoyAxisEvent "SDL_JoyAxisEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   axis u8
+   padding1 u8
+   padding2 u8
+   padding3 u8
+   value i16
+   padding4 u16])
+
+(struct JoyBallEvent "SDL_JoyBallEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   ball u8
+   padding1 u8
+   padding2 u8
+   padding3 u8
+   xrel i16
+   yrel i16])
+
+(struct JoyHatEvent "SDL_JoyHatEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   hat u8
+   value u8
+   padding1 u8
+   padding2 u8])
+
+(struct JoyButtonEvent "SDL_JoyButtonEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   button u8
+   down bool
+   padding1 u8
+   padding2 u8])
+
+(struct JoyDeviceEvent "SDL_JoyDeviceEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32])
+
+(struct JoyBatteryEvent "SDL_JoyBatteryEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   state i32
+   percent i32])
+
+(struct GamepadAxisEvent "SDL_GamepadAxisEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   axis u8
+   padding1 u8
+   padding2 u8
+   padding3 u8
+   value i16
+   padding4 u16])
+
+(struct GamepadButtonEvent "SDL_GamepadButtonEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   button u8
+   down bool
+   padding1 u8
+   padding2 u8])
+
+(struct GamepadDeviceEvent "SDL_GamepadDeviceEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32])
+
+(struct GamepadTouchpadEvent "SDL_GamepadTouchpadEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   touchpad i32
+   finger i32
+   x f32
+   y f32
+   pressure f32])
+
+(struct GamepadSensorEvent "SDL_GamepadSensorEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   sensor i32
+   data [f32 3]
+   sensor-timestamp Uint64])
+
+(struct AudioDeviceEvent "SDL_AudioDeviceEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   recording bool
+   padding1 u8
+   padding2 u8
+   padding3 u8])
+
+(struct CameraDeviceEvent "SDL_CameraDeviceEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32])
+
+(struct RenderEvent "SDL_RenderEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID])
+
+(struct TouchFingerEvent "SDL_TouchFingerEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   touch-id u64
+   finger-id u64
+   x f32
+   y f32
+   dx f32
+   dy f32
+   pressure f32
+   window-id WindowID])
+
+(struct PenProximityEvent "SDL_PenProximityEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32])
+
+(struct PenMotionEvent "SDL_PenMotionEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   pen-state u32
+   x f32
+   y f32])
+
+(struct PenTouchEvent "SDL_PenTouchEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   pen-state u32
+   x f32
+   y f32
+   eraser bool
+   down bool])
+
+(struct PenButtonEvent "SDL_PenButtonEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   pen-state u32
+   x f32
+   y f32
+   button u8
+   down bool])
+
+(struct PenAxisEvent "SDL_PenAxisEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   which u32
+   pen-state u32
+   x f32
+   y f32
+   axis i32
+   value f32])
+
+(struct DropEvent "SDL_DropEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   x f32
+   y f32
+   source (const char*)
+   data (const char*)])
+
+(struct ClipboardEvent "SDL_ClipboardEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   owner bool
+   num-mime-types i32
+   mime-types (const char**)])
+
+(struct SensorEvent "SDL_SensorEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64
+   which u32
+   data [f32 6]
+   sensor-timestamp Uint64])
+
+(struct QuitEvent "SDL_QuitEvent"
+  [type EventType
+   reserved u32
+   timestamp Uint64])
+
+(struct UserEvent "SDL_UserEvent"
+  [type u32
+   reserved u32
+   timestamp Uint64
+   window-id WindowID
+   code i32
+   data1 any
+   data2 any])
+
+(union Event "SDL_Event"
+  [type u32
+   common CommonEvent
+   display DisplayEvent
+   window WindowEvent
+   kdevice KeyboardDeviceEvent
+   key KeyboardEvent
+   edit TextEditingEvent
+   edit-candidates TextEditingCandidatesEvent
+   text TextInputEvent
+   mdevice MouseDeviceEvent
+   motion MouseMotionEvent
+   button MouseButtonEvent
+   wheel MouseWheelEvent
+   jdevice JoyDeviceEvent
+   jaxis JoyAxisEvent
+   jball JoyBallEvent
+   jhat JoyHatEvent
+   jbutton JoyButtonEvent
+   jbattery JoyBatteryEvent
+   gdevice GamepadDeviceEvent
+   gaxis GamepadAxisEvent
+   gbutton GamepadButtonEvent
+   gtouchpad GamepadTouchpadEvent
+   gsensor GamepadSensorEvent
+   adevice AudioDeviceEvent
+   cdevice CameraDeviceEvent
+   sensor SensorEvent
+   quit QuitEvent
+   user UserEvent
+   tfinger TouchFingerEvent
+   pproximity PenProximityEvent
+   ptouch PenTouchEvent
+   pmotion PenMotionEvent
+   pbutton PenButtonEvent
+   paxis PenAxisEvent
+   render RenderEvent
+   drop DropEvent
+   clipboard ClipboardEvent
+   padding [u8 128]])
+
+(alias DisplayID u32)
+
+(alias WindowID u32)
+
+(alias DisplayModeData any)
+
+(alias Window any)
+
+(alias WindowFlags Uint64)
+
+(alias GLContext any)
+
+(alias EGLDisplay any)
+
+(alias EGLConfig any)
+
+(alias EGLSurface any)
+
+(alias EGLAttrib intptr_t)
+
+(alias EGLint i32)
+
+(alias EGLAttribArrayCallback (fn [a0 any] EGLAttrib*))
+
+(alias EGLIntArrayCallback (fn [a0 any a1 EGLDisplay a2 EGLConfig] EGLint*))
+
+(alias GLProfile u32)
+
+(alias GLContextFlag u32)
+
+(alias GLContextReleaseFlag u32)
+
+(alias GLContextResetNotification u32)
+
+(alias HitTest any)
+
+(alias Keycode u32)
+
+(alias Keymod u16)
+
+(alias EventFilter any)
+
+(alias InitFlags u32)
+
+(alias AppInit_func any)
+
+(alias AppIterate_func any)
+
+(alias AppEvent_func any)
+
+(alias AppQuit_func any)
+
+(alias MainThreadCallback (fn [a0 any] void))
+
+(alias TimerID u32)
+
+(alias TimerCallback (fn [a0 any a1 TimerID a2 u32] u32))
+
+(alias NSTimerCallback (fn [a0 any a1 TimerID a2 Uint64] Uint64))
+
+(private (extern (fn SDL_OutOfMemory [] bool)))
+
+(fn out-of-memory [] bool
+  (SDL_OutOfMemory))
+
+(private (extern (fn SDL_GetError [] (const char*))))
+
+(fn get-error [] (const char*)
+  (SDL_GetError))
+
+(private (extern (fn SDL_ClearError [] bool)))
+
+(fn clear-error [] bool
+  (SDL_ClearError))
+
+(private (extern (fn SDL_GetNumVideoDrivers [] i32)))
+
+(fn get-num-video-drivers [] i32
+  (SDL_GetNumVideoDrivers))
+
+(private (extern (fn SDL_GetVideoDriver [index i32] (const char*))))
+
+(fn get-video-driver [index i32] (const char*)
+  (SDL_GetVideoDriver index))
+
+(private (extern (fn SDL_GetCurrentVideoDriver [] (const char*))))
+
+(fn get-current-video-driver [] (const char*)
+  (SDL_GetCurrentVideoDriver))
+
+(private (extern (fn SDL_GetSystemTheme [] SystemTheme)))
+
+(fn get-system-theme [] SystemTheme
+  (SDL_GetSystemTheme))
+
+(private (extern (fn SDL_GetDisplays [count i32*] DisplayID*)))
+
+(fn get-displays [count i32*] DisplayID*
+  (SDL_GetDisplays count))
+
+(private (extern (fn SDL_GetPrimaryDisplay [] DisplayID)))
+
+(fn get-primary-display [] DisplayID
+  (SDL_GetPrimaryDisplay))
+
+(private (extern (fn SDL_GetDisplayName [displayID DisplayID] (const char*))))
+
+(fn get-display-name [displayID DisplayID] (const char*)
+  (SDL_GetDisplayName displayID))
+
+(private (extern (fn SDL_GetNaturalDisplayOrientation [displayID DisplayID] DisplayOrientation)))
+
+(fn get-natural-display-orientation [displayID DisplayID] DisplayOrientation
+  (SDL_GetNaturalDisplayOrientation displayID))
+
+(private (extern (fn SDL_GetCurrentDisplayOrientation [displayID DisplayID] DisplayOrientation)))
+
+(fn get-current-display-orientation [displayID DisplayID] DisplayOrientation
+  (SDL_GetCurrentDisplayOrientation displayID))
+
+(private (extern (fn SDL_GetDisplayContentScale [displayID DisplayID] f32)))
+
+(fn get-display-content-scale [displayID DisplayID] f32
+  (SDL_GetDisplayContentScale displayID))
+
+(private (extern (fn SDL_GetFullscreenDisplayModes [displayID DisplayID count i32*] DisplayMode**)))
+
+(fn get-fullscreen-display-modes
+  [displayID DisplayID
+   count i32*] DisplayMode**
+  (SDL_GetFullscreenDisplayModes displayID count))
+
+(private (extern (fn SDL_GetClosestFullscreenDisplayMode [displayID DisplayID w i32 h i32 refresh_rate f32 include_high_density_modes bool closest DisplayMode*] bool)))
+
+(fn get-closest-fullscreen-display-mode
+  [displayID DisplayID
+   w i32
+   h i32
+   refresh_rate f32
+   include_high_density_modes bool
+   closest DisplayMode*] bool
+  (SDL_GetClosestFullscreenDisplayMode displayID w h refresh_rate include_high_density_modes closest))
+
+(private (extern (fn SDL_GetDesktopDisplayMode [displayID DisplayID] (const DisplayMode*))))
+
+(fn get-desktop-display-mode [displayID DisplayID] (const DisplayMode*)
+  (SDL_GetDesktopDisplayMode displayID))
+
+(private (extern (fn SDL_GetCurrentDisplayMode [displayID DisplayID] (const DisplayMode*))))
+
+(fn get-current-display-mode [displayID DisplayID] (const DisplayMode*)
+  (SDL_GetCurrentDisplayMode displayID))
+
+(private (extern (fn SDL_GetDisplayForPoint [point (const Point*)] DisplayID)))
+
+(fn get-display-for-point [point (const Point*)] DisplayID
+  (SDL_GetDisplayForPoint point))
+
+(private (extern (fn SDL_GetDisplayForWindow [window any] DisplayID)))
+
+(fn get-display-for-window [window any] DisplayID
+  (SDL_GetDisplayForWindow window))
+
+(private (extern (fn SDL_GetWindowPixelDensity [window any] f32)))
+
+(fn get-window-pixel-density [window any] f32
+  (SDL_GetWindowPixelDensity window))
+
+(private (extern (fn SDL_GetWindowDisplayScale [window any] f32)))
+
+(fn get-window-display-scale [window any] f32
+  (SDL_GetWindowDisplayScale window))
+
+(private (extern (fn SDL_SetWindowFullscreenMode [window any mode (const DisplayMode*)] bool)))
+
+(fn set-window-fullscreen-mode
+  [window any
+   mode (const DisplayMode*)] bool
+  (SDL_SetWindowFullscreenMode window mode))
+
+(private (extern (fn SDL_GetWindowFullscreenMode [window any] (const DisplayMode*))))
+
+(fn get-window-fullscreen-mode [window any] (const DisplayMode*)
+  (SDL_GetWindowFullscreenMode window))
+
+(private (extern (fn SDL_GetWindowICCProfile [window any size size_t*] any)))
+
+(fn get-window-icc-profile
+  [window any
+   size size_t*] any
+  (SDL_GetWindowICCProfile window size))
+
+(private (extern (fn SDL_GetWindowPixelFormat [window any] i32)))
+
+(fn get-window-pixel-format [window any] i32
+  (SDL_GetWindowPixelFormat window))
+
+(private (extern (fn SDL_GetWindows [count i32*] any*)))
+
+(fn get-windows [count i32*] any*
+  (SDL_GetWindows count))
+
+(private (extern (fn SDL_CreateWindow [title (const char*) w i32 h i32 flags WindowFlags] any)))
+
+(fn create-window
+  [title (const char*)
+   w i32
+   h i32
+   flags WindowFlags] any
+  (SDL_CreateWindow title w h flags))
+
+(private (extern (fn SDL_CreatePopupWindow [parent any offset_x i32 offset_y i32 w i32 h i32 flags WindowFlags] any)))
+
+(fn create-popup-window
+  [parent any
+   offset_x i32
+   offset_y i32
+   w i32
+   h i32
+   flags WindowFlags] any
+  (SDL_CreatePopupWindow parent offset_x offset_y w h flags))
+
+(private (extern (fn SDL_GetWindowID [window any] WindowID)))
+
+(fn get-window-id [window any] WindowID
+  (SDL_GetWindowID window))
+
+(private (extern (fn SDL_GetWindowFromID [id WindowID] any)))
+
+(fn get-window-from-id [id WindowID] any
+  (SDL_GetWindowFromID id))
+
+(private (extern (fn SDL_GetWindowParent [window any] any)))
+
+(fn get-window-parent [window any] any
+  (SDL_GetWindowParent window))
+
+(private (extern (fn SDL_GetWindowFlags [window any] WindowFlags)))
+
+(fn get-window-flags [window any] WindowFlags
+  (SDL_GetWindowFlags window))
+
+(private (extern (fn SDL_SetWindowTitle [window any title (const char*)] bool)))
+
+(fn set-window-title
+  [window any
+   title (const char*)] bool
+  (SDL_SetWindowTitle window title))
+
+(private (extern (fn SDL_GetWindowTitle [window any] (const char*))))
+
+(fn get-window-title [window any] (const char*)
+  (SDL_GetWindowTitle window))
+
+(private (extern (fn SDL_SetWindowPosition [window any x i32 y i32] bool)))
+
+(fn set-window-position
+  [window any
+   x i32
+   y i32] bool
+  (SDL_SetWindowPosition window x y))
+
+(private (extern (fn SDL_GetWindowPosition [window any x i32* y i32*] bool)))
+
+(fn get-window-position
+  [window any
+   x i32*
+   y i32*] bool
+  (SDL_GetWindowPosition window x y))
+
+(private (extern (fn SDL_SetWindowSize [window any w i32 h i32] bool)))
+
+(fn set-window-size
+  [window any
+   w i32
+   h i32] bool
+  (SDL_SetWindowSize window w h))
+
+(private (extern (fn SDL_GetWindowSize [window any w i32* h i32*] bool)))
+
+(fn get-window-size
+  [window any
+   w i32*
+   h i32*] bool
+  (SDL_GetWindowSize window w h))
+
+(private (extern (fn SDL_SetWindowAspectRatio [window any min_aspect f32 max_aspect f32] bool)))
+
+(fn set-window-aspect-ratio
+  [window any
+   min_aspect f32
+   max_aspect f32] bool
+  (SDL_SetWindowAspectRatio window min_aspect max_aspect))
+
+(private (extern (fn SDL_GetWindowAspectRatio [window any min_aspect f32* max_aspect f32*] bool)))
+
+(fn get-window-aspect-ratio
+  [window any
+   min_aspect f32*
+   max_aspect f32*] bool
+  (SDL_GetWindowAspectRatio window min_aspect max_aspect))
+
+(private (extern (fn SDL_GetWindowBordersSize [window any top i32* left i32* bottom i32* right i32*] bool)))
+
+(fn get-window-borders-size
+  [window any
+   top i32*
+   left i32*
+   bottom i32*
+   right i32*] bool
+  (SDL_GetWindowBordersSize window top left bottom right))
+
+(private (extern (fn SDL_GetWindowSizeInPixels [window any w i32* h i32*] bool)))
+
+(fn get-window-size-in-pixels
+  [window any
+   w i32*
+   h i32*] bool
+  (SDL_GetWindowSizeInPixels window w h))
+
+(private (extern (fn SDL_SetWindowMinimumSize [window any min_w i32 min_h i32] bool)))
+
+(fn set-window-minimum-size
+  [window any
+   min_w i32
+   min_h i32] bool
+  (SDL_SetWindowMinimumSize window min_w min_h))
+
+(private (extern (fn SDL_GetWindowMinimumSize [window any w i32* h i32*] bool)))
+
+(fn get-window-minimum-size
+  [window any
+   w i32*
+   h i32*] bool
+  (SDL_GetWindowMinimumSize window w h))
+
+(private (extern (fn SDL_SetWindowMaximumSize [window any max_w i32 max_h i32] bool)))
+
+(fn set-window-maximum-size
+  [window any
+   max_w i32
+   max_h i32] bool
+  (SDL_SetWindowMaximumSize window max_w max_h))
+
+(private (extern (fn SDL_GetWindowMaximumSize [window any w i32* h i32*] bool)))
+
+(fn get-window-maximum-size
+  [window any
+   w i32*
+   h i32*] bool
+  (SDL_GetWindowMaximumSize window w h))
+
+(private (extern (fn SDL_SetWindowBordered [window any bordered bool] bool)))
+
+(fn set-window-bordered
+  [window any
+   bordered bool] bool
+  (SDL_SetWindowBordered window bordered))
+
+(private (extern (fn SDL_SetWindowResizable [window any resizable bool] bool)))
+
+(fn set-window-resizable
+  [window any
+   resizable bool] bool
+  (SDL_SetWindowResizable window resizable))
+
+(private (extern (fn SDL_SetWindowAlwaysOnTop [window any on_top bool] bool)))
+
+(fn set-window-always-on-top
+  [window any
+   on_top bool] bool
+  (SDL_SetWindowAlwaysOnTop window on_top))
+
+(private (extern (fn SDL_ShowWindow [window any] bool)))
+
+(fn show-window [window any] bool
+  (SDL_ShowWindow window))
+
+(private (extern (fn SDL_HideWindow [window any] bool)))
+
+(fn hide-window [window any] bool
+  (SDL_HideWindow window))
+
+(private (extern (fn SDL_RaiseWindow [window any] bool)))
+
+(fn raise-window [window any] bool
+  (SDL_RaiseWindow window))
+
+(private (extern (fn SDL_MaximizeWindow [window any] bool)))
+
+(fn maximize-window [window any] bool
+  (SDL_MaximizeWindow window))
+
+(private (extern (fn SDL_MinimizeWindow [window any] bool)))
+
+(fn minimize-window [window any] bool
+  (SDL_MinimizeWindow window))
+
+(private (extern (fn SDL_RestoreWindow [window any] bool)))
+
+(fn restore-window [window any] bool
+  (SDL_RestoreWindow window))
+
+(private (extern (fn SDL_SetWindowFullscreen [window any fullscreen bool] bool)))
+
+(fn set-window-fullscreen
+  [window any
+   fullscreen bool] bool
+  (SDL_SetWindowFullscreen window fullscreen))
+
+(private (extern (fn SDL_SyncWindow [window any] bool)))
+
+(fn sync-window [window any] bool
+  (SDL_SyncWindow window))
+
+(private (extern (fn SDL_WindowHasSurface [window any] bool)))
+
+(fn window-has-surface [window any] bool
+  (SDL_WindowHasSurface window))
+
+(private (extern (fn SDL_SetWindowSurfaceVSync [window any vsync i32] bool)))
+
+(fn set-window-surface-v-sync
+  [window any
+   vsync i32] bool
+  (SDL_SetWindowSurfaceVSync window vsync))
+
+(private (extern (fn SDL_GetWindowSurfaceVSync [window any vsync i32*] bool)))
+
+(fn get-window-surface-v-sync
+  [window any
+   vsync i32*] bool
+  (SDL_GetWindowSurfaceVSync window vsync))
+
+(private (extern (fn SDL_UpdateWindowSurface [window any] bool)))
+
+(fn update-window-surface [window any] bool
+  (SDL_UpdateWindowSurface window))
+
+(private (extern (fn SDL_DestroyWindowSurface [window any] bool)))
+
+(fn destroy-window-surface [window any] bool
+  (SDL_DestroyWindowSurface window))
+
+(private (extern (fn SDL_SetWindowKeyboardGrab [window any grabbed bool] bool)))
+
+(fn set-window-keyboard-grab
+  [window any
+   grabbed bool] bool
+  (SDL_SetWindowKeyboardGrab window grabbed))
+
+(private (extern (fn SDL_SetWindowMouseGrab [window any grabbed bool] bool)))
+
+(fn set-window-mouse-grab
+  [window any
+   grabbed bool] bool
+  (SDL_SetWindowMouseGrab window grabbed))
+
+(private (extern (fn SDL_GetWindowKeyboardGrab [window any] bool)))
+
+(fn get-window-keyboard-grab [window any] bool
+  (SDL_GetWindowKeyboardGrab window))
+
+(private (extern (fn SDL_GetWindowMouseGrab [window any] bool)))
+
+(fn get-window-mouse-grab [window any] bool
+  (SDL_GetWindowMouseGrab window))
+
+(private (extern (fn SDL_GetGrabbedWindow [] any)))
+
+(fn get-grabbed-window [] any
+  (SDL_GetGrabbedWindow))
+
+(private (extern (fn SDL_SetWindowOpacity [window any opacity f32] bool)))
+
+(fn set-window-opacity
+  [window any
+   opacity f32] bool
+  (SDL_SetWindowOpacity window opacity))
+
+(private (extern (fn SDL_GetWindowOpacity [window any] f32)))
+
+(fn get-window-opacity [window any] f32
+  (SDL_GetWindowOpacity window))
+
+(private (extern (fn SDL_SetWindowParent [window any parent any] bool)))
+
+(fn set-window-parent
+  [window any
+   parent any] bool
+  (SDL_SetWindowParent window parent))
+
+(private (extern (fn SDL_SetWindowModal [window any modal bool] bool)))
+
+(fn set-window-modal
+  [window any
+   modal bool] bool
+  (SDL_SetWindowModal window modal))
+
+(private (extern (fn SDL_SetWindowFocusable [window any focusable bool] bool)))
+
+(fn set-window-focusable
+  [window any
+   focusable bool] bool
+  (SDL_SetWindowFocusable window focusable))
+
+(private (extern (fn SDL_ShowWindowSystemMenu [window any x i32 y i32] bool)))
+
+(fn show-window-system-menu
+  [window any
+   x i32
+   y i32] bool
+  (SDL_ShowWindowSystemMenu window x y))
+
+(private (extern (fn SDL_SetWindowHitTest [window any callback HitTest callback_data any] bool)))
+
+(fn set-window-hit-test
+  [window any
+   callback HitTest
+   callback_data any] bool
+  (SDL_SetWindowHitTest window callback callback_data))
+
+(private (extern (fn SDL_FlashWindow [window any operation FlashOperation] bool)))
+
+(fn flash-window
+  [window any
+   operation FlashOperation] bool
+  (SDL_FlashWindow window operation))
+
+(private (extern (fn SDL_DestroyWindow [window any] void)))
+
+(fn destroy-window [window any] void
+  (SDL_DestroyWindow window))
+
+(private (extern (fn SDL_ScreenSaverEnabled [] bool)))
+
+(fn screen-saver-enabled [] bool
+  (SDL_ScreenSaverEnabled))
+
+(private (extern (fn SDL_EnableScreenSaver [] bool)))
+
+(fn enable-screen-saver [] bool
+  (SDL_EnableScreenSaver))
+
+(private (extern (fn SDL_DisableScreenSaver [] bool)))
+
+(fn disable-screen-saver [] bool
+  (SDL_DisableScreenSaver))
+
+(private (extern (fn SDL_GL_LoadLibrary [path (const char*)] bool)))
+
+(fn gl-load-library [path (const char*)] bool
+  (SDL_GL_LoadLibrary path))
+
+(private (extern (fn SDL_GL_UnloadLibrary [] void)))
+
+(fn gl-unload-library [] void
+  (SDL_GL_UnloadLibrary))
+
+(private (extern (fn SDL_GL_ExtensionSupported [extension (const char*)] bool)))
+
+(fn gl-extension-supported [extension (const char*)] bool
+  (SDL_GL_ExtensionSupported extension))
+
+(private (extern (fn SDL_GL_ResetAttributes [] void)))
+
+(fn gl-reset-attributes [] void
+  (SDL_GL_ResetAttributes))
+
+(private (extern (fn SDL_GL_SetAttribute [attr GLAttr value i32] bool)))
+
+(fn gl-set-attribute
+  [attr GLAttr
+   value i32] bool
+  (SDL_GL_SetAttribute attr value))
+
+(private (extern (fn SDL_GL_GetAttribute [attr GLAttr value i32*] bool)))
+
+(fn gl-get-attribute
+  [attr GLAttr
+   value i32*] bool
+  (SDL_GL_GetAttribute attr value))
+
+(private (extern (fn SDL_GL_CreateContext [window any] GLContext)))
+
+(fn gl-create-context [window any] GLContext
+  (SDL_GL_CreateContext window))
+
+(private (extern (fn SDL_GL_MakeCurrent [window any context GLContext] bool)))
+
+(fn gl-make-current
+  [window any
+   context GLContext] bool
+  (SDL_GL_MakeCurrent window context))
+
+(private (extern (fn SDL_GL_GetCurrentWindow [] any)))
+
+(fn gl-get-current-window [] any
+  (SDL_GL_GetCurrentWindow))
+
+(private (extern (fn SDL_GL_GetCurrentContext [] GLContext)))
+
+(fn gl-get-current-context [] GLContext
+  (SDL_GL_GetCurrentContext))
+
+(private (extern (fn SDL_EGL_GetCurrentDisplay [] EGLDisplay)))
+
+(fn egl-get-current-display [] EGLDisplay
+  (SDL_EGL_GetCurrentDisplay))
+
+(private (extern (fn SDL_EGL_GetCurrentConfig [] EGLConfig)))
+
+(fn egl-get-current-config [] EGLConfig
+  (SDL_EGL_GetCurrentConfig))
+
+(private (extern (fn SDL_EGL_GetWindowSurface [window any] EGLSurface)))
+
+(fn egl-get-window-surface [window any] EGLSurface
+  (SDL_EGL_GetWindowSurface window))
+
+(private (extern (fn SDL_EGL_SetAttributeCallbacks [platformAttribCallback EGLAttribArrayCallback surfaceAttribCallback EGLIntArrayCallback contextAttribCallback EGLIntArrayCallback userdata any] void)))
+
+(fn egl-set-attribute-callbacks
+  [platformAttribCallback EGLAttribArrayCallback
+   surfaceAttribCallback EGLIntArrayCallback
+   contextAttribCallback EGLIntArrayCallback
+   userdata any] void
+  (SDL_EGL_SetAttributeCallbacks platformAttribCallback surfaceAttribCallback contextAttribCallback userdata))
+
+(private (extern (fn SDL_GL_SetSwapInterval [interval i32] bool)))
+
+(fn gl-set-swap-interval [interval i32] bool
+  (SDL_GL_SetSwapInterval interval))
+
+(private (extern (fn SDL_GL_GetSwapInterval [interval i32*] bool)))
+
+(fn gl-get-swap-interval [interval i32*] bool
+  (SDL_GL_GetSwapInterval interval))
+
+(private (extern (fn SDL_GL_SwapWindow [window any] bool)))
+
+(fn gl-swap-window [window any] bool
+  (SDL_GL_SwapWindow window))
+
+(private (extern (fn SDL_GL_DestroyContext [context GLContext] bool)))
+
+(fn gl-destroy-context [context GLContext] bool
+  (SDL_GL_DestroyContext context))
+
+(private (extern (fn SDL_PumpEvents [] void)))
+
+(fn pump-events [] void
+  (SDL_PumpEvents))
+
+(private (extern (fn SDL_PeepEvents [events Event* numevents i32 action EventAction minType u32 maxType u32] i32)))
+
+(fn peep-events
+  [events Event*
+   numevents i32
+   action EventAction
+   minType u32
+   maxType u32] i32
+  (SDL_PeepEvents events numevents action minType maxType))
+
+(private (extern (fn SDL_HasEvent [type u32] bool)))
+
+(fn has-event [type u32] bool
+  (SDL_HasEvent type))
+
+(private (extern (fn SDL_HasEvents [minType u32 maxType u32] bool)))
+
+(fn has-events
+  [minType u32
+   maxType u32] bool
+  (SDL_HasEvents minType maxType))
+
+(private (extern (fn SDL_FlushEvent [type u32] void)))
+
+(fn flush-event [type u32] void
+  (SDL_FlushEvent type))
+
+(private (extern (fn SDL_FlushEvents [minType u32 maxType u32] void)))
+
+(fn flush-events
+  [minType u32
+   maxType u32] void
+  (SDL_FlushEvents minType maxType))
+
+(private (extern (fn SDL_PollEvent [event Event*] bool)))
+
+(fn poll-event [event Event*] bool
+  (SDL_PollEvent event))
+
+(private (extern (fn SDL_WaitEvent [event Event*] bool)))
+
+(fn wait-event [event Event*] bool
+  (SDL_WaitEvent event))
+
+(private (extern (fn SDL_WaitEventTimeout [event Event* timeoutMS i32] bool)))
+
+(fn wait-event-timeout
+  [event Event*
+   timeoutMS i32] bool
+  (SDL_WaitEventTimeout event timeoutMS))
+
+(private (extern (fn SDL_PushEvent [event Event*] bool)))
+
+(fn push-event [event Event*] bool
+  (SDL_PushEvent event))
+
+(private (extern (fn SDL_SetEventFilter [filter EventFilter userdata any] void)))
+
+(fn set-event-filter
+  [filter EventFilter
+   userdata any] void
+  (SDL_SetEventFilter filter userdata))
+
+(private (extern (fn SDL_GetEventFilter [filter EventFilter* userdata any*] bool)))
+
+(fn get-event-filter
+  [filter EventFilter*
+   userdata any*] bool
+  (SDL_GetEventFilter filter userdata))
+
+(private (extern (fn SDL_AddEventWatch [filter EventFilter userdata any] bool)))
+
+(fn add-event-watch
+  [filter EventFilter
+   userdata any] bool
+  (SDL_AddEventWatch filter userdata))
+
+(private (extern (fn SDL_RemoveEventWatch [filter EventFilter userdata any] void)))
+
+(fn remove-event-watch
+  [filter EventFilter
+   userdata any] void
+  (SDL_RemoveEventWatch filter userdata))
+
+(private (extern (fn SDL_FilterEvents [filter EventFilter userdata any] void)))
+
+(fn filter-events
+  [filter EventFilter
+   userdata any] void
+  (SDL_FilterEvents filter userdata))
+
+(private (extern (fn SDL_SetEventEnabled [type u32 enabled bool] void)))
+
+(fn set-event-enabled
+  [type u32
+   enabled bool] void
+  (SDL_SetEventEnabled type enabled))
+
+(private (extern (fn SDL_EventEnabled [type u32] bool)))
+
+(fn event-enabled [type u32] bool
+  (SDL_EventEnabled type))
+
+(private (extern (fn SDL_RegisterEvents [numevents i32] u32)))
+
+(fn register-events [numevents i32] u32
+  (SDL_RegisterEvents numevents))
+
+(private (extern (fn SDL_GetWindowFromEvent [event (const Event*)] any)))
+
+(fn get-window-from-event [event (const Event*)] any
+  (SDL_GetWindowFromEvent event))
+
+(private (extern (fn SDL_Init [flags InitFlags] bool)))
+
+(fn init [flags InitFlags] bool
+  (SDL_Init flags))
+
+(private (extern (fn SDL_InitSubSystem [flags InitFlags] bool)))
+
+(fn init-sub-system [flags InitFlags] bool
+  (SDL_InitSubSystem flags))
+
+(private (extern (fn SDL_QuitSubSystem [flags InitFlags] void)))
+
+(fn quit-sub-system [flags InitFlags] void
+  (SDL_QuitSubSystem flags))
+
+(private (extern (fn SDL_WasInit [flags InitFlags] InitFlags)))
+
+(fn was-init [flags InitFlags] InitFlags
+  (SDL_WasInit flags))
+
+(private (extern (fn SDL_Quit [] void)))
+
+(fn quit [] void
+  (SDL_Quit))
+
+(private (extern (fn SDL_IsMainThread [] bool)))
+
+(fn is-main-thread [] bool
+  (SDL_IsMainThread))
+
+(private (extern (fn SDL_RunOnMainThread [callback MainThreadCallback userdata any wait_complete bool] bool)))
+
+(fn run-on-main-thread
+  [callback MainThreadCallback
+   userdata any
+   wait_complete bool] bool
+  (SDL_RunOnMainThread callback userdata wait_complete))
+
+(private (extern (fn SDL_SetAppMetadata [appname (const char*) appversion (const char*) appidentifier (const char*)] bool)))
+
+(fn set-app-metadata
+  [appname (const char*)
+   appversion (const char*)
+   appidentifier (const char*)] bool
+  (SDL_SetAppMetadata appname appversion appidentifier))
+
+(private (extern (fn SDL_SetAppMetadataProperty [name (const char*) value (const char*)] bool)))
+
+(fn set-app-metadata-property
+  [name (const char*)
+   value (const char*)] bool
+  (SDL_SetAppMetadataProperty name value))
+
+(private (extern (fn SDL_GetAppMetadataProperty [name (const char*)] (const char*))))
+
+(fn get-app-metadata-property [name (const char*)] (const char*)
+  (SDL_GetAppMetadataProperty name))
+
+(private (extern (fn SDL_GetTicks [] Uint64)))
+
+(fn get-ticks [] Uint64
+  (SDL_GetTicks))
+
+(private (extern (fn SDL_GetTicksNS [] Uint64)))
+
+(fn get-ticks-ns [] Uint64
+  (SDL_GetTicksNS))
+
+(private (extern (fn SDL_GetPerformanceCounter [] Uint64)))
+
+(fn get-performance-counter [] Uint64
+  (SDL_GetPerformanceCounter))
+
+(private (extern (fn SDL_GetPerformanceFrequency [] Uint64)))
+
+(fn get-performance-frequency [] Uint64
+  (SDL_GetPerformanceFrequency))
+
+(private (extern (fn SDL_Delay [ms u32] void)))
+
+(fn delay [ms u32] void
+  (SDL_Delay ms))
+
+(private (extern (fn SDL_DelayNS [ns Uint64] void)))
+
+(fn delay-ns [ns Uint64] void
+  (SDL_DelayNS ns))
+
+(private (extern (fn SDL_DelayPrecise [ns Uint64] void)))
+
+(fn delay-precise [ns Uint64] void
+  (SDL_DelayPrecise ns))
+
+(private (extern (fn SDL_AddTimer [interval u32 callback TimerCallback userdata any] TimerID)))
+
+(fn add-timer
+  [interval u32
+   callback TimerCallback
+   userdata any] TimerID
+  (SDL_AddTimer interval callback userdata))
+
+(private (extern (fn SDL_AddTimerNS [interval Uint64 callback NSTimerCallback userdata any] TimerID)))
+
+(fn add-timer-ns
+  [interval Uint64
+   callback NSTimerCallback
+   userdata any] TimerID
+  (SDL_AddTimerNS interval callback userdata))
+
+(private (extern (fn SDL_RemoveTimer [id TimerID] bool)))
+
+(fn remove-timer [id TimerID] bool
+  (SDL_RemoveTimer id))
+

@@ -1,0 +1,1459 @@
+(package game3d)
+(import sdl)
+(import gl)
+
+(private
+  (val renderer-max-meshes u32 1024u32)
+  (val shadow-map-size i32 2048)
+  ;; Smaller than the sun's own map (2048) AND rendered 6x/frame (once
+  ;; per cube face) whenever a point-light shadow is active at all --
+  ;; 512 is plenty for the small, close-up point lights this demo's own
+  ;; editor spawns (default-light-radius 9.0, editor.3b), nowhere near
+  ;; the sun's whole-scene coverage.
+  (val point-shadow-map-size i32 512))
+
+;; sky-frag-src's own vertical gradient endpoints -- a fairly ordinary
+;; deep-blue zenith fading to a paler, slightly warm horizon, same "pick
+;; something plausible, this is placeholder content" spirit as
+;; texture.3b's checker/brick palettes. Not `private` -- main.3b's own
+;; `K` handler (sky.3b's generate-skybox-gradient) reuses these exact
+;; values so a baked cubemap looks identical to the live gradient it's
+;; a snapshot of, rather than drifting out of sync with a second copy.
+(val sky-horizon-color Vec3 (Vec3 {:x 0.75 :y 0.80 :z 0.85}))
+(val sky-zenith-color  Vec3 (Vec3 {:x 0.20 :y 0.42 :z 0.80}))
+
+(private
+
+  ;; String literals in 3b may span lines (the lexer takes a raw newline
+  ;; the same as a `\n` escape), so the GLSL below is written out as GLSL
+  ;; rather than as one enormous escaped line.
+  (val vert-src char* (cstring "#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+
+uniform mat4 u_model;
+uniform mat4 u_view_proj;
+
+out vec3 v_world_pos;
+out vec3 v_normal;
+out vec2 v_uv;
+
+void main() {
+  vec4 world  = u_model * vec4(a_pos, 1.0);
+  v_world_pos = world.xyz;
+  v_uv        = a_uv;
+  // Every model matrix this demo builds is rotation + uniform scale +
+  // translation, so the upper-left 3x3 is a valid normal matrix on its
+  // own -- no inverse-transpose needed.
+  v_normal    = mat3(u_model) * a_normal;
+  gl_Position = u_view_proj * world;
+}
+"))
+
+  (val frag-src char* (cstring "#version 330 core
+#define MAX_POINT_LIGHTS 4
+
+in vec3 v_world_pos;
+in vec3 v_normal;
+in vec2 v_uv;
+
+uniform sampler2D u_base_color;
+uniform int       u_has_base_color;
+
+uniform vec3  u_camera_pos;
+uniform vec3  u_ambient;
+
+uniform vec3  u_sun_dir;      // surface -> light, not the travel direction
+uniform vec3  u_sun_color;    // already scaled by intensity
+
+uniform int   u_light_count;
+uniform vec3  u_light_pos[MAX_POINT_LIGHTS];
+uniform vec3  u_light_color[MAX_POINT_LIGHTS];
+uniform float u_light_radius[MAX_POINT_LIGHTS];
+// Spot-only (light.3b's LightUpload.dir/cone-cos-*) -- u_light_cos_outer
+// is -1 (cos(180 deg)) for every Point light, which the spot_factor test
+// below treats as no cone restriction at all, so a Point light's
+// contribution is identical to before this uniform set existed.
+uniform vec3  u_light_dir[MAX_POINT_LIGHTS];
+uniform float u_light_cos_inner[MAX_POINT_LIGHTS];
+uniform float u_light_cos_outer[MAX_POINT_LIGHTS];
+
+uniform vec3  u_albedo;
+uniform float u_shininess;
+uniform float u_specular;
+uniform vec3  u_emissive;
+
+// Sun-only shadowing -- see shadow.3b. u_shadow_map is sampled with a
+// vec3 (uv, reference depth): TEXTURE_COMPARE_MODE turns that into a
+// hardware depth comparison, and TEXTURE_MIN/MAG_FILTER = LINEAR makes it
+// a free 2x2 box filter per sample. The 3x3 loop in shadow_factor spreads
+// nine of those over one texel each, so together it's a 4x4-ish PCF.
+uniform sampler2DShadow u_shadow_map;
+uniform mat4            u_light_space;
+uniform float           u_shadow_texel; // 1 / shadow map size, in UV units
+uniform int             u_shadow_enabled; // light.3b's Light.cast-shadow, for the sun
+
+// Up to 3 point/spot lights' shadows are live per frame (light.3b's
+// find-shadow-point-lights, shadow.3b's own PointShadowMap header comment
+// explains why 3 rather than one-per-light) -- u_point_shadow_light_indexN
+// says WHICH u_light_pos[]/u_light_color[] slot (above) shadow slot N
+// belongs to, checked in the point-light loop below. Each u_point_shadow_
+// mapN is a DISTANCE cubemap (world-space length from the light), not a
+// real depth texture -- see point_shadow_factor below. 3 DISCRETE
+// samplerCube uniforms rather than a samplerCube[3] array: GLSL 330 core
+// only guarantees constant-index access into a sampler array, so this
+// sidesteps that entirely instead of relying on driver-specific unrolling.
+uniform samplerCube u_point_shadow_map0;
+uniform int          u_point_shadow_enabled0;
+uniform vec3         u_point_shadow_light_pos0;
+uniform int          u_point_shadow_light_index0;
+uniform samplerCube u_point_shadow_map1;
+uniform int          u_point_shadow_enabled1;
+uniform vec3         u_point_shadow_light_pos1;
+uniform int          u_point_shadow_light_index1;
+uniform samplerCube u_point_shadow_map2;
+uniform int          u_point_shadow_enabled2;
+uniform vec3         u_point_shadow_light_pos2;
+uniform int          u_point_shadow_light_index2;
+
+out vec4 frag_color;
+
+// Blinn-Phong: one light's contribution, given the already-normalized
+// normal (n), view (v) and light (l) vectors, that light's radiance, and
+// the surface albedo already resolved from texture/uniform.
+vec3 shade(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo) {
+  float ndl = max(dot(n, l), 0.0);
+  if (ndl <= 0.0) return vec3(0.0);
+  vec3  h    = normalize(l + v);
+  float spec = pow(max(dot(n, h), 0.0), u_shininess) * u_specular;
+  return radiance * ndl * (albedo + vec3(spec));
+}
+
+// 1.0 = fully lit, 0.0 = fully shadowed. world_pos is re-projected through
+// the light's own view-projection (shadow.3b's shadow-light-space-matrix)
+// rather than carrying a second varying from the vertex shader, since
+// both the static and skinned vertex shaders already emit v_world_pos.
+float shadow_factor(vec3 world_pos, vec3 n, vec3 l) {
+  vec4 clip = u_light_space * vec4(world_pos, 1.0);
+  vec3 proj = clip.xyz / clip.w;
+  proj      = proj * 0.5 + 0.5; // NDC [-1,1] -> texture/depth [0,1]
+  if (proj.z > 1.0) return 1.0; // past the shadow camera's far plane
+
+  // Slope-scaled bias: a surface nearly edge-on to the light needs more
+  // depth bias to avoid self-shadowing acne than one facing it head-on.
+  float bias = max(0.0015 * (1.0 - dot(n, l)), 0.0003);
+
+  float shadow = 0.0;
+  for (int x = -1; x <= 1; ++x) {
+    for (int y = -1; y <= 1; ++y) {
+      vec2 offset = vec2(float(x), float(y)) * u_shadow_texel;
+      shadow += texture(u_shadow_map, vec3(proj.xy + offset, proj.z - bias));
+    }
+  }
+  return shadow / 9.0;
+}
+
+// 1.0 = fully lit, 0.0 = fully shadowed, for `world_pos` against
+// u_point_shadow_light_pos -- u_point_shadow_map stores plain world-
+// space DISTANCE from the light per texel (shadow.3b's own
+// PointShadowMap header comment explains why, as opposed to a real depth
+// comparison the way the sun's sampler2DShadow works), so this is just:
+// is the current fragment farther from the light than whatever the
+// depth pass already saw in that direction, plus a flat bias -- no PCF
+// here (unlike shadow_factor's 3x3 loop), a single sample is enough for
+// a small, close-up point light's soft-edged falloff to mostly hide the
+// difference.
+float point_shadow_factor(samplerCube shadow_map, vec3 light_pos, vec3 world_pos) {
+  vec3  to_frag        = world_pos - light_pos;
+  float current_dist   = length(to_frag);
+  float closest_dist   = texture(shadow_map, to_frag).r;
+  return (current_dist - 0.05) > closest_dist ? 0.0 : 1.0;
+}
+
+void main() {
+  vec3 albedo = u_albedo;
+  if (u_has_base_color != 0) {
+    vec4 texel = texture(u_base_color, v_uv);
+    // Cut out fully transparent texels rather than blending them: this
+    // model's hair and eyelash sheets rely on alpha, and discarding keeps
+    // them working without needing a sorted transparent pass.
+    if (texel.a < 0.5) discard;
+    // glTF base-colour textures are sRGB-encoded; the lighting below is
+    // linear, so undo the transfer curve before using them.
+    albedo *= pow(texel.rgb, vec3(2.2));
+  }
+
+  vec3 n = normalize(v_normal);
+  vec3 v = normalize(u_camera_pos - v_world_pos);
+  vec3 l = normalize(u_sun_dir);
+
+  vec3 color = u_ambient * albedo + u_emissive;
+  float sun_shadow = (u_shadow_enabled != 0) ? shadow_factor(v_world_pos, n, l) : 1.0;
+  color += sun_shadow * shade(n, v, l, u_sun_color, albedo);
+
+  for (int i = 0; i < u_light_count; ++i) {
+    vec3  to_light = u_light_pos[i] - v_world_pos;
+    float dist     = length(to_light);
+    float radius   = max(u_light_radius[i], 0.0001);
+    // Inverse-square falloff, windowed so it reaches exactly zero at the
+    // light's radius instead of trailing off forever.
+    float window   = clamp(1.0 - (dist * dist) / (radius * radius), 0.0, 1.0);
+    float atten    = (window * window) / (1.0 + dist * dist);
+
+    // Spot cone falloff -- u_light_cos_outer[i] is -1 for a Point light
+    // (light.3b's point-light constructor), which this branch treats as
+    // no cone restriction at all, WITHOUT ever normalizing u_light_dir[i]: a
+    // Point light's dir is the zero vector (unused, see Light.dir's own
+    // comment), and normalize(vec3(0)) is undefined in GLSL -- it comes
+    // back NaN on real hardware, which then poisons atten/shade's whole
+    // sum for that light (the entire scene, not just this light, since
+    // NaN propagates through the += below), which is why skipping this
+    // branch entirely for anything but a real cone matters, not just an
+    // optimization. -0.999 (not -1.0 exactly) leaves headroom for
+    // cos(radians(180.0))'s own float32 rounding to land a hair off -1.
+    float spot_factor = 1.0;
+    if (u_light_cos_outer[i] > -0.999) {
+      float cos_angle = dot(normalize(-to_light), normalize(u_light_dir[i]));
+      spot_factor = smoothstep(u_light_cos_outer[i], u_light_cos_inner[i], cos_angle);
+    }
+    atten *= spot_factor;
+
+    float point_shadow = 1.0;
+    if (u_point_shadow_enabled0 != 0 && i == u_point_shadow_light_index0)
+      point_shadow = point_shadow_factor(u_point_shadow_map0, u_point_shadow_light_pos0, v_world_pos);
+    else if (u_point_shadow_enabled1 != 0 && i == u_point_shadow_light_index1)
+      point_shadow = point_shadow_factor(u_point_shadow_map1, u_point_shadow_light_pos1, v_world_pos);
+    else if (u_point_shadow_enabled2 != 0 && i == u_point_shadow_light_index2)
+      point_shadow = point_shadow_factor(u_point_shadow_map2, u_point_shadow_light_pos2, v_world_pos);
+
+    color += point_shadow * shade(n, v, to_light / max(dist, 0.0001), u_light_color[i] * atten, albedo);
+  }
+
+  frag_color = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);
+}
+"))
+
+  ;; Skinned counterpart to vert-src -- shares frag-src as-is (lighting
+  ;; doesn't change), adds the two per-vertex joint-influence attributes
+  ;; and a joint-matrix palette, and blends by GPU linear-blend skinning
+  ;; before doing anything else vert-src already does. See skin.3b's
+  ;; header comment for what a "joint matrix" is and why this is correct.
+  (val skinned-vert-src char* (cstring "#version 330 core
+#define MAX_JOINTS 96 // must match skin.3b's max-joints
+
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+layout(location = 3) in vec4 a_joints;
+layout(location = 4) in vec4 a_weights;
+
+uniform mat4 u_model;
+uniform mat4 u_view_proj;
+uniform mat4 u_joints[MAX_JOINTS];
+
+out vec3 v_world_pos;
+out vec3 v_normal;
+out vec2 v_uv;
+
+void main() {
+  ivec4 joint = ivec4(a_joints);
+  // Linear blend skinning: each vertex's final position is the weighted
+  // sum of that SAME vertex transformed by up to 4 influencing joints'
+  // skinning matrices. a_weights is authored to sum to ~1, so this is a
+  // weighted average, not a sum that grows the vertex.
+  mat4 skin =
+    a_weights.x * u_joints[joint.x] +
+    a_weights.y * u_joints[joint.y] +
+    a_weights.z * u_joints[joint.z] +
+    a_weights.w * u_joints[joint.w];
+
+  vec4 world  = u_model * (skin * vec4(a_pos, 1.0));
+  v_world_pos = world.xyz;
+  v_uv        = a_uv;
+  // Same simplification vert-src's u_model already relies on (rotation +
+  // near-uniform scale => the upper-left 3x3 is a good enough normal
+  // matrix on its own), just applied to the skin matrix too.
+  v_normal    = mat3(u_model) * (mat3(skin) * a_normal);
+  gl_Position = u_view_proj * world;
+}
+"))
+
+  ;; Full-screen gradient sky, drawn first (main.3b, before draw-scene)
+  ;; so real geometry naturally paints over it -- see draw-sky's own
+  ;; comment for why depth test is off for this one draw specifically. No
+  ;; cubemap, no mesh: `a_pos` is just the 6 NDC-space corners of the
+  ;; whole viewport (Renderer.sky-vao/-vbo, -1..1 both axes), and the
+  ;; vertex shader reconstructs each corner's own WORLD-SPACE view
+  ;; direction directly from the camera's basis (u_cam_forward/right/up,
+  ;; same vectors camera.3b's camera-basis/editor.3b's pane-camera-basis
+  ;; already hand out for billboards) plus its FOV (u_tan_half_fov, the
+  ;; exact `tan(fov/2)` term math.3b's own make-perspective-mat4 already
+  ;; computes to BUILD a projection matrix -- this is that same number
+  ;; used to UNDO one instead, without actually needing a real inverse-
+  ;; matrix primitive anywhere in this codebase). Perspective-view only
+  ;; (main.3b never calls draw-sky for the 3 orthographic edit-mode panes
+  ;; -- an ortho view's parallel rays have no single varying direction to
+  ;; gradient against, so there's nothing for this technique to draw).
+  (val sky-vert-src char* (cstring "#version 330 core
+layout(location = 0) in vec2 a_pos;
+
+uniform vec3  u_cam_forward;
+uniform vec3  u_cam_right;
+uniform vec3  u_cam_up;
+uniform float u_tan_half_fov;
+uniform float u_aspect;
+
+out vec3 v_dir;
+
+void main() {
+  v_dir = u_cam_forward
+    + u_cam_right * (a_pos.x * u_tan_half_fov * u_aspect)
+    + u_cam_up    * (a_pos.y * u_tan_half_fov);
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+"))
+
+  ;; Vertical gradient (horizon to zenith, by `dir.y` alone -- cheap and
+  ;; plenty convincing for a demo sky) plus a soft round glow toward
+  ;; u_sun_dir, scaled by the SAME u_sun_color/u_sun_visible the main lit
+  ;; shader's own u_sun_color/u_shadow_enabled already track (light.3b's
+  ;; Light.enabled, editor.3b's `V`) -- turn the sun off and its glow
+  ;; disappears from the sky along with its actual light contribution.
+  ;; u_use_cubemap 0 (draw-sky's default, scene.sky-cubemap == 0) is the
+  ;; live gradient+glow, recomputed every frame straight from the sun's
+  ;; own current state -- non-zero instead samples u_sky_cubemap
+  ;; directly, a real cubemap this SAME shader/vao is also used to BAKE
+  ;; (renderer.3b's make-sky-gradient-cubemap, one real GPU render per
+  ;; face into a temporary FBO) or that got loaded from actual image
+  ;; files (texture.3b's load-cubemap-from-files) -- see sky.3b's own
+  ;; header comment for the full picture.
+  (val sky-frag-src char* (cstring "#version 330 core
+in vec3 v_dir;
+
+uniform samplerCube u_sky_cubemap;
+uniform int          u_use_cubemap;
+
+uniform vec3 u_sky_horizon;
+uniform vec3 u_sky_zenith;
+uniform vec3 u_sun_dir;
+uniform vec3 u_sun_color;
+uniform int  u_sun_visible;
+
+out vec4 frag_color;
+
+void main() {
+  vec3 dir = normalize(v_dir);
+  vec3 sky;
+
+  if (u_use_cubemap != 0) {
+    sky = texture(u_sky_cubemap, dir).rgb;
+  } else {
+    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    sky = mix(u_sky_horizon, u_sky_zenith, t);
+
+    if (u_sun_visible != 0) {
+      float sun_amount = max(dot(dir, u_sun_dir), 0.0);
+      sky += u_sun_color * pow(sun_amount, 256.0) * 0.6;
+    }
+  }
+
+  frag_color = vec4(sky, 1.0);
+}
+"))
+
+  ;; World-space camera-facing quad -- scene.3b's draw-scene-billboards
+  ;; (point-light icons today) is the only caller so far, but any future
+  ;; particle/sprite/impostor use goes through the same draw-billboard.
+  ;; Unlike vert-src's real per-vertex a_normal-carrying Vertex3D mesh,
+  ;; the local quad (Renderer.billboard-vao/-vbo, a_pos/a_uv only, see
+  ;; UIVertex's identical 2-Vec2 shape) never changes -- u_center/u_right/
+  ;; u_up/u_size below do all the actual per-draw positioning, expanding
+  ;; that flat -0.5..0.5 local square into a real world-space quad that's
+  ;; always perpendicular to the view direction (u_right/u_up are the
+  ;; CAMERA's own right/up, uploaded fresh by whichever of Play mode's
+  ;; single view or edit mode's 4 panes is currently drawing -- see
+  ;; camera.3b's camera-basis/editor.3b's pane-camera-basis). Unlit on
+  ;; purpose (no normal, no lighting maths) -- an icon/particle reads as
+  ;; itself regardless of the scene's own lighting, same reasoning
+  ;; draw-scene's old emissive-material point-light gizmo cubes already
+  ;; relied on (albedo forced to 0, only u_emissive shows).
+  (val billboard-vert-src char* (cstring "#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+
+uniform vec3 u_center;
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform vec2 u_size;
+uniform mat4 u_view_proj;
+
+out vec2 v_uv;
+
+void main() {
+  vec3 world = u_center + u_right * (a_pos.x * u_size.x) + u_up * (a_pos.y * u_size.y);
+  v_uv = a_uv;
+  gl_Position = u_view_proj * vec4(world, 1.0);
+}
+"))
+
+  ;; u_has_tex 0 is a flat u_color quad (alpha included, so a caller can
+  ;; fade one) -- same 0-means-untextured convention draw-textured-model/
+  ;; draw-ui-quad already use. The alpha-cutout discard (not real
+  ;; blending) is the same tradeoff model.3b's own hair/eyelash textures
+  ;; already make: simplest thing that still reads as a soft round icon
+  ;; through make-circle-texture (texture.3b), no draw-order/sorting
+  ;; concerns a truly translucent billboard would need.
+  (val billboard-frag-src char* (cstring "#version 330 core
+in vec2 v_uv;
+
+uniform sampler2D u_tex;
+uniform vec4      u_color;
+uniform int       u_has_tex;
+
+out vec4 frag_color;
+
+void main() {
+  vec4 c = u_color;
+  if (u_has_tex != 0) {
+    c *= texture(u_tex, v_uv);
+  }
+  if (c.a < 0.01) discard;
+  frag_color = c;
+}
+"))
+
+  ;; 2D screen-space overlay pass -- text.3b's glyph quads today, any
+  ;; future flat-color UI rect (a menu panel/button background) later.
+  ;; Deliberately a THIRD, separate shader/vertex-format rather than
+  ;; reusing vert-src/Vertex3D: a_pos here is already in ortho-projected
+  ;; 2D screen space (no model matrix, no lighting -- see u_proj below).
+  ;; u_use_tex is 3-way: 0 a flat u_color rect with no texture at all
+  ;; (same "0 = untextured" convention frag-src above uses for a 3D
+  ;; material); 1 samples a texture's RED channel as ALPHA only, tinted
+  ;; by u_color.rgb (a font atlas's baked coverage bitmap, text.3b, or an
+  ;; icon like texture.3b's make-circle-texture -- draw-ui-quad's own
+  ;; long-standing behavior, still the default every existing caller
+  ;; gets); 2 samples the texture's real RGBA and multiplies it by
+  ;; u_color, same shape billboard-frag-src above already uses for a
+  ;; point-light icon -- for a genuine full-color image (editor.3b's
+  ;; color-picker gradients, texture.3b's make-hue-strip-texture/
+  ;; make-sv-square-texture, the one caller today), where discarding G/B
+  ;; the way mode 1 does would wash every gradient out to grayscale.
+  (val ui-vert-src char* (cstring "#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+
+uniform mat4 u_proj;
+
+out vec2 v_uv;
+
+void main() {
+  v_uv = a_uv;
+  gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);
+}
+"))
+
+  (val ui-frag-src char* (cstring "#version 330 core
+in vec2 v_uv;
+
+uniform sampler2D u_tex;
+uniform int       u_use_tex;
+uniform vec4      u_color;
+
+out vec4 frag_color;
+
+void main() {
+  if (u_use_tex == 2) {
+    frag_color = u_color * texture(u_tex, v_uv);
+  } else {
+    float a = (u_use_tex != 0) ? texture(u_tex, v_uv).r : 1.0;
+    frag_color = vec4(u_color.rgb, u_color.a * a);
+  }
+}
+")))
+
+(struct Material
+  [albedo    Vec3
+   shininess f32
+   specular  f32
+   emissive  Vec3])
+
+(fn material [albedo Vec3 shininess f32 specular f32] Material
+  (Material albedo shininess specular (vec3 0.0 0.0 0.0)))
+
+(fn emissive-material [color Vec3] Material
+  (Material (vec3 0.0 0.0 0.0) 1.0 0.0 color))
+
+;; One quad's worth of 2D vertex data -- text.3b/draw-ui-quad's own
+;; unit. No color/tint field: draw-ui-quad's u_color uniform tints the
+;; whole quad in one GL call, so per-vertex color would just be
+;; redundant, unlike a real batched-quad renderer (examples/game/
+;; renderer.3b's) where different quads in the SAME draw call can need
+;; different colors.
+(struct UIVertex [pos Vec2 uv Vec2])
+
+(struct Renderer
+  [window         any
+   gl-ctx         sdl/GLContext
+   width          i32
+   height         i32
+   shader         Shader
+   skinned-shader Shader
+   ;; 2D screen-space overlay pass -- text.3b's glyph quads, see
+   ;; ui-vert-src/ui-frag-src's own comment. ui-quad-vao/-vbo are ONE
+   ;; persistent quad (6 vertices), re-filled via gl/buffer-sub-data every
+   ;; draw-ui-quad call rather than a real dynamic-batch VBO -- menu/HUD
+   ;; text is at most a few hundred glyphs a frame, nowhere near enough
+   ;; quad count for the per-draw-call overhead to matter (see draw-ui-
+   ;; quad's own comment for the actual tradeoff this makes).
+   ui-shader   Shader
+   ui-quad-vao u32
+   ui-quad-vbo u32
+   ;; World-space camera-facing quad pass -- billboard-vert-src/-frag-
+   ;; src's own comment. Unlike ui-quad-vao/-vbo above, this quad's local
+   ;; shape (-0.5..0.5, UIVertex-shaped a_pos/a_uv) never changes between
+   ;; draws -- only u_center/u_right/u_up/u_size do -- so it's uploaded
+   ;; ONCE in make-renderer (STATIC_DRAW) rather than re-filled every call.
+   billboard-shader Shader
+   billboard-vao    u32
+   billboard-vbo    u32
+   ;; Full-screen gradient background -- sky-vert-src/-frag-src's own
+   ;; comment. Position-only (no UV, unlike ui-quad/billboard-vao above
+   ;; -- sky-frag-src never samples a texture), STATIC_DRAW same
+   ;; once-and-never-again reasoning as billboard-vao/-vbo.
+   sky-shader Shader
+   sky-vao    u32
+   sky-vbo    u32
+   shadow         ShadowMap
+   ;; light.3b's max-point-shadows (3) real cubemap shadows, budgeted
+   ;; across whichever point/spot lights find-shadow-point-lights picks
+   ;; each frame -- see that fn's own comment.
+   point-shadows  [PointShadowMap 3]
+   asset-arena    arena
+
+   ;; GL state cache -- last program bound / texture bound, so
+   ;; ensure-shader-bound and the two draw-*-model functions can skip a
+   ;; glUseProgram/glBindTexture that would just reassert what's already
+   ;; current (true for most consecutive draws through the same shader,
+   ;; e.g. all of a multi-primitive skinned model). 0 is never a real GL
+   ;; object id, so it also works as the "nothing bound yet" sentinel.
+   bound-program u32
+   bound-texture u32
+
+   ;; timing
+   last-tick   u64
+   dt          f32
+   time        f32
+
+   initialized bool])
+
+(fn make-renderer [title string w i32 h i32] Renderer
+  (sdl/init sdl/INIT_VIDEO)
+  (sdl/gl-set-attribute sdl/GLAttr/ContextMajorVersion 3)
+  (sdl/gl-set-attribute sdl/GLAttr/ContextMinorVersion 3)
+  (sdl/gl-set-attribute sdl/GLAttr/ContextProfileMask (cast i32 sdl/GL_CONTEXT_PROFILE_CORE))
+  (sdl/gl-set-attribute sdl/GLAttr/Doublebuffer 1)
+  ;; The 2D demo next door never asks for one; a depth buffer is the whole
+  ;; difference between "some quads" and a scene you can walk around.
+  (sdl/gl-set-attribute sdl/GLAttr/DepthSize 24)
+
+  (let [window (sdl/create-window
+                 (cstring title) w h
+                 (cast u64 (bit-or sdl/WINDOW_OPENGL sdl/WINDOW_RESIZABLE)))
+        context (sdl/gl-create-context window)
+        asset-arena (create)]
+    (when (not window)
+      (println "make-renderer: could not create a window")
+      (return (zero Renderer)))
+    (sdl/gl-make-current window context)
+    (sdl/gl-set-swap-interval 1) ; vsync
+    (when (not (gl/glad-load))
+      (println "make-renderer: glad failed to load the GL function pointers")
+      (return (zero Renderer)))
+
+    (handle-pool-init Mesh renderer-max-meshes asset-arena)
+    (handle-pool-init SkinnedMesh renderer-max-meshes asset-arena)
+
+    (let [shader (make-shader vert-src frag-src)
+          skinned-shader (make-shader skinned-vert-src frag-src)
+          ui-shader (make-shader ui-vert-src ui-frag-src)
+          billboard-shader (make-shader billboard-vert-src billboard-frag-src)
+          sky-shader (make-shader sky-vert-src sky-frag-src)
+          shadow (make-shadow-map shadow-map-size)]
+      (when (not (. shader valid))
+        (println "make-renderer: could not build the lit shader")
+        (return (zero Renderer)))
+      (when (not (. skinned-shader valid))
+        (println "make-renderer: could not build the skinned shader")
+        (destroy-shader (addr shader))
+        (return (zero Renderer)))
+      (when (not (. ui-shader valid))
+        (println "make-renderer: could not build the UI shader")
+        (destroy-shader (addr shader))
+        (destroy-shader (addr skinned-shader))
+        (return (zero Renderer)))
+      (when (not (. billboard-shader valid))
+        (println "make-renderer: could not build the billboard shader")
+        (destroy-shader (addr shader))
+        (destroy-shader (addr skinned-shader))
+        (destroy-shader (addr ui-shader))
+        (return (zero Renderer)))
+      (when (not (. sky-shader valid))
+        (println "make-renderer: could not build the sky shader")
+        (destroy-shader (addr shader))
+        (destroy-shader (addr skinned-shader))
+        (destroy-shader (addr ui-shader))
+        (destroy-shader (addr billboard-shader))
+        (return (zero Renderer)))
+      (when (not (. shadow valid))
+        (println "make-renderer: could not build the shadow map")
+        (destroy-shader (addr shader))
+        (destroy-shader (addr skinned-shader))
+        (destroy-shader (addr ui-shader))
+        (destroy-shader (addr billboard-shader))
+        (destroy-shader (addr sky-shader))
+        (return (zero Renderer)))
+
+      ;; light.3b's max-point-shadows (3) independent cubemap shadow
+      ;; maps -- built as a fixed-size batch here rather than one at a
+      ;; time elsewhere, same "always all 3 exist, find-shadow-point-
+      ;; lights picks which ones are USED each frame" shape Renderer.
+      ;; point-shadows itself has.
+      (var point-shadows [PointShadowMap 3])
+      (var point-shadows-ok bool true)
+      (for [i 0 3]
+        (let [ps (make-point-shadow-map point-shadow-map-size)]
+          (set (nth point-shadows i) ps)
+          (when (not (. ps valid)) (set point-shadows-ok false))))
+      (when (not point-shadows-ok)
+        (println "make-renderer: could not build the point-shadow map(s)")
+        (destroy-shader (addr shader))
+        (destroy-shader (addr skinned-shader))
+        (destroy-shader (addr ui-shader))
+        (destroy-shader (addr billboard-shader))
+        (destroy-shader (addr sky-shader))
+        (destroy-shadow-map (addr shadow))
+        (for [i 0 3] (destroy-point-shadow-map (addr (nth point-shadows i))))
+        (return (zero Renderer)))
+
+      (gl/enable gl/DEPTH_TEST)
+      (gl/depth-func gl/LESS)
+      (gl/enable gl/CULL_FACE)
+      (gl/cull-face gl/BACK)
+      ;; make-box-mesh winds its triangles counter-clockwise as seen from
+      ;; outside, and math.3b's view/projection pair is plain OpenGL
+      ;; right-handed, so that survives to the rasterizer as-is.
+      (gl/front-face gl/CCW)
+
+      ;; The persistent quad VAO/VBO draw-ui-quad reuses every call --
+      ;; sized for exactly 6 UIVertex (2 triangles), `nil` initial data
+      ;; since every draw-ui-quad call fills it fresh via gl/buffer-sub-
+      ;; data before drawing. Same attribute-pointer setup style
+      ;; mesh.3b's make-mesh already uses, just DYNAMIC_DRAW instead of
+      ;; STATIC_DRAW (this buffer's whole point is being rewritten
+      ;; constantly, unlike a Mesh's).
+      (var ui-quad-vao u32 0u32)
+      (var ui-quad-vbo u32 0u32)
+      (gl/gen-vertex-arrays 1 (addr ui-quad-vao))
+      (gl/gen-buffers 1 (addr ui-quad-vbo))
+      (gl/bind-vertex-array ui-quad-vao)
+      (gl/bind-buffer gl/ARRAY_BUFFER ui-quad-vbo)
+      (gl/buffer-data gl/ARRAY_BUFFER (cast i64 (* 6u64 (sizeof UIVertex))) (cast any nil) gl/DYNAMIC_DRAW)
+      (gl/enable-vertex-attrib-array 0u32)
+      (gl/vertex-attrib-pointer
+        0u32 2i32 gl/FLOAT false (cast i32 (sizeof UIVertex)) (cast any (member-offset UIVertex pos)))
+      (gl/enable-vertex-attrib-array 1u32)
+      (gl/vertex-attrib-pointer
+        1u32 2i32 gl/FLOAT false (cast i32 (sizeof UIVertex)) (cast any (member-offset UIVertex uv)))
+      (gl/bind-vertex-array 0u32)
+
+      ;; billboard-vao/-vbo's local quad, -0.5..0.5 both axes, UV 0..1 --
+      ;; STATIC_DRAW and filled ONCE here (unlike ui-quad-vbo above),
+      ;; since draw-billboard never needs to change this shape, only the
+      ;; per-draw uniforms that place/scale/face it (see billboard-vert-
+      ;; src's own comment).
+      (var billboard-verts [UIVertex 6])
+      (set (nth billboard-verts 0u32) (UIVertex (vec2 -0.5 -0.5) (vec2 0.0 0.0)))
+      (set (nth billboard-verts 1u32) (UIVertex (vec2  0.5 -0.5) (vec2 1.0 0.0)))
+      (set (nth billboard-verts 2u32) (UIVertex (vec2  0.5  0.5) (vec2 1.0 1.0)))
+      (set (nth billboard-verts 3u32) (UIVertex (vec2 -0.5 -0.5) (vec2 0.0 0.0)))
+      (set (nth billboard-verts 4u32) (UIVertex (vec2  0.5  0.5) (vec2 1.0 1.0)))
+      (set (nth billboard-verts 5u32) (UIVertex (vec2 -0.5  0.5) (vec2 0.0 1.0)))
+
+      (var billboard-vao u32 0u32)
+      (var billboard-vbo u32 0u32)
+      (gl/gen-vertex-arrays 1 (addr billboard-vao))
+      (gl/gen-buffers 1 (addr billboard-vbo))
+      (gl/bind-vertex-array billboard-vao)
+      (gl/bind-buffer gl/ARRAY_BUFFER billboard-vbo)
+      (gl/buffer-data gl/ARRAY_BUFFER
+        (cast i64 (* 6u64 (sizeof UIVertex))) (cast any (addr billboard-verts)) gl/STATIC_DRAW)
+      (gl/enable-vertex-attrib-array 0u32)
+      (gl/vertex-attrib-pointer
+        0u32 2i32 gl/FLOAT false (cast i32 (sizeof UIVertex)) (cast any (member-offset UIVertex pos)))
+      (gl/enable-vertex-attrib-array 1u32)
+      (gl/vertex-attrib-pointer
+        1u32 2i32 gl/FLOAT false (cast i32 (sizeof UIVertex)) (cast any (member-offset UIVertex uv)))
+      (gl/bind-vertex-array 0u32)
+
+      ;; sky-vao/-vbo's own quad: the 6 NDC-space (-1..1) corners of the
+      ;; whole viewport, position-only (sky-vert-src declares no a_uv at
+      ;; all, unlike billboard/ui-quad above) -- one attribute, a plain
+      ;; tightly-packed Vec2 array rather than UIVertex's pos+uv pair.
+      (var sky-verts [Vec2 6])
+      (set (nth sky-verts 0u32) (vec2 -1.0 -1.0))
+      (set (nth sky-verts 1u32) (vec2  1.0 -1.0))
+      (set (nth sky-verts 2u32) (vec2  1.0  1.0))
+      (set (nth sky-verts 3u32) (vec2 -1.0 -1.0))
+      (set (nth sky-verts 4u32) (vec2  1.0  1.0))
+      (set (nth sky-verts 5u32) (vec2 -1.0  1.0))
+
+      (var sky-vao u32 0u32)
+      (var sky-vbo u32 0u32)
+      (gl/gen-vertex-arrays 1 (addr sky-vao))
+      (gl/gen-buffers 1 (addr sky-vbo))
+      (gl/bind-vertex-array sky-vao)
+      (gl/bind-buffer gl/ARRAY_BUFFER sky-vbo)
+      (gl/buffer-data gl/ARRAY_BUFFER
+        (cast i64 (* 6u64 (sizeof Vec2))) (cast any (addr sky-verts)) gl/STATIC_DRAW)
+      (gl/enable-vertex-attrib-array 0u32)
+      (gl/vertex-attrib-pointer 0u32 2i32 gl/FLOAT false (cast i32 (sizeof Vec2)) (cast any nil))
+      (gl/bind-vertex-array 0u32)
+
+      (Renderer {:window window
+                 :gl-ctx context
+                 :width w
+                 :height h
+                 :shader shader
+                 :skinned-shader skinned-shader
+                 :ui-shader ui-shader
+                 :ui-quad-vao ui-quad-vao
+                 :ui-quad-vbo ui-quad-vbo
+                 :billboard-shader billboard-shader
+                 :billboard-vao billboard-vao
+                 :billboard-vbo billboard-vbo
+                 :sky-shader sky-shader
+                 :sky-vao sky-vao
+                 :sky-vbo sky-vbo
+                 :shadow shadow
+                 :point-shadows point-shadows
+                 :asset-arena asset-arena
+                 :bound-program 0u32
+                 :bound-texture 0u32
+                 :last-tick (sdl/get-ticks)
+                 :dt 0.0
+                 :time 0.0
+                 :initialized true}))))
+
+(fn destroy-renderer [renderer Renderer*] void
+  (destroy-shader (& renderer shader))
+  (destroy-shader (& renderer skinned-shader))
+  (destroy-shader (& renderer ui-shader))
+  (gl/delete-vertex-arrays 1 (& renderer ui-quad-vao))
+  (gl/delete-buffers 1 (& renderer ui-quad-vbo))
+  (destroy-shader (& renderer billboard-shader))
+  (gl/delete-vertex-arrays 1 (& renderer billboard-vao))
+  (gl/delete-buffers 1 (& renderer billboard-vbo))
+  (destroy-shader (& renderer sky-shader))
+  (gl/delete-vertex-arrays 1 (& renderer sky-vao))
+  (gl/delete-buffers 1 (& renderer sky-vbo))
+  (destroy-shadow-map (& renderer shadow))
+  (for [i 0 3] (destroy-point-shadow-map (addr (nth (. renderer point-shadows) i))))
+  (destroy (. renderer asset-arena))
+  (sdl/gl-destroy-context (. renderer gl-ctx))
+  (sdl/destroy-window (. renderer window))
+  (sdl/quit)
+  (mem-zero renderer (sizeof Renderer)))
+
+(private
+  ;; glUseProgram is skipped whenever the requested program is already
+  ;; the one bound -- true for most consecutive draws through the same
+  ;; shader (e.g. every primitive of one skinned model in a row). Every
+  ;; place that used to call bind-shader directly (set-frame-uniforms,
+  ;; draw-textured-model, draw-skinned-model) goes through this instead.
+  (fn ensure-shader-bound [renderer Renderer* shader Shader*] void
+    (when (!= (. renderer bound-program) (. shader program))
+      (bind-shader shader)
+      (set (. renderer bound-program) (. shader program))))
+
+  ;; Same idea, for GL_TEXTURE0's bound texture -- both draw-*-model
+  ;; functions call this instead of an unconditional glBindTexture.
+  (fn ensure-texture-bound [renderer Renderer* texture-id u32] void
+    (when (!= (. renderer bound-texture) texture-id)
+      (gl/active-texture gl/TEXTURE0)
+      (gl/bind-texture gl/TEXTURE_2D texture-id)
+      (set (. renderer bound-texture) texture-id)))
+
+  ;; The uniforms that are the same for every draw call THIS frame --
+  ;; camera and lights. Shared by both programs (shader.3b's Shader is
+  ;; just a `program u32`; the two GL programs don't share any uniform
+  ;; STATE, only the values being uploaded), so this runs once per shader
+  ;; per frame rather than being duplicated at each of the two call sites.
+  ;;
+  ;; Split into the actual uniform uploads (below, taking a plain
+  ;; view-proj/eye rather than a Camera* + width/height) and
+  ;; set-frame-uniforms itself (a thin wrapper computing those from a
+  ;; real perspective Camera) so editor.3b's 4-pane view can reuse the
+  ;; SAME uploads for an orthographic pane's view-proj/eye too, via the
+  ;; public viewport-frame-uniforms below -- neither this fn's signature
+  ;; nor begin-frame's own behavior changes for existing (Play-mode)
+  ;; callers.
+  (fn set-frame-uniforms-raw
+    [renderer Renderer* shader Shader* view-proj Mat4 eye Vec3
+     lights Lights* light-space Mat4 picks ShadowPicks] void
+    (let [upload (flatten-lights lights)
+          {sun ambient} (deref lights)]
+      (ensure-shader-bound renderer shader)
+      (set-mat4 shader (cstring "u_view_proj") view-proj)
+      (set-vec3 shader (cstring "u_camera_pos") eye)
+      (set-vec3 shader (cstring "u_ambient") ambient)
+      (set-vec3 shader (cstring "u_sun_dir") (. sun dir))
+      ;; A disabled sun (light.3b's own `enabled`, editor.3b's `V`)
+      ;; contributes zero radiance -- same "exclude, don't hide" effect
+      ;; flatten-lights gets for a disabled point light, just achieved by
+      ;; zeroing the uniform instead of skipping an upload slot (there's
+      ;; only ever one sun, no array to compact).
+      (set-vec3 shader (cstring "u_sun_color")
+        (if (. sun enabled) (scale-vec3 (. sun color) (. sun intensity)) (vec3 0.0 0.0 0.0)))
+      (set-i32  shader (cstring "u_light_count") (cast i32 (. upload count)))
+      (set-vec3-array shader (cstring "u_light_pos")    (. upload pos)    (. upload count))
+      (set-vec3-array shader (cstring "u_light_color")  (. upload color)  (. upload count))
+      (set-f32-array  shader (cstring "u_light_radius") (. upload radius) (. upload count))
+      (set-vec3-array shader (cstring "u_light_dir")       (. upload dir)            (. upload count))
+      (set-f32-array  shader (cstring "u_light_cos_inner") (. upload cone-cos-inner) (. upload count))
+      (set-f32-array  shader (cstring "u_light_cos_outer") (. upload cone-cos-outer) (. upload count))
+
+      (set-mat4 shader (cstring "u_light_space") light-space)
+      (set-f32  shader (cstring "u_shadow_texel") (/ 1.0 (cast f32 (. renderer shadow size))))
+      (set-i32  shader (cstring "u_shadow_enabled") (if (. sun cast-shadow) 1 0))
+      (set-i32  shader (cstring "u_shadow_map") 1)
+      (gl/active-texture gl/TEXTURE1)
+      (gl/bind-texture gl/TEXTURE_2D (. renderer shadow depth-texture))
+
+      ;; light.3b's find-shadow-point-lights picks up to 3 shadow-casting
+      ;; point/spot lights per frame -- `picks.items[s].index` is that
+      ;; slot's own light's index in `u_light_pos`/etc above (see its own
+      ;; comment), matched against inside the frag shader's point-light
+      ;; loop. TEXTURE2/3/4 (not 0/1, already u_base_color/u_shadow_map).
+      ;; Explicit per-slot uniform names (not a loop building a name
+      ;; string) to match the frag shader's own 3 discrete samplerCube
+      ;; uniforms -- see that file's own comment for why.
+      (set-i32 shader (cstring "u_point_shadow_enabled0") (if (>= (. picks count) 1) 1 0))
+      (set-vec3 shader (cstring "u_point_shadow_light_pos0") (. (nth (. picks items) 0) pos))
+      (set-i32 shader (cstring "u_point_shadow_light_index0") (. (nth (. picks items) 0) index))
+      (set-i32 shader (cstring "u_point_shadow_map0") 2)
+      (gl/active-texture gl/TEXTURE2)
+      (gl/bind-texture gl/TEXTURE_CUBE_MAP (. (nth (. renderer point-shadows) 0) cube))
+
+      (set-i32 shader (cstring "u_point_shadow_enabled1") (if (>= (. picks count) 2) 1 0))
+      (set-vec3 shader (cstring "u_point_shadow_light_pos1") (. (nth (. picks items) 1) pos))
+      (set-i32 shader (cstring "u_point_shadow_light_index1") (. (nth (. picks items) 1) index))
+      (set-i32 shader (cstring "u_point_shadow_map1") 3)
+      (gl/active-texture gl/TEXTURE3)
+      (gl/bind-texture gl/TEXTURE_CUBE_MAP (. (nth (. renderer point-shadows) 1) cube))
+
+      (set-i32 shader (cstring "u_point_shadow_enabled2") (if (>= (. picks count) 3) 1 0))
+      (set-vec3 shader (cstring "u_point_shadow_light_pos2") (. (nth (. picks items) 2) pos))
+      (set-i32 shader (cstring "u_point_shadow_light_index2") (. (nth (. picks items) 2) index))
+      (set-i32 shader (cstring "u_point_shadow_map2") 4)
+      (gl/active-texture gl/TEXTURE4)
+      (gl/bind-texture gl/TEXTURE_CUBE_MAP (. (nth (. renderer point-shadows) 2) cube))))
+
+  (fn set-frame-uniforms
+    [renderer Renderer* shader Shader* camera Camera* width i32 height i32
+     lights Lights* light-space Mat4 picks ShadowPicks] void
+    (set-frame-uniforms-raw renderer shader
+      (mul-mat4 (camera-proj camera width height) (camera-view camera)) (camera-eye camera)
+      lights light-space picks)))
+
+;; Advances the clock, resizes to whatever the window is now, and clears
+;; the WHOLE window -- split out of begin-frame (which still does exactly
+;; this, unchanged, as its own first step) so editor.3b's 4-pane view can
+;; clear once for the whole window, then draw each pane into its own
+;; gl/viewport sub-rect afterward (a viewport-restricted draw never
+;; touches pixels outside its own rect, so one whole-window clear up front
+;; is enough -- no per-pane clear needed).
+(fn begin-frame-clear [renderer Renderer* clear-color Vec3] void
+  (let [now (sdl/get-ticks)]
+    (set (. renderer dt) (clamp (* (cast f32 (- now (. renderer last-tick))) 0.001) 0.0 0.1))
+    (set (. renderer last-tick) now)
+    (+= (. renderer time) (. renderer dt)))
+
+  (sdl/get-window-size-in-pixels (. renderer window) (& renderer width) (& renderer height))
+  (gl/viewport 0 0 (. renderer width) (. renderer height))
+  (gl/clear-color (. clear-color x) (. clear-color y) (. clear-color z) 1.0)
+  (gl/clear (bit-or gl/COLOR_BUFFER_BIT gl/DEPTH_BUFFER_BIT)))
+
+;; Uploads everything that's constant for the whole frame: the camera,
+;; every light, and `light-space` (shadow.3b's shadow-light-space-matrix
+;; for this frame's sun direction -- computed by the caller, typically via
+;; scene.3b's scene-light-space-matrix, AFTER the shadow pass itself has
+;; already run through begin-shadow-pass/end-shadow-pass). Per-draw state
+;; is draw-model's job. Single-viewport (Play-mode) entry point --
+;; editor.3b's 4-pane view calls viewport-frame-uniforms per pane instead.
+(fn begin-frame
+  [renderer Renderer* camera Camera* lights Lights* clear-color Vec3 light-space Mat4
+   picks ShadowPicks] void
+  (begin-frame-clear renderer clear-color)
+  (set-frame-uniforms renderer (& renderer shader) camera (. renderer width) (. renderer height) lights light-space picks)
+  (set-frame-uniforms renderer (& renderer skinned-shader) camera (. renderer width) (. renderer height) lights light-space picks))
+
+;; Per-pane counterpart to begin-frame, for editor.3b's 4-pane view --
+;; restricts drawing to the sub-rect (x,y,w,h) (GL viewport convention:
+;; origin bottom-left, Y-up -- see editor.3b's pane-viewport-rect for the
+;; screen-space-quadrant-to-this-rect mapping) and uploads a CALLER-
+;; supplied view-proj/eye instead of deriving them from a Camera* --
+;; works identically for the perspective pane (view-proj/eye computed the
+;; same way begin-frame's own set-frame-uniforms call does) and an
+;; orthographic one (camera.3b's ortho-view-matrix/ortho-proj-matrix,
+;; eye = whatever synthetic eye ortho-view-matrix used, only meaningful
+;; here for the shader's specular view-vector). Caller must have already
+;; cleared the whole window ONCE this frame (begin-frame-clear) before
+;; the first pane -- this never clears anything itself.
+(fn viewport-frame-uniforms
+  [renderer Renderer* x i32 y i32 w i32 h i32 view-proj Mat4 eye Vec3
+   lights Lights* light-space Mat4 picks ShadowPicks] void
+  (gl/viewport x y w h)
+  (set-frame-uniforms-raw renderer (& renderer shader) view-proj eye lights light-space picks)
+  (set-frame-uniforms-raw renderer (& renderer skinned-shader) view-proj eye lights light-space picks))
+
+;; Points rendering at the shadow map's own depth-only FBO/shader pair and
+;; uploads `light-space` (see begin-frame's own comment on where that
+;; comes from) to both of ITS shaders -- call once, then draw the shadow-
+;; casting geometry through draw-model-depth/draw-skinned-model-depth
+;; below, then end-shadow-pass.
+(fn begin-shadow-pass [renderer Renderer* light-space Mat4] void
+  (let [shadow (& renderer shadow)]
+    (gl/bind-framebuffer gl/FRAMEBUFFER (. shadow fbo))
+    (gl/viewport 0 0 (. shadow size) (. shadow size))
+    (gl/clear gl/DEPTH_BUFFER_BIT)
+    ;; Cull FRONT faces instead of back for this pass: it moves the acne-
+    ;; avoidance bias onto a mesh's OWN back faces (the ones already
+    ;; facing away from the light) instead of a constant per-fragment
+    ;; depth offset, so thin objects don't "peter-pan" -- float their
+    ;; shadow off their own base.
+    (gl/cull-face gl/FRONT)
+    (ensure-shader-bound renderer (& shadow shader))
+    (set-mat4 (& shadow shader) (cstring "u_light_space") light-space)
+    (ensure-shader-bound renderer (& shadow skinned-shader))
+    (set-mat4 (& shadow skinned-shader) (cstring "u_light_space") light-space)))
+
+(fn end-shadow-pass [renderer Renderer*] void
+  (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+  (gl/cull-face gl/BACK)
+  (gl/viewport 0 0 (. renderer width) (. renderer height)))
+
+(fn draw-model-depth [renderer Renderer* mesh Mesh^ model Mat4] void
+  (let [shader (& renderer shadow shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_model") model)
+    (draw-mesh mesh)))
+
+;; Same shape as bind-skinned-pose, through the shadow map's own skinned
+;; depth shader -- call before draw-skinned-model-depth for each skinned
+;; model-instance, same as bind-skinned-pose/draw-skinned-model.
+(fn bind-skinned-pose-depth [renderer Renderer* joint-matrices (const Mat4*) joint-count u32] void
+  (let [shader (& renderer shadow skinned-shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4-array shader (cstring "u_joints") joint-matrices joint-count)))
+
+(fn draw-skinned-model-depth [renderer Renderer* mesh SkinnedMesh^ model Mat4] void
+  (let [shader (& renderer shadow skinned-shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_model") model)
+    (draw-skinned-mesh mesh)))
+
+;; ~~ Point-light shadow pass -- shadow.3b's own header comment for
+;; PointShadowMap explains the distance-cubemap approach; this is that
+;; struct's render-side counterpart to begin-shadow-pass/end-shadow-pass/
+;; draw-*-model-depth above, just called 6 TIMES per frame it runs at all
+;; (once per face, each with its own view-proj AND its own cubemap face
+;; bound as the color attachment) instead of once.
+
+;; Points rendering at face `face` of `light-pos`'s shadow cubemap and
+;; uploads that face's view-proj/`light-pos` to both of the point-shadow
+;; map's own shaders -- call once per face (0..5), draw the shadow-
+;; casting geometry through draw-model-point-shadow/draw-skinned-model-
+;; point-shadow below, no matching "end" until every face is done (see
+;; end-point-shadow-pass). Returns the face's view-proj purely as a
+;; convenience -- today's only caller (main.3b) doesn't actually need it
+;; (unlike the sun's light-space, nothing outside this pass samples a
+;; per-face matrix), but there's no reason to make it hard to get at.
+(fn begin-point-shadow-face [renderer Renderer* slot i32 light-pos Vec3 face i32] Mat4
+  (let [ps (addr (nth (. renderer point-shadows) slot))
+        view-proj (point-shadow-face-view-proj light-pos face)]
+    (gl/bind-framebuffer gl/FRAMEBUFFER (. ps fbo))
+    (gl/framebuffer-texture2d gl/FRAMEBUFFER gl/COLOR_ATTACHMENT0
+      (+ gl/TEXTURE_CUBE_MAP_POSITIVE_X (cast u32 face)) (. ps cube) 0)
+    (gl/viewport 0 0 (. ps size) (. ps size))
+    ;; point-shadow-far (shadow.3b) in the cleared color channel -- any
+    ;; fragment the depth pass never touches (empty sky within this face's
+    ;; 90-degree frustum) then reads back as "as far as this cubemap ever
+    ;; represents," i.e. never closer than a real surface could be, i.e.
+    ;; never shadowing anything. Same fallback role CLAMP_TO_BORDER's
+    ;; all-white texel plays for the sun's own map (shadow.3b's own
+    ;; comment), just achieved via the clear color instead of a border.
+    (gl/clear-color point-shadow-far 0.0 0.0 1.0)
+    (gl/clear (bit-or gl/COLOR_BUFFER_BIT gl/DEPTH_BUFFER_BIT))
+    ;; Same front-face-culling acne fix begin-shadow-pass's own comment
+    ;; explains -- end-point-shadow-pass restores BACK once every face is
+    ;; done, not per-face (redundant work for the same six-times-a-frame
+    ;; state that's about to be set right back to FRONT on the very next
+    ;; face anyway).
+    (gl/cull-face gl/FRONT)
+    (ensure-shader-bound renderer (& ps shader))
+    (set-mat4 (& ps shader) (cstring "u_light_space") view-proj)
+    (set-vec3 (& ps shader) (cstring "u_light_pos") light-pos)
+    (ensure-shader-bound renderer (& ps skinned-shader))
+    (set-mat4 (& ps skinned-shader) (cstring "u_light_space") view-proj)
+    (set-vec3 (& ps skinned-shader) (cstring "u_light_pos") light-pos)
+    view-proj))
+
+(fn end-point-shadow-pass [renderer Renderer*] void
+  (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+  (gl/cull-face gl/BACK)
+  (gl/viewport 0 0 (. renderer width) (. renderer height)))
+
+(fn draw-model-point-shadow [renderer Renderer* slot i32 mesh Mesh^ model Mat4] void
+  (let [shader (& (nth (. renderer point-shadows) slot) shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_model") model)
+    (draw-mesh mesh)))
+
+;; Same shape as bind-skinned-pose-depth, through the point-shadow map's
+;; own skinned shader -- call before draw-skinned-model-point-shadow for
+;; each skinned model-instance, EVERY face (the joint palette doesn't
+;; depend on which face is being rendered, but ensure-shader-bound only
+;; skips the glUseProgram, never the uniform upload, and begin-point-
+;; shadow-face rebinds shader/skinned-shader every face anyway).
+(fn bind-skinned-pose-point-shadow [renderer Renderer* slot i32 joint-matrices (const Mat4*) joint-count u32] void
+  (let [shader (& (nth (. renderer point-shadows) slot) skinned-shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4-array shader (cstring "u_joints") joint-matrices joint-count)))
+
+(fn draw-skinned-model-point-shadow [renderer Renderer* slot i32 mesh SkinnedMesh^ model Mat4] void
+  (let [shader (& (nth (. renderer point-shadows) slot) skinned-shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_model") model)
+    (draw-skinned-mesh mesh)))
+
+;; A world-space quad, `size` (world units, width/height) centred at
+;; `center`, always facing the viewer -- `cam-right`/`cam-up` are THAT
+;; viewer's own camera basis (camera.3b's camera-basis for Play mode,
+;; editor.3b's pane-camera-basis per pane in edit mode), and `view-proj`
+;; likewise whichever view is currently being drawn. Caller supplies all
+;; three explicitly rather than this fn reading them off `scene.camera`
+;; itself, since edit mode's 4-pane view has FOUR different ones live in
+;; a single frame -- see scene.3b's draw-scene-billboards, called once
+;; per pane/per Play-mode frame with whatever's currently active.
+;; `texture-id` 0 means an untextured flat `color` quad, same convention
+;; draw-textured-model/draw-ui-quad already use.
+(fn draw-billboard
+  [renderer Renderer* center Vec3 size Vec2 color Vec4 texture-id u32
+   view-proj Mat4 cam-right Vec3 cam-up Vec3] void
+  (let [shader (& renderer billboard-shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_view_proj") view-proj)
+    (set-vec3 shader (cstring "u_center") center)
+    (set-vec3 shader (cstring "u_right") cam-right)
+    (set-vec3 shader (cstring "u_up") cam-up)
+    (set-vec2 shader (cstring "u_size") size)
+    (set-vec4 shader (cstring "u_color") color)
+    (set-i32  shader (cstring "u_has_tex") (if texture-id 1 0))
+    (when texture-id
+      (ensure-texture-bound renderer texture-id)
+      (set-i32 shader (cstring "u_tex") 0))
+    (gl/bind-vertex-array (. renderer billboard-vao))
+    (gl/draw-arrays gl/TRIANGLES 0 6)
+    (gl/bind-vertex-array 0u32)))
+
+;; Fills the WHOLE current viewport with sky-frag-src's gradient, reading
+;; `scene.camera`/`scene.lights.sun` directly (unlike draw-billboard,
+;; which takes its view explicitly) -- correct because this is only ever
+;; called for a view that genuinely IS scene.camera: Play mode's single
+;; view, or edit mode's Perspective pane specifically (main.3b never
+;; calls this for the 3 orthographic panes, see sky-vert-src's own
+;; comment for why one wouldn't make sense there anyway). `width`/
+;; `height` are the PANE's own pixel size (matches camera-proj's own
+;; aspect-ratio parameter), not necessarily the whole window.
+;;
+;; Depth test is OFF for this one draw and restored after -- call this
+;; FIRST, right after the frame's clear and before anything else draws,
+;; so every pixel starts with a sky color that real (depth-tested)
+;; geometry then naturally paints over. Depth WRITE was never a concern
+;; either way (sky-vert-src's own gl_Position always has z=0, which
+;; WOULD wrongly occlude everything drawn after it if depth test/write
+;; were left on -- disabling depth test here sidesteps that entirely
+;; rather than needing a separate "push to the far plane" trick).
+(fn draw-sky [renderer Renderer* scene Scene* width i32 height i32] void
+  (let [shader (& renderer sky-shader)
+        [cam-forward cam-right cam-up] (camera-basis (& scene camera))
+        aspect (if (> height 0) (/ (cast f32 width) (cast f32 height)) 1.0)
+        tan-half-fov (tan (* 0.5 (. scene camera fov)))
+        sun (. scene lights sun)
+        cubemap (. scene sky-cubemap)]
+    (gl/disable gl/DEPTH_TEST)
+    (ensure-shader-bound renderer shader)
+    (set-vec3 shader (cstring "u_cam_forward") cam-forward)
+    (set-vec3 shader (cstring "u_cam_right") cam-right)
+    (set-vec3 shader (cstring "u_cam_up") cam-up)
+    (set-f32  shader (cstring "u_tan_half_fov") tan-half-fov)
+    (set-f32  shader (cstring "u_aspect") aspect)
+    (set-i32  shader (cstring "u_use_cubemap") (if cubemap 1 0))
+    (if cubemap
+      (do
+        (set-i32 shader (cstring "u_sky_cubemap") 3) ; TEXTURE3 -- 0/1/2 already base-color/shadow/point-shadow
+        (gl/active-texture gl/TEXTURE3)
+        (gl/bind-texture gl/TEXTURE_CUBE_MAP cubemap))
+      (do
+        (set-vec3 shader (cstring "u_sky_horizon") sky-horizon-color)
+        (set-vec3 shader (cstring "u_sky_zenith") sky-zenith-color)
+        (set-vec3 shader (cstring "u_sun_dir") (. sun dir))
+        (set-vec3 shader (cstring "u_sun_color") (. sun color))
+        (set-i32  shader (cstring "u_sun_visible") (if (. sun enabled) 1 0))))
+    (gl/bind-vertex-array (. renderer sky-vao))
+    (gl/draw-arrays gl/TRIANGLES 0 6)
+    (gl/bind-vertex-array 0u32)
+    (gl/enable gl/DEPTH_TEST)))
+
+;; Bakes sky-frag-src's own gradient+sun-glow formula into a REAL cubemap
+;; texture, one real GPU render per face into a temporary FBO -- reuses
+;; renderer.sky-shader/sky-vao (the SAME program/quad the live on-screen
+;; sky already draws with) rather than duplicating that math anywhere,
+;; just fed a synthetic 90-degree-FOV "camera" facing each face's own
+;; direction (math.3b's cubemap-face-dir/cubemap-face-up) instead of the
+;; real scene camera's basis/FOV -- tan(45 deg) is exactly 1.0, so
+;; u_tan_half_fov/u_aspect are both just 1.0 here, no trig needed. `sun-*`
+;; are passed in explicitly (not read from a live Scene) so a caller can
+;; bake a snapshot of the CURRENT sun without the result silently
+;; changing later if the sun does -- unlike the live u_use_cubemap=0
+;; path, a baked cubemap never re-tracks anything after this call
+;; returns. Returns 0 if the shader/framebuffer setup fails.
+(fn make-sky-gradient-cubemap
+  [renderer Renderer* horizon Vec3 zenith Vec3 sun-dir Vec3 sun-color Vec3 sun-visible bool
+   size i32] u32
+  (when (<= size 0) (return 0u32))
+  (let [cubemap
+        (scratch [t]
+          (let [tex-ids (gl/gen-textures t 1)
+                id (deref tex-ids)]
+            (gl/bind-texture gl/TEXTURE_CUBE_MAP id)
+            (for [face 0u32 6u32]
+              (gl/tex-image2d (+ gl/TEXTURE_CUBE_MAP_POSITIVE_X face) 0 (cast i32 gl/RGBA8)
+                size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any nil)))
+            (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+            (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+            (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_EDGE))
+            (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_EDGE))
+            (gl/tex-parameteri gl/TEXTURE_CUBE_MAP gl/TEXTURE_WRAP_R (cast i32 gl/CLAMP_TO_EDGE))
+            (gl/bind-texture gl/TEXTURE_CUBE_MAP 0u32)
+            id))]
+
+    (var fbo u32 0u32)
+    (gl/gen-framebuffers 1 (addr fbo))
+    (gl/bind-framebuffer gl/FRAMEBUFFER fbo)
+    (gl/framebuffer-texture2d gl/FRAMEBUFFER gl/COLOR_ATTACHMENT0 gl/TEXTURE_CUBE_MAP_POSITIVE_X cubemap 0)
+    (let [status (gl/check-framebuffer-status gl/FRAMEBUFFER)]
+      (when (!= status gl/FRAMEBUFFER_COMPLETE)
+        (println "make-sky-gradient-cubemap: framebuffer incomplete (status {})" status)
+        (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+        (gl/delete-framebuffers 1 (addr fbo))
+        (gl/delete-textures 1 (addr cubemap))
+        (return 0u32)))
+
+    (gl/viewport 0 0 size size)
+    (gl/disable gl/DEPTH_TEST)
+    (let [shader (& renderer sky-shader)]
+      (ensure-shader-bound renderer shader)
+      (set-i32  shader (cstring "u_use_cubemap") 0)
+      (set-f32  shader (cstring "u_tan_half_fov") 1.0)
+      (set-f32  shader (cstring "u_aspect") 1.0)
+      (set-vec3 shader (cstring "u_sky_horizon") horizon)
+      (set-vec3 shader (cstring "u_sky_zenith") zenith)
+      (set-vec3 shader (cstring "u_sun_dir") sun-dir)
+      (set-vec3 shader (cstring "u_sun_color") sun-color)
+      (set-i32  shader (cstring "u_sun_visible") (if sun-visible 1 0))
+
+      (for [face 0u32 6u32]
+        (let [forward (cubemap-face-dir (cast i32 face))
+              up-hint (cubemap-face-up (cast i32 face))
+              right (normalize-vec3 (cross-vec3 forward up-hint))
+              up (cross-vec3 right forward)]
+          (gl/framebuffer-texture2d gl/FRAMEBUFFER gl/COLOR_ATTACHMENT0
+            (+ gl/TEXTURE_CUBE_MAP_POSITIVE_X face) cubemap 0)
+          (set-vec3 shader (cstring "u_cam_forward") forward)
+          (set-vec3 shader (cstring "u_cam_right") right)
+          (set-vec3 shader (cstring "u_cam_up") up)
+          (gl/bind-vertex-array (. renderer sky-vao))
+          (gl/draw-arrays gl/TRIANGLES 0 6)
+          (gl/bind-vertex-array 0u32))))
+
+    (gl/enable gl/DEPTH_TEST)
+    (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+    (gl/viewport 0 0 (. renderer width) (. renderer height))
+    (gl/delete-framebuffers 1 (addr fbo))
+    cubemap))
+
+;; ~~ Model-browser thumbnails (editor.3b's model-browser panel) -- a real
+;; render-to-texture snapshot of `model`, auto-framed from its own raw
+;; (untransformed) bounds via a bounding-sphere fit: centre the eye on the
+;; bounds' own midpoint, pull it back along a fixed 3/4-elevation
+;; direction until that sphere exactly fills thumbnail-fov, times
+;; thumbnail-margin so the silhouette doesn't touch the frame edge. A
+;; thumbnail only needs to FRAME the model, not place it in the world the
+;; way add-prop's own placement does -- add-prop deliberately does NOT
+;; trust a model's raw bounds for that (glTF authoring units vary too
+;; wildly to guess a sane WORLD size from them, confirmed live -- see
+;; [[game3d-model-browser-placement]] project memory), but framing a shot
+;; is scale-invariant by construction (the fit itself cancels out
+;; whatever units the file happens to use), so the same raw bounds that
+;; approach rejected are exactly right here.
+;;
+;; One real GPU render, same offscreen-FBO shape make-sky-gradient-cubemap
+;; above already uses -- a plain 2D colour texture plus a real depth
+;; renderbuffer this time (same pairing make-point-shadow-map uses, see
+;; shadow.3b), since actual 3D geometry needs depth testing unlike a
+;; full-screen gradient quad. Renders through viewport-frame-uniforms +
+;; draw-model-instance, the SAME path every on-screen model already goes
+;; through, just pointed at this FBO with a throwaway single-sun Lights
+;; and shadows fully disabled (cast-shadow false, an empty ShadowPicks) --
+;; an icon this size has nothing a shadow would meaningfully add, and
+;; set-frame-uniforms-raw's shadow-texture binds are safe no-ops either
+;; way (always bind a real, already-valid GL object, just multiplied to
+;; zero darkening -- see that fn's own comment). Bind pose only
+;; (skeleton-copy-bind-pose + skeleton-pose, scratch-arena scoped) -- a
+;; thumbnail is one static frame, no clip sampled, matching pose-bind's
+;; own "do nothing extra" role elsewhere. Cleared to alpha 0 (not the
+;; panel's own opaque background colour) so ui-image's SRC_ALPHA blending
+;; (begin-ui) composites the model's real silhouette over whatever the
+;; panel draws underneath, rather than every icon being a hard square.
+;; Returns 0 on any failure (invalid model, incomplete framebuffer), same
+;; "0 = fall back to untextured" convention every other texture-id in
+;; this project already uses.
+(val thumbnail-fov       f32 (radians 45.0))
+(val thumbnail-eye-dir   Vec3 (Vec3 {:x 0.55 :y 0.45 :z 0.7})) ; not pre-normalized -- make-model-thumbnail does that
+(val thumbnail-margin    f32 1.15) ; >1 so the silhouette doesn't touch the frame edge
+
+(fn make-model-thumbnail [renderer Renderer* model Model* size i32] u32
+  (when (or (<= size 0) (not (. model valid))) (return 0u32))
+  (let [tex
+        (scratch [t]
+          (let [tex-ids (gl/gen-textures t 1)
+                id (deref tex-ids)]
+            (gl/bind-texture gl/TEXTURE_2D id)
+            (gl/tex-image2d gl/TEXTURE_2D 0 (cast i32 gl/RGBA8) size size 0 gl/RGBA gl/UNSIGNED_BYTE (cast any nil))
+            (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MIN_FILTER (cast i32 gl/LINEAR))
+            (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_MAG_FILTER (cast i32 gl/LINEAR))
+            (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_S (cast i32 gl/CLAMP_TO_EDGE))
+            (gl/tex-parameteri gl/TEXTURE_2D gl/TEXTURE_WRAP_T (cast i32 gl/CLAMP_TO_EDGE))
+            (gl/bind-texture gl/TEXTURE_2D 0u32)
+            id))]
+
+    (var depth-rbo u32 0u32)
+    (gl/gen-renderbuffers 1 (addr depth-rbo))
+    (gl/bind-renderbuffer gl/RENDERBUFFER depth-rbo)
+    (gl/renderbuffer-storage gl/RENDERBUFFER gl/DEPTH_COMPONENT24 size size)
+    (gl/bind-renderbuffer gl/RENDERBUFFER 0u32)
+
+    (var fbo u32 0u32)
+    (gl/gen-framebuffers 1 (addr fbo))
+    (gl/bind-framebuffer gl/FRAMEBUFFER fbo)
+    (gl/framebuffer-texture2d gl/FRAMEBUFFER gl/COLOR_ATTACHMENT0 gl/TEXTURE_2D tex 0)
+    (gl/framebuffer-renderbuffer gl/FRAMEBUFFER gl/DEPTH_ATTACHMENT gl/RENDERBUFFER depth-rbo)
+    (let [status (gl/check-framebuffer-status gl/FRAMEBUFFER)]
+      (when (!= status gl/FRAMEBUFFER_COMPLETE)
+        (println "make-model-thumbnail: framebuffer incomplete (status {})" status)
+        (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+        (gl/delete-framebuffers 1 (addr fbo))
+        (gl/delete-renderbuffers 1 (addr depth-rbo))
+        (gl/delete-textures 1 (addr tex))
+        (return 0u32)))
+
+    (let [center (scale-vec3 (add-vec3 (. model bounds-min) (. model bounds-max)) 0.5)
+          radius (max (* 0.5 (length-vec3 (sub-vec3 (. model bounds-max) (. model bounds-min)))) 0.0001)
+          dist (* thumbnail-margin (/ radius (sin (* 0.5 thumbnail-fov))))
+          eye (add-vec3 center (scale-vec3 (normalize-vec3 thumbnail-eye-dir) dist))
+          view (make-look-at-mat4 eye center (vec3 0.0 1.0 0.0))
+          proj (make-perspective-mat4 thumbnail-fov 1.0 (* dist 0.1) (* dist 3.0))
+          view-proj (mul-mat4 proj view)
+          thumb-lights (Lights
+                         {:ambient (vec3 0.4 0.4 0.42)
+                          :sun (dir-light (normalize-vec3 (vec3 -0.35 1.0 0.5)) (vec3 1.0 0.98 0.94) 1.1 false)
+                          :points (zero [Light 4])
+                          :point-count 0u32})]
+      (gl/viewport 0 0 size size)
+      (gl/clear-color 0.0 0.0 0.0 0.0)
+      (gl/clear (bit-or gl/COLOR_BUFFER_BIT gl/DEPTH_BUFFER_BIT))
+      (viewport-frame-uniforms renderer 0 0 size size view-proj eye
+        (addr thumb-lights) (mat4 1.0) (zero ShadowPicks))
+
+      (scratch [t]
+        (let [joint-count (max (. model skeleton joint-count) 1u32)]
+          (if (. model has-skeleton)
+            (let [local (push t Mat4 joint-count)
+                  out (push t Mat4 joint-count)]
+              (skeleton-copy-bind-pose (& model skeleton) local)
+              (skeleton-pose (& model skeleton) local out)
+              (draw-model-instance renderer model (mat4 1.0) (material (vec3 1.0 1.0 1.0) 32.0 0.1) out joint-count))
+            (draw-model-instance renderer model (mat4 1.0) (material (vec3 1.0 1.0 1.0) 32.0 0.1) nil joint-count)))))
+
+    (gl/bind-framebuffer gl/FRAMEBUFFER 0u32)
+    (gl/viewport 0 0 (. renderer width) (. renderer height))
+    (gl/delete-framebuffers 1 (addr fbo))
+    (gl/delete-renderbuffers 1 (addr depth-rbo))
+    tex))
+
+(fn draw-model [renderer Renderer* mesh Mesh^ model Mat4 mat Material] void
+  (draw-textured-model renderer mesh model mat 0u32))
+
+;; Same as draw-model, plus a base-colour texture. `texture-id` 0 means
+;; untextured, which is GL's own convention for "no texture bound" too.
+(fn draw-textured-model [renderer Renderer* mesh Mesh^ model Mat4 mat Material texture-id u32] void
+  (let [shader (& renderer shader)]
+    ;; glUniform*/glUniformMatrix4fv write into whichever program is
+    ;; CURRENTLY bound, regardless of which program's location was
+    ;; queried -- begin-frame binds shader and then skinned-shader in
+    ;; sequence (to set each one's frame-constant uniforms), so without
+    ;; ensuring the right one's bound here, every uniform below would
+    ;; silently land in whichever of the two programs happened to be
+    ;; bound last. ensure-shader-bound also means this is a no-op
+    ;; glUseProgram-wise when the previous draw already used this shader
+    ;; (true for consecutive static-mesh draws, e.g. the gizmo cubes).
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_model") model)
+    (set-vec3 shader (cstring "u_albedo") (. mat albedo))
+    (set-f32  shader (cstring "u_shininess") (. mat shininess))
+    (set-f32  shader (cstring "u_specular") (. mat specular))
+    (set-vec3 shader (cstring "u_emissive") (. mat emissive))
+    (set-i32  shader (cstring "u_has_base_color") (if texture-id 1 0))
+    (when texture-id
+      (ensure-texture-bound renderer texture-id)
+      (set-i32 shader (cstring "u_base_color") 0))
+    (draw-mesh mesh)))
+
+;; Binds skinned-shader and uploads THIS frame's joint-matrix palette --
+;; once per skinned model-instance, not once per primitive. Call before
+;; looping over a model's primitives (see model.3b's draw-model-instance);
+;; draw-skinned-model below only sets what actually varies PER primitive.
+(fn bind-skinned-pose [renderer Renderer* joint-matrices (const Mat4*) joint-count u32] void
+  (let [shader (& renderer skinned-shader)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4-array shader (cstring "u_joints") joint-matrices joint-count)))
+
+;; Same shape as draw-textured-model, through skinned-shader. Assumes
+;; bind-skinned-pose already ran for this model-instance (u_joints is
+;; already uploaded) -- this only sets what's genuinely per-primitive.
+(fn draw-skinned-model [renderer Renderer* mesh SkinnedMesh^ model Mat4 mat Material texture-id u32] void
+  (let [shader (& renderer skinned-shader)]
+    (ensure-shader-bound renderer shader) ; see draw-textured-model's own comment on why
+    (set-mat4 shader (cstring "u_model") model)
+    (set-vec3 shader (cstring "u_albedo") (. mat albedo))
+    (set-f32  shader (cstring "u_shininess") (. mat shininess))
+    (set-f32  shader (cstring "u_specular") (. mat specular))
+    (set-vec3 shader (cstring "u_emissive") (. mat emissive))
+    (set-i32  shader (cstring "u_has_base_color") (if texture-id 1 0))
+    (when texture-id
+      (ensure-texture-bound renderer texture-id)
+      (set-i32 shader (cstring "u_base_color") 0))
+    (draw-skinned-mesh mesh)))
+
+(fn end-frame [renderer Renderer*] void
+  (sdl/gl-swap-window (. renderer window)))
+
+;; ~~ 2D screen-space overlay pass -- text.3b's own draw-text wraps this,
+;; but it's public so future flat-color UI (menu panels/buttons) can call
+;; draw-ui-quad directly with texture-id 0.
+
+;; Call once before any draw-ui-quad calls this frame (and after every
+;; 3D draw call for the frame is done -- this is always-on-top, drawn
+;; last, same convention editor.3b's draw-editor-gizmo already uses for
+;; its own screen-independent overlay). Sets GL state this pass actually
+;; needs and DIFFERS from the 3D pass's own (no depth test -- screen-
+;; space has no meaningful depth; no face culling -- a UI quad's winding
+;; isn't worth tracking; blending on, for antialiased glyph edges and any
+;; future translucent panel) -- end-ui below restores the 3D pass's own
+;; state so the NEXT frame's 3D draws aren't affected.
+(fn begin-ui [renderer Renderer*] void
+  (gl/disable gl/DEPTH_TEST)
+  (gl/disable gl/CULL_FACE)
+  (gl/enable gl/BLEND)
+  (gl/blend-func gl/SRC_ALPHA gl/ONE_MINUS_SRC_ALPHA)
+  (let [shader (& renderer ui-shader)
+        ;; left=0,right=width,bottom=height,top=0 -- Y-DOWN, matching
+        ;; ordinary screen-pixel coordinates (origin top-left, y grows
+        ;; downward), the convention every draw-ui-quad/text.3b caller
+        ;; below assumes, rather than GL's own Y-up NDC.
+        proj (make-orthographic-mat4
+               0.0 (cast f32 (. renderer width)) (cast f32 (. renderer height)) 0.0 -1.0 1.0)]
+    (ensure-shader-bound renderer shader)
+    (set-mat4 shader (cstring "u_proj") proj)))
+
+;; One quad, (x0,y0)-(x1,y1) in screen pixels (Y-down, see begin-ui),
+;; (u0,v0)-(u1,v1) texture coordinates, tinted by `color` (alpha included
+;; -- lets a caller fade/tint text or a future panel without a second
+;; uniform). `texture-id` 0 means untextured -- a flat `color` rect, same
+;; "0 = no texture" convention draw-textured-model already uses.
+;;
+;; Rewrites the SAME persistent 6-vertex VBO (Renderer.ui-quad-vao/-vbo)
+;; every call via gl/buffer-sub-data rather than batching multiple quads
+;; into one draw call -- one glDrawArrays per glyph. A real UI/HUD
+;; renderer at high on-screen text volume would want to batch these (see
+;; examples/game/renderer.3b's own quad-batcher for that shape), but menu
+;; text and error messages are at most a few hundred glyphs a frame --
+;; nowhere near enough draw calls for the per-call overhead to be
+;; measurable, and immediate-mode-per-quad is a lot less code to keep
+;; correct while this is still groundwork. Revisit if/when a real HUD
+;; with lots of live-updating text makes this a real bottleneck.
+(fn draw-ui-quad-ex
+  [renderer Renderer*
+   x0 f32 y0 f32 x1 f32 y1 f32
+   u0 f32 v0 f32 u1 f32 v1 f32
+   color Vec4 texture-id u32 mode i32] void
+  (let [shader (& renderer ui-shader)]
+    (var verts [UIVertex 6])
+    (set (nth verts 0u32) (UIVertex (vec2 x0 y0) (vec2 u0 v0)))
+    (set (nth verts 1u32) (UIVertex (vec2 x1 y0) (vec2 u1 v0)))
+    (set (nth verts 2u32) (UIVertex (vec2 x1 y1) (vec2 u1 v1)))
+    (set (nth verts 3u32) (UIVertex (vec2 x0 y0) (vec2 u0 v0)))
+    (set (nth verts 4u32) (UIVertex (vec2 x1 y1) (vec2 u1 v1)))
+    (set (nth verts 5u32) (UIVertex (vec2 x0 y1) (vec2 u0 v1)))
+
+    (ensure-shader-bound renderer shader)
+    (set-vec4 shader (cstring "u_color") color)
+    (set-i32  shader (cstring "u_use_tex") (if texture-id mode 0))
+    (when texture-id
+      (ensure-texture-bound renderer texture-id)
+      (set-i32 shader (cstring "u_tex") 0))
+
+    (gl/bind-vertex-array (. renderer ui-quad-vao))
+    (gl/bind-buffer gl/ARRAY_BUFFER (. renderer ui-quad-vbo))
+    (gl/buffer-sub-data gl/ARRAY_BUFFER 0i64 (cast i64 (* 6u64 (sizeof UIVertex))) (cast any (addr verts)))
+    (gl/draw-arrays gl/TRIANGLES 0 6)
+    (gl/bind-vertex-array 0u32)))
+
+(fn draw-ui-quad
+  [renderer Renderer*
+   x0 f32 y0 f32 x1 f32 y1 f32
+   u0 f32 v0 f32 u1 f32 v1 f32
+   color Vec4 texture-id u32] void
+  (draw-ui-quad-ex renderer x0 y0 x1 y1 u0 v0 u1 v1 color texture-id 1))
+
+;; Full-RGBA sample (u_use_tex mode 2, see ui-frag-src's own comment),
+;; tinted by `color` -- draw-ui-quad's own alpha-only mode would wash a
+;; genuine color image (a gradient, a photo) out to grayscale, since it
+;; discards G/B entirely; this is the one other shape a screen-space quad
+;; needs. Same call signature otherwise.
+(fn draw-ui-quad-rgb
+  [renderer Renderer*
+   x0 f32 y0 f32 x1 f32 y1 f32
+   u0 f32 v0 f32 u1 f32 v1 f32
+   color Vec4 texture-id u32] void
+  (draw-ui-quad-ex renderer x0 y0 x1 y1 u0 v0 u1 v1 color texture-id 2))
+
+;; Restores the 3D pass's own GL state (begin-ui's own comment) -- call
+;; once after every draw-ui-quad call this frame is done, before end-frame.
+(fn end-ui [renderer Renderer*] void
+  (gl/disable gl/BLEND)
+  (gl/enable gl/CULL_FACE)
+  (gl/enable gl/DEPTH_TEST))

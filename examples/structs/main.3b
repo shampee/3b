@@ -1,0 +1,103 @@
+;; Structs: literal construction, nested field access (get/get-in and the
+;; `.` sugar), pointers to structs (deref, &-field-refs), compound
+;; assignment through a pointer, and struct-shaped `val`s at FILE scope.
+(package structs)
+
+(struct Creature
+  [name   string
+   health i32])
+
+;; File-scope `val`s, unlike the local ones in main below, become C objects
+;; with static storage duration -- so their initializers have to come out as
+;; compile-time constants. `string` is the case that's easy to get wrong: it
+;; normally lowers to a `bbb_str8_lit(...)` macro that expands to a function
+;; CALL, which C rejects there. The two nested spellings matter as much as
+;; the bare one: a string inside a struct literal, and inside an array of
+;; them, are exactly where a fix that reaches only the initializer's top
+;; node stops working. See codegen.c's StringLiteral case.
+(val greeting string "hello")
+(val default-orc Creature (Creature {:name "Orc" :health 50}))
+(val party [Creature 2] [(Creature {:name "Elf" :health 30})
+                         (Creature {:name "Imp" :health 20})])
+
+(fn make-orc [] Creature
+  (Creature {:name "Orc" :health 50}))
+
+(fn get-orc-health [c Creature] i32
+  (get c health))
+
+(struct Sister [age i32])
+(struct Parent [sister Sister])
+(struct Person [parent Parent])
+
+(fn johns-sisters-age [john Person] i32
+  (get-in john [parent sister age]))
+
+(fn health-via-pointer [p Creature*] i32
+  (get (deref p) health))
+
+(fn increment-via-pointer [p i32*] i32
+  (set (deref p) (+ (deref p) 1)))
+
+(struct Vector2 [x f32 y f32])
+
+(fn mutate-vec2 [vec2 Vector2*] void
+  (let [x (& vec2 x)
+        y (& vec2 y)]
+    (+= (deref x) 100.0)
+    (-= (deref y) 100.0)))
+
+(struct Player [name string health i32 position Vector2])
+
+(fn player-move [player Player* dst-x f32 dst-y f32] void
+  (let [x (& player position x)
+        y (& player position y)]
+    (+= (deref x) dst-x)
+    (+= (deref y) dst-y)))
+
+(fn main [] i32
+  (var ok bool true)
+
+  (println "greeting = {} default-orc = {}/{} party = {}+{}"
+    greeting (. default-orc name) (. default-orc health)
+    (. (nth party 0) name) (. (nth party 1) name))
+  (when (not (string-match greeting "hello" 0)) (set ok false))
+  (when (not (string-match (. default-orc name) "Orc" 0)) (set ok false))
+  (when (not (= (. default-orc health) 50)) (set ok false))
+  (when (not (string-match (. (nth party 0) name) "Elf" 0)) (set ok false))
+  (when (not (= (. (nth party 0) health) 30)) (set ok false))
+  (when (not (string-match (. (nth party 1) name) "Imp" 0)) (set ok false))
+
+  (val orc Creature (make-orc))
+  (println "orc.name = {} orc.health = {}" (get orc name) (get-orc-health orc))
+  (when (not (string-match (get orc name) "Orc" 0)) (set ok false))
+  (when (not (= (get-orc-health orc) 50)) (set ok false))
+
+  (var orc2 Creature (make-orc))
+  (println "health-via-pointer = {}" (health-via-pointer (addr orc2)))
+  (when (not (= (health-via-pointer (addr orc2)) 50)) (set ok false))
+
+  (val sister Sister (Sister {:age 12}))
+  (val parent Parent (Parent {:sister sister}))
+  (val john Person (Person {:parent parent}))
+  (println "johns-sisters-age = {}" (johns-sisters-age john))
+  (when (not (= (johns-sisters-age john) 12)) (set ok false))
+
+  (var counter i32 41)
+  (val bumped i32 (increment-via-pointer (addr counter)))
+  (println "increment-via-pointer = {} counter = {}" bumped counter)
+  (when (not (= counter 42)) (set ok false))
+
+  (var v Vector2 (Vector2 {:x 1.0 :y 2.0}))
+  (mutate-vec2 (addr v))
+  (println "mutate-vec2: x = {} y = {}" (get v x) (get v y))
+  (when (not (= (get v x) 101.0)) (set ok false))
+  (when (not (= (get v y) -98.0)) (set ok false))
+
+  (var p Player (Player {:name "Hero" :health 100 :position (Vector2 {:x 0.0 :y 0.0})}))
+  (player-move (addr p) 5.0 3.0)
+  (println "player-move: x = {} y = {}" (get-in p [position x]) (get-in p [position y]))
+  (when (not (= (get-in p [position x]) 5.0)) (set ok false))
+  (when (not (= (get-in p [position y]) 3.0)) (set ok false))
+
+  (if ok 0 1))

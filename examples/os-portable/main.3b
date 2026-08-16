@@ -1,0 +1,193 @@
+;; The `os` module, end to end -- and the standing proof that it means the
+;; SAME thing on both of 3b's backends.
+;;
+;; `(import os)` resolves to two entirely separate implementations: for a
+;; compiled package it's native_pkgs/os/os.3b wrapping the embedded C
+;; runtime, and for `3b run` on this same file it's bcosprims.c's host
+;; imports inside the bytecode VM. They were allowed to drift apart once --
+;; each side grew only the verbs its own callers happened to need, and
+;; `getenv` ended up with two different signatures -- which quietly made
+;; most os-using code unportable. They're a full mirror of each other now,
+;; and this file is what keeps them that way:
+;;
+;;   3b run examples/os-portable/main.3b    ;; bytecode VM
+;;   3b run examples/os-portable            ;; compile to C, link, execute
+;;
+;; must print byte-identical output. `make os-parity` runs exactly that
+;; comparison; every line below is therefore written to be deterministic --
+;; no raw timestamps, no absolute paths, no directory ordering.
+;;
+;; It leaves its three small `os-demo-*.txt` scratch files behind in the
+;; working directory (there is no remove-file verb, on either backend) --
+;; harmless, and rewritten from scratch on every run.
+(package os-portable)
+(import os)
+
+(val file-a string "os-demo-1.txt")
+(val file-b string "os-demo-2.txt")
+(val file-c string "os-demo-3.txt")
+(val missing string "os-demo-does-not-exist.txt")
+
+(val contents string "written by the os-portable example\n")
+
+;; Every check funnels through here rather than printing a raw value, so a
+;; backend difference shows up as a flipped `false` on a named line instead
+;; of as a number the reader has to know the right answer for.
+(fn check [label string ok bool] bool
+  (println "  {}: {}" label ok)
+  ok)
+
+;; ~~ Whole-file read/write -- the non-incremental counterpart to streams.
+(fn file-io-demo [] bool
+  (println "whole-file read/write")
+  (var ok bool true)
+
+  (when (not (check "write-file reports success" (os/write-file file-a contents)))
+    (set ok false))
+
+  (scratch [temp]
+    (let [back (os/read-file temp file-a)]
+      (when (not (check "read-file round-trips the bytes" (= back contents)))
+        (set ok false))
+      (when (not (check "read-file length matches" (= (string-len back) (string-len contents))))
+        (set ok false)))
+
+    ;; "Empty means absence/failure" -- the convention every string-returning
+    ;; verb in this module shares, rather than a separate ok flag.
+    (let [nothing (os/read-file temp missing)]
+      (when (not (check "read-file of a missing path is empty" (= (string-len nothing) 0u64)))
+        (set ok false))))
+
+  ;; The other two exist only so the listing below has something stable to
+  ;; count; their contents don't matter.
+  (when (not (os/write-file file-b contents)) (set ok false))
+  (when (not (os/write-file file-c contents)) (set ok false))
+  ok)
+
+;; ~~ Existence probes.
+(fn exists-demo [] bool
+  (println "existence probes")
+  (var ok bool true)
+  (when (not (check "file-exists on a real file" (os/file-exists file-a))) (set ok false))
+  (when (not (check "file-exists on a missing path is false" (not (os/file-exists missing)))) (set ok false))
+  ;; A directory is deliberately NOT a file and vice versa -- two separate
+  ;; predicates, neither of which answers "does this path exist at all".
+  (when (not (check "file-exists on a directory is false" (not (os/file-exists ".")))) (set ok false))
+  (when (not (check "dir-exists on a directory" (os/dir-exists "."))) (set ok false))
+  (when (not (check "dir-exists on a file is false" (not (os/dir-exists file-a)))) (set ok false))
+  ok)
+
+;; ~~ Directory listing.
+;;
+;; Counting known names rather than printing the listing itself: the order
+;; is unspecified on BOTH backends (it's whatever readdir hands back), and
+;; the directory this runs in has plenty of other things in it.
+(fn list-dir-demo [] bool
+  (println "directory listing")
+  (var ok bool true)
+  (scratch [temp]
+    (let [entries (os/list-dir temp ".")]
+      (var found i32 0)
+      (for [i 0u64 (len entries)]
+        (let [name (nth entries i)]
+          (when (or (= name file-a) (or (= name file-b) (= name file-c)))
+            (++ found))))
+      (when (not (check "all three demo files are listed" (= found 3))) (set ok false)))
+
+    ;; A missing directory reads as an EMPTY listing, not an error -- the
+    ;; Vector shape of the same "empty means absence" convention.
+    (let [none (os/list-dir temp "os-demo-no-such-directory")]
+      (when (not (check "listing a missing directory is empty" (= (len none) 0u64)))
+        (set ok false))))
+
+  ;; Published as a name on both backends specifically so a caller can
+  ;; notice a truncated listing instead of guessing at the cap.
+  (println "  entries per listing are capped at {}" os/list-dir-max)
+  ok)
+
+;; ~~ Wall-clock time and file timestamps.
+;;
+;; Both are printed as relations, never as raw values -- the two backends
+;; run seconds apart, so the numbers themselves are guaranteed to differ.
+(fn time-demo [] bool
+  (println "time")
+  (var ok bool true)
+  (let [now (os/get-time)]
+    (when (not (check "clock is past 2020" (> now 1577836800i64))) (set ok false))
+
+    ;; file-a was written moments ago by file-io-demo.
+    (let [mtime (os/file-mtime file-a)]
+      (when (not (check "mtime of a just-written file is recent"
+                         (and (<= mtime now) (> mtime (- now 300i64)))))
+        (set ok false))))
+
+  ;; -1, not 0: zero is a real (if ancient) timestamp, so a caller polling
+  ;; "did this change" must not mistake a vanished file for an old one.
+  (when (not (check "mtime of a missing path is -1" (= (os/file-mtime missing) -1i64))) (set ok false))
+
+  ;; Nothing to observe, only that it exists and returns on both sides.
+  (os/sleep 0u32)
+  (check "sleep returned" true))
+
+;; ~~ Environment and subprocesses.
+(fn env-demo [] bool
+  (println "environment and subprocess")
+  (var ok bool true)
+  (scratch [temp]
+    ;; An unset variable is an empty string, not a failure -- so this needs
+    ;; no ok flag to unpack, same as read-file above.
+    (let [unset (os/getenv temp "3B_OS_PORTABLE_DEFINITELY_UNSET")]
+      (when (not (check "an unset variable reads as empty" (= (string-len unset) 0u64)))
+        (set ok false)))
+    (let [path (os/getenv temp "PATH")]
+      (when (not (check "PATH is set" (> (string-len path) 0u64))) (set ok false)))
+
+    ;; Shell-interpreted, and the trailing newline `echo` emits is trimmed
+    ;; for us -- exactly what `$(...)` in a shell would have handed back.
+    (let [out (os/exec-capture temp "echo hello from the shell")]
+      (when (not (check "exec-capture returns the command's stdout, newline trimmed"
+                         (= out "hello from the shell")))
+        (set ok false))))
+  ok)
+
+;; ~~ Streams -- incremental I/O over the file the whole-file verbs wrote.
+;;
+;; examples/streams covers these properly; they're here so this file really
+;; is a check on the WHOLE module.
+(fn stream-demo [] bool
+  (println "streams")
+  (var ok bool true)
+
+  (let [f (os/open file-b os/mode-write)]
+    (when (not f) (return (check "opened for writing" false)))
+    (for [i 0 3] (println f "line {}" i))
+    (when (not (check "close reports the final flush" (os/close f))) (set ok false)))
+
+  (let [f (os/open file-b os/mode-read)]
+    (when (not f) (return (check "opened for reading" false)))
+    (var lines i32 0)
+    (scratch [temp]
+      ;; Driven by at-end?, not by the returned string: an empty line and
+      ;; end-of-file both come back empty.
+      (while (not (os/at-end? f))
+        (let [line (os/read-line temp f)]
+          (when (> (string-len line) 0u64) (++ lines)))))
+    (when (not (check "read back every line written" (= lines 3))) (set ok false))
+    (os/close f))
+  ok)
+
+(fn main [] i32
+  (println "os module parity demo")
+  (println "")
+
+  (var ok bool true)
+  (when (not (file-io-demo))  (set ok false))
+  (when (not (exists-demo))   (set ok false))
+  (when (not (list-dir-demo)) (set ok false))
+  (when (not (time-demo))     (set ok false))
+  (when (not (env-demo))      (set ok false))
+  (when (not (stream-demo))   (set ok false))
+
+  (println "")
+  (println "all checks passed: {}" ok)
+  (if ok 0 1))

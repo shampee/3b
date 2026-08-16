@@ -1,0 +1,48 @@
+(package game)
+
+;; assets/hero_placeholder.png -- 1280x1152, a 10-col x 9-row grid of
+;; 128x128 cells. One animation per row, frames packed left-to-right from
+;; column 0, so every clip here is built with `make-row-clip`.
+;;
+;; The art is a deliberately plain placeholder, drawn by
+;; assets/make_placeholder_sheet.py (checked in beside it). The row order
+;; and frame counts below are the contract between the two -- change one
+;; and change the other, or clips will read cells that were never drawn.
+
+(struct CharacterAnims
+  [sheet        SpriteSheet
+   standing     AnimClip
+   idling       AnimClip
+   walking      AnimClip
+   running      AnimClip
+   jumping      AnimClip
+   falling      AnimClip
+   falling-loop AnimClip
+   sword-sweep  AnimClip
+   sweep-end    AnimClip])
+
+;; fps below are placeholders -- the sheet doesn't specify timing, tune per
+;; animation once it's actually on screen. `loop` follows from what each
+;; row is *for*: `jumping`/`falling`/`sword-sweep`/`sweep-end` are one-shot
+;; transitions your game code chains together (check `(. player playing)`
+;; after `anim-advance` to know when to move to the next one -- e.g.
+;; `jumping` finishes -> play `falling` -> finishes -> play `falling-loop`
+;; until landing; `sword-sweep` finishes -> play `sweep-end` -> finishes ->
+;; back to `idling`). That chaining isn't built into `AnimPlayer` itself --
+;; it doesn't know one clip should lead to another, so your game state
+;; machine drives it by calling `play-anim` again each time `playing`
+;; goes false.
+(fn load-character-anims [arena arena] CharacterAnims
+  (let [texture (load-texture arena "assets/hero_placeholder.png")
+        sheet   (make-sprite-sheet texture 128 128)]
+    (CharacterAnims
+      sheet
+      (make-row-clip arena 0 1u32  1 1 1.0  true)   ; standing
+      (make-row-clip arena 1 10u32 1 1 10.0 true)   ; idling
+      (make-row-clip arena 2 10u32 1 1 12.0 true)   ; walking
+      (make-row-clip arena 3 10u32 1 1 16.0 true)   ; running
+      (make-row-clip arena 4 6u32  1 1 12.0 false)  ; jumping
+      (make-row-clip arena 5 4u32  1 1 12.0 false)  ; falling
+      (make-row-clip arena 6 3u32  1 1 10.0 true)   ; falling-loop
+      (make-row-clip arena 7 3u32  1 1 14.0 false)  ; sword-sweep
+      (make-row-clip arena 8 4u32  1 1 14.0 false)))) ; sweep-end

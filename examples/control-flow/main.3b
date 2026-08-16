@@ -1,0 +1,220 @@
+;; Control flow and assorted small language features: if/do, var/set,
+;; casts/reinterprets, for/while loops with break/continue, ++/--, scoping/shadowing, private
+;; blocks with early return, `when`, nil checks, type aliases, and
+;; `extern` FFI into libc.
+(package control-flow)
+
+(fn add-two [a i32 b i32] i32
+  (+ a b))
+
+(fn classify [x i32] i32
+  (if (+ x x)
+    (do (print "nonzero-ish ") x)
+    (do (print "zero-ish ") 0)))
+
+(var counter i32 0)
+
+(fn bump [] i32
+  (set counter (+ counter 1)))
+
+(fn widen [a i32] i64
+  (cast i64 a))
+
+;; `reinterpret` has the same shape as `cast` but copies BITS instead of
+;; converting a VALUE -- `(cast i32 a-float)` truncates 1.5 to 1,
+;; `(reinterpret i32 a-float)` reads 1.5's IEEE-754 bit pattern back as an
+;; integer instead.
+(fn float-bits [a f32] i32
+  (reinterpret i32 a))
+
+(fn sum-to-ten [] i32
+  (let [result i32 0]
+    (for [i 1 10]
+      (+= result i))
+    result))
+
+(fn count-up-to [n i32] i32
+  (let [counter i32 0]
+    (while (< counter n)
+      (++ counter))
+    counter))
+
+(fn count-to [n i32] i32
+  (var counter i32 0)
+  (while (< counter n)
+    (++ counter))
+  counter)
+
+;; `break` leaves the innermost enclosing loop, `continue` skips to its next
+;; iteration -- neither takes an argument or a loop label. Both work in every
+;; loop form (`while`, range `for`, collection `for`).
+(fn first-multiple-of [n i32] i32
+  (var found i32 -1)
+  (for [i 1 100]
+    (when (= (% i n) 0)
+      (set found i)
+      (break)))
+  found)
+
+(fn sum-odds-below [n i32] i32
+  (var total i32 0)
+  (for [i 0 n]
+    (when (= (% i 2) 0) (continue))
+    (+= total i))
+  total)
+
+;; "innermost" is the whole rule: the inner `break` ends the `j` loop only, so
+;; the outer one still runs all three of its iterations.
+(fn nested-break [] i32
+  (var hits i32 0)
+  (for [i 0 3]
+    (for [j 0 10]
+      (when (>= j 2) (break))
+      (++ hits))
+    (++ hits))
+  hits)
+
+;; Either jump also works in VALUE position -- as one arm of an `if` whose
+;; other arm produces a number. The arm that jumps never yields anything, so
+;; the compiler supplies a throwaway value to keep the two arms agreeing in
+;; type; the jump always leaves before it could be read.
+(fn sum-until [n i32 stop i32] i32
+  (var total i32 0)
+  (for [i 0 n]
+    (+= total (if (= i stop) (break) i)))
+  total)
+
+;; `while true` with the exit condition written in the body -- the loop shape
+;; `break` exists for, and one `while` alone can't express.
+(fn while-until [limit i32] i32
+  (var i i32 0)
+  (var total i32 0)
+  (while true
+    (++ i)
+    (when (> i limit) (break))
+    (when (= (% i 3) 0) (continue))
+    (+= total i))
+  total)
+
+(fn scoped-shadow [] i32
+  (var total i32 111)
+  (if (> total 0)
+    (do (var total i32 99) total)
+    0)
+  total)
+
+(private
+  (fn is-negative [v i32] bool
+    (if (< v 0)
+      (return true)
+      (return false)))
+
+  (fn is-positive [v i32] bool
+    (> v 0)))
+
+(private
+  (fn find-sign [v i32] i32
+    (when (is-negative v) (return -1))
+    (when (is-positive v) (return 1))
+    0))
+
+(var when-side-effect i32 0)
+(fn maybe-bump-twice [flag bool] void
+  (when flag
+    (++ when-side-effect)
+    (++ when-side-effect)))
+
+(fn nil-check [p i32*] bool
+  (= p nil))
+
+(alias PlayerId i32)
+(fn make-player-id [] PlayerId
+  777)
+
+;; `sqrt` used to be externed here too, alongside `abs`, as a second FFI
+;; demo -- removed once `sqrt` became one of the compiler's own builtin
+;; math functions (radians-based libm wrappers), which now intercepts any
+;; call spelled `(sqrt ...)` by name regardless of an `extern` of the same
+;; name in scope. `extern` has no C-symbol aliasing syntax (the 3b-level
+;; name IS the emitted C symbol), so renaming the extern would have
+;; quietly called a nonexistent `c_sqrt` instead of libc's `sqrt` -- worse
+;; than just removing an unused demo. `abs` doesn't collide the same way
+;; (the builtin's "any numeric type" constraint, unlike sqrt's f32/f64-
+;; only one, happens to accept an i32 argument too), so it's kept as the
+;; one working example.
+(extern (fn abs [x i32] i32))
+
+(fn use-c-abs [v i32] i32 (abs v))
+
+(fn main [] i32
+  (var ok bool true)
+
+  (println "add-two(3, 4) = {}" (add-two 3 4))
+  (when (not (= (add-two 3 4) 7)) (set ok false))
+
+  (println "classify(5) = {}" (classify 5))
+  (println "classify(0) = {}" (classify 0))
+  (when (not (= (classify 5) 5)) (set ok false))
+  (when (not (= (classify 0) 0)) (set ok false))
+
+  (bump) (bump)
+  (println "counter after two bumps = {}" counter)
+  (when (not (= counter 2)) (set ok false))
+
+  (println "widen(42) = {}" (widen 42))
+  (when (not (= (widen 42) (cast i64 42))) (set ok false))
+
+  (println "float-bits(1.0) = {} (expect 1065353216 -- 1.0f32's IEEE-754 bit pattern, not a truncated 1)" (float-bits 1.0f32))
+  (when (not (= (float-bits 1.0f32) 1065353216)) (set ok false))
+
+  (println "sum-to-ten() = {} (expect 45)" (sum-to-ten))
+  (when (not (= (sum-to-ten) 45)) (set ok false))
+
+  (println "count-up-to(5) = {} (expect 5)" (count-up-to 5))
+  (when (not (= (count-up-to 5) 5)) (set ok false))
+
+  (println "count-to(5) then count-to(2) = {} then {} (expect 5 then 2 -- proves `counter` isn't a static local)"
+    (count-to 5) (count-to 2))
+  (when (not (= (count-to 5) 5)) (set ok false))
+  (when (not (= (count-to 2) 2)) (set ok false))
+
+  (println "first-multiple-of(7) = {} (expect 7 -- `break` on the first hit)" (first-multiple-of 7))
+  (when (not (= (first-multiple-of 7) 7)) (set ok false))
+
+  (println "sum-odds-below(10) = {} (expect 25 -- `continue` skips the evens)" (sum-odds-below 10))
+  (when (not (= (sum-odds-below 10) 25)) (set ok false))
+
+  (println "nested-break() = {} (expect 9 -- the inner `break` ends the inner loop only)" (nested-break))
+  (when (not (= (nested-break) 9)) (set ok false))
+
+  (println "while-until(10) = {} (expect 37 -- `break` exits, `continue` skips multiples of 3)" (while-until 10))
+  (when (not (= (while-until 10) 37)) (set ok false))
+
+  (println "sum-until(10, 4) = {} (expect 6 -- `break` as one arm of a valued `if`)" (sum-until 10 4))
+  (when (not (= (sum-until 10 4) 6)) (set ok false))
+
+  (println "scoped-shadow() = {} (expect 111 -- the outer `total`, unaffected by the shadowed inner one)" (scoped-shadow))
+  (when (not (= (scoped-shadow) 111)) (set ok false))
+
+  (println "find-sign(-9), find-sign(0), find-sign(9) = {} {} {} (expect -1 0 1)"
+    (find-sign -9) (find-sign 0) (find-sign 9))
+  (when (not (= (find-sign -9) -1)) (set ok false))
+  (when (not (= (find-sign 0) 0)) (set ok false))
+  (when (not (= (find-sign 9) 1)) (set ok false))
+
+  (maybe-bump-twice true)
+  (maybe-bump-twice false)
+  (println "when-side-effect = {} (expect 2 -- only the `true` call should have run the body)" when-side-effect)
+  (when (not (= when-side-effect 2)) (set ok false))
+
+  (val n i32* nil)
+  (println "nil-check(nil) = {} (expect true)" (nil-check n))
+  (when (not (nil-check n)) (set ok false))
+
+  (println "make-player-id() = {} (PlayerId is really just i32 under the hood)" (make-player-id))
+  (when (not (= (make-player-id) 777)) (set ok false))
+
+  (println "use-c-abs(-7) = {} (expect 7, calls real libc abs() via `extern`)" (use-c-abs -7))
+  (when (not (= (use-c-abs -7) 7)) (set ok false))
+
+  (if ok 0 1))
