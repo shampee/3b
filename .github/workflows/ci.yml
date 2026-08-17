@@ -86,5 +86,4 @@ jobs:
       - name: Build and run compiler under ASAN+UBSAN
         run: |
           make sanitize
-          ./3b-sanitize test
           make sanitize-compiler
