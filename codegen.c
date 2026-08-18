@@ -3353,7 +3353,7 @@ cg_expr(Codegen* cg, TypedIndex idx) {
 // opened. Shared by cg_function and cg_function_main: `main` needs its own
 // signature and prelude but the same last-statement handling.
 static void
-cg_function_body_stmts(Codegen* cg, TypedIndex func_idx, b32 is_void) {
+cg_function_body_stmts(Codegen* cg, TypedIndex func_idx, b32 is_void, b32 is_main) {
   TypedNode* n    = &cg->tast->nodes[func_idx];
   TypedNode* body = &cg->tast->nodes[n->func.body];
   xassert(body->kind == TypedNodeKind_Block);
@@ -3374,7 +3374,10 @@ cg_function_body_stmts(Codegen* cg, TypedIndex func_idx, b32 is_void) {
     // is void.) A diverging last statement skips the prefix too:
     // `return ({ return x; });` is redundant at best, and for a diverging `if`
     // with no `else` it is ill-typed C, one ternary arm being `(void)0`.
-    if (is_last && !is_void && !is_decl && !is_diverging) fprintf(cg->out, "return ");
+    if (is_last && !is_void && !is_decl && !is_diverging) {
+      if (is_main) fprintf(cg->out, "  bbb_ctx_free();\n");
+      fprintf(cg->out, "return ");
+    }
     cg_stmt(cg, stmt);
     fprintf(cg->out, ";\n");
   }
@@ -3432,8 +3435,7 @@ cg_function_main(Codegen* cg, TypedIndex idx) {
     cg_scope_register(cg, argv_p->name, argv_c_name);
   }
 
-  fprintf(cg->out, "  bbb_ctx_free();\n");
-  cg_function_body_stmts(cg, idx, /*is_void*/ false); // main always returns i32 -- checked above
+  cg_function_body_stmts(cg, idx, /*is_void*/ false, true); // main always returns i32 -- checked above
   fprintf(cg->out, "}\n\n");
   cg_scope_pop_to(cg, mark);
 }
@@ -3471,7 +3473,7 @@ cg_function_impl(Codegen* cg, TypedIndex idx) {
   fprintf(cg->out, ") {\n");
 
   b32 is_void = (ret_kind == TypeKind_Void);
-  cg_function_body_stmts(cg, idx, is_void);
+  cg_function_body_stmts(cg, idx, is_void, false);
   fprintf(cg->out, "}\n\n");
   cg_scope_pop_to(cg, mark);
 }
