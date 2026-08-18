@@ -57,6 +57,7 @@ i32 golden_return_out_of_scratch(i32 n) {
 int main(int _3b_argc, char** _3b_argv) {
   bbb_Context _3b_ctx;
   bbb_ctx_init(&_3b_ctx, bbb_MB(16));
+  bbb_ctx_free();
   return ((((((golden_count_down(3) + golden_sum_to(4)) + golden_first_even(5)) + golden_sum_until(6)) + golden_break_out_of_scratch(1)) + golden_break_inside_outer_scratch(2)) + golden_return_out_of_scratch(5));
 }
 

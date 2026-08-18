@@ -3375,7 +3375,7 @@ cg_function_body_stmts(Codegen* cg, TypedIndex func_idx, b32 is_void, b32 is_mai
     // `return ({ return x; });` is redundant at best, and for a diverging `if`
     // with no `else` it is ill-typed C, one ternary arm being `(void)0`.
     if (is_last && !is_void && !is_decl && !is_diverging) {
-      if (is_main) fprintf(cg->out, "  bbb_ctx_free();\n");
+      if (is_main) fprintf(cg->out, "bbb_ctx_free();\n  ");
       fprintf(cg->out, "return ");
     }
     cg_stmt(cg, stmt);

@@ -25,6 +25,7 @@ int main(int _3b_argc, char** _3b_argv) {
   bbb_ctx_init(&_3b_ctx, bbb_MB(16));
   i32 n = 10;;
   const i32 arr[4] = { 1, 2, 3, 4 };;
+  bbb_ctx_free();
   return (golden_bump(&n) + golden_third(arr));
 }
 

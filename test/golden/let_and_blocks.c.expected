@@ -18,6 +18,7 @@ i32 golden_nested(i32 x) {
 int main(int _3b_argc, char** _3b_argv) {
   bbb_Context _3b_ctx;
   bbb_ctx_init(&_3b_ctx, bbb_MB(16));
+  bbb_ctx_free();
   return golden_nested(5);
 }
 

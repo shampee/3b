@@ -30,6 +30,7 @@ int main(int _3b_argc, char** _3b_argv) {
   golden_Pinned by = 5LL;;
   golden_fill(&slot, slot, by);
   golden_Plain grown = golden_widen(slot, slot);;
+  bbb_ctx_free();
   return (i32)(grown + slot);
 }
 

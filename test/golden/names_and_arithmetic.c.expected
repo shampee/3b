@@ -22,6 +22,7 @@ i32 golden_mixed_ops(i32 a, i32 b) {
 int main(int _3b_argc, char** _3b_argv) {
   bbb_Context _3b_ctx;
   bbb_ctx_init(&_3b_ctx, bbb_MB(16));
+  bbb_ctx_free();
   return golden_add_two(golden_mixed_ops(6, 7), 1);
 }
 

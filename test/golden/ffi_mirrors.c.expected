@@ -29,6 +29,7 @@ int main(int _3b_argc, char** _3b_argv) {
   golden_Doc d = (golden_Doc){0};;
   golden_Doc* p = &d;;
   golden_name_of(&p);
+  bbb_ctx_free();
   return ({ golden_Status __match_val = golden_peek(&d); ((__match_val == golden_Status_Ok) ? 0 : 1); });
 }
 
