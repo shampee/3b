@@ -3432,6 +3432,7 @@ cg_function_main(Codegen* cg, TypedIndex idx) {
     cg_scope_register(cg, argv_p->name, argv_c_name);
   }
 
+  fprintf(cg->out, "  bbb_ctx_free();\n");
   cg_function_body_stmts(cg, idx, /*is_void*/ false); // main always returns i32 -- checked above
   fprintf(cg->out, "}\n\n");
   cg_scope_pop_to(cg, mark);
