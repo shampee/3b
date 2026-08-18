@@ -152,4 +152,5 @@
     (println "nth-checked(vec, 5) present={} (expect false, out of range)" (if p true false))
     (when p (set ok false)))
 
+  (destroy a)
   (if ok 0 1))
