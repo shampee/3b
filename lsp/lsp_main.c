@@ -923,7 +923,7 @@ handle_definition(JsonValue* id_v, JsonValue* params) {
 // source baked into the binary, with no directory on disk to walk.
 
 static const char* KEYWORDS[] = {
-  "fn", "let", "var", "val", "if", "do", "else", "for", "while", "when",
+  "fn", "let", "var", "val", "if", "do", "else", "for", "while", "when", "continue", "break",
   "struct", "union", "enum", "flags", "alias", "extern", "private",
   "parallel", "parallel-for", "lane-fn", "match", "return", "break", "continue", "set",
   "cast", "reinterpret", "deref", "addr", "and", "or", "not", "true", "false", "nil",
