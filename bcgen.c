@@ -1843,6 +1843,28 @@ bc_compile_expr(BcFnCtx* fc, TypedIndex idx) {
       bc_loop_end(fc, loop);
       return bc_alloc_reg(fc);
     }
+    case TypedNodeKind_ForCExpr: {
+      // (for [name init cond expr] body ...)
+      u64 locals_mark = dyn_count(fc->locals);
+      u32 var_reg     = bc_compile_expr(fc, n->for_c.init);
+      bc_bind_local(fc, n->for_c.var_name, var_reg);
+      TypeRef var_ty   = fc->ck->resolved_types[n->for_c.init];
+
+      BcLoopCtx loop       = bc_loop_begin(fc);
+      u32       loop_start = (u32)dyn_count(fc->code);
+      u32       cond_reg   = bc_compile_expr(fc, n->for_c.cond);
+
+      u32 jf = bc_emit(fc, BcOp_JumpIfFalse, cond_reg, 0, 0); // patched below
+      bc_compile_block(fc, n->for_c.body); // for effect -- the checker requires a Void body
+      bc_compile_expr(fc, n->for_c.expr); // compile expression after body
+      bc_loop_patch(fc, &fc->continue_fixups, loop.continue_mark, loop_start);
+      bc_emit(fc, BcOp_Jump, loop_start, 0, 0);
+      fc->code[jf].b = (u32)dyn_count(fc->code);
+      bc_loop_patch(fc, &fc->break_fixups, loop.break_mark, (u32)dyn_count(fc->code));
+      bc_loop_end(fc, loop);
+      if (fc->locals) dyn_hdr(fc->locals)->count = locals_mark; // pop the loop var
+      return bc_alloc_reg(fc); // void, same convention as WhileExpr above
+    }
     case TypedNodeKind_ForRangeExpr: {
       // `(for [name begin end (step)] body...)`. begin/end/step share
       // BinaryAdd's int-vs-f64-vs-f32 operand dispatch, since a float-typed

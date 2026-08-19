@@ -1026,6 +1026,27 @@ cg_while_expr(Codegen* cg, TypedIndex idx) {
   fprintf(cg->out, " (void)0; })");
 }
 
+void
+cg_for_c_expr(Codegen* cg, TypedIndex idx) {
+  TypedNode* n         = &cg->tast->nodes[idx];
+  TypeRef    var_ty    = cg->resolved_types[n->for_c.init]; // init's checked type == loop var's type
+  String8    c_ty      = c_type_from_typeref(cg, var_ty);
+  u64        mark      = cg_scope_mark(cg);
+  String8    var_name  = cg_scope_reserve(cg, n->for_c.var_name);
+  fprintf(cg->out, "({ for (%.*s %.*s = ", str8_varg(c_ty), str8_varg(var_name));
+  cg_expr(cg, n->for_c.init);
+  fprintf(cg->out, "; ");
+  cg_expr(cg, n->for_c.cond);
+  fprintf(cg->out, "; ");
+  cg_expr(cg, n->for_c.expr);
+  fprintf(cg->out, ") ");
+
+  cg_scope_register(cg, n->for_c.var_name, var_name);
+  cg_loop_body_block(cg, n->for_c.body);
+  fprintf(cg->out, " (void)0; })");
+  cg_scope_pop_to(cg, mark);
+}
+
 // Range `for`, wrapped like `while` above. `end` is exclusive and iteration is
 // ascending only: the emitted guard is always `i < end`, so a negative step
 // runs zero times rather than counting down. Supporting one would need a
@@ -3092,6 +3113,9 @@ cg_expr(Codegen* cg, TypedIndex idx) {
     case TypedNodeKind_WhileExpr: {
       cg_while_expr(cg, idx);
     } break;
+    case TypedNodeKind_ForCExpr: {
+      cg_for_c_expr(cg, idx);
+    } break;
     case TypedNodeKind_ForRangeExpr: {
       cg_for_range_expr(cg, idx);
     } break;
@@ -3349,6 +3373,7 @@ cg_expr(Codegen* cg, TypedIndex idx) {
   }
 }
 
+// TODO: Figure out lane shutdown
 // Emits every statement of a function body, whose brace the caller already
 // opened. Shared by cg_function and cg_function_main: `main` needs its own
 // signature and prelude but the same last-statement handling.
@@ -3375,6 +3400,7 @@ cg_function_body_stmts(Codegen* cg, TypedIndex func_idx, b32 is_void, b32 is_mai
     // `return ({ return x; });` is redundant at best, and for a diverging `if`
     // with no `else` it is ill-typed C, one ternary arm being `(void)0`.
     if (is_last && !is_void && !is_decl && !is_diverging) {
+      /* if (cg->has_parallel) fprintf(cg->out, "bbb_async_shutdown();\n  "); */
       if (is_main) fprintf(cg->out, "bbb_ctx_free();\n  ");
       fprintf(cg->out, "return ");
     }

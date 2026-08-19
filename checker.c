@@ -1186,6 +1186,18 @@ check_expr(Checker* ck, Scope* scope, TypedIndex idx) {
       check_loop_body(ck, scope, n->while_expr.body); // Block -- result discarded; `while` always produces void
       result.kind = TypeKind_Void;
     } break;
+    case TypedNodeKind_ForCExpr: {
+      TypeRef init_ty = check_loop_header(ck, scope, n->for_c.init);
+      u64 mark = scope_mark(scope);
+      scope_bind_mutable(scope, n->for_c.var_name, init_ty, n->token);
+      TypeRef cond_ty = check_loop_header(ck, scope, n->for_c.cond);
+      TypeRef expr_ty = check_loop_header(ck, scope, n->for_c.expr);
+
+      check_loop_body(ck, scope, n->for_c.body);
+      scope_pop_to(scope, mark);
+
+      result.kind = TypeKind_Void;
+    } break;
     case TypedNodeKind_ForRangeExpr: {
       TypeRef begin_ty = check_loop_header(ck, scope, n->for_range.begin);
       TypeRef end_ty   = check_loop_header(ck, scope, n->for_range.end);

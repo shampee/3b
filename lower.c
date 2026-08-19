@@ -2124,6 +2124,7 @@ lower_while(Lowerer* low, NodeIndex idx, NodeIndex* children, u16 count) {
 }
 
 static TypedIndex lower_foreach_clause(Lowerer* low, AstNode* node, NodeIndex* children, u16 count, NodeIndex* clause_flat);
+static TypedIndex lower_forc_clause(Lowerer* low, AstNode* node, NodeIndex* children, u16 count, NodeIndex* clause_flat);
 
 // `(for [name begin end] body...)` and `(for [name begin end step] body...)`
 // -- range iteration, both shapes producing one typed node.
@@ -2156,7 +2157,7 @@ lower_for(Lowerer* low, NodeIndex idx, NodeIndex* children, u16 count) {
   }
   if (flat_count != 3 && flat_count != 4) {
     lower_error(low, clause_node->token,
-      "`for` clause must be `[name begin end]` or `[name begin end step]` "
+      "`for` clause must be `[name begin end]`, `[name begin end step]`, '[name init cond expr] "
       "(or `[item coll]` / `[[i item] coll]` to iterate a collection)");
     return TYPED_NIL;
   }
@@ -2165,6 +2166,11 @@ lower_for(Lowerer* low, NodeIndex idx, NodeIndex* children, u16 count) {
   if (name_node->kind != AstNodeKind_Atom) {
     lower_error(low, name_node->token, "`for` loop variable name must be an atom");
     return TYPED_NIL;
+  }
+
+  AstNode* end_or_cond_node = ast_get(low->ast, flat[2]);
+  if (flat_count == 4 && end_or_cond_node->kind == AstNodeKind_List) {
+    return lower_forc_clause(low, node, children, count, flat);
   }
 
   TypedIndex begin_idx = lower_expr(low, flat[1]);
@@ -2227,6 +2233,25 @@ lower_foreach_clause(Lowerer* low, AstNode* node, NodeIndex* children, u16 count
   return typed_push(low->tast, n);
 }
 
+static TypedIndex
+lower_forc_clause(Lowerer* low, AstNode* node, NodeIndex* children, u16 count, NodeIndex* clause_flat) {
+  AstNode* name_node = ast_get(low->ast, clause_flat[0]);
+
+  TypedIndex init_idx       = lower_expr(low, clause_flat[1]);
+  TypedIndex cond_idx       = lower_expr(low, clause_flat[2]);
+  TypedIndex expr_idx       = lower_expr(low, clause_flat[3]);
+  TypedIndex body_block_idx = lower_block_from_children(low, node->token, children, 2, count);
+
+  TypedNode n      = { 0 };
+  n.kind           = TypedNodeKind_ForCExpr;
+  n.token          = node->token;
+  n.for_c.var_name = name_node->token.text;
+  n.for_c.init     = init_idx;
+  n.for_c.cond     = cond_idx;
+  n.for_c.expr     = expr_idx;
+  n.for_c.body     = body_block_idx;
+  return typed_push(low->tast, n);
+}
 // `(parallel-for [name count] body...)` -- valid only inside a `parallel`
 // body, which the checker enforces. There is no begin or step: lane_range
 // always partitions `[0, work_count)`, so the clause is exactly

@@ -674,6 +674,7 @@ typedef enum TypedNodeKind {
                                // `for` would spin forever.
   TypedNodeKind_WhileExpr,     // `(while cond body...)` -- always void. The body is checked
                                // once structurally, whatever the runtime iteration count.
+  TypedNodeKind_ForCExpr,      // `(for [name init cond expr] body...)
   TypedNodeKind_ForRangeExpr,  // `(for [name begin end] body...)` and the four-element stepped
                                // form -- one kind, with the unstepped form synthesizing a
                                // literal 1 the way `++` and `--` do. That literal is i32, so a
@@ -982,6 +983,13 @@ typedef struct TypedNode {
       TypedIndex cond;
       TypedIndex body; // a Block
     } while_expr;
+    struct {
+      String8    var_name;
+      TypedIndex init;
+      TypedIndex cond;
+      TypedIndex expr;
+      TypedIndex body;
+    } for_c;
     struct {
       String8    var_name;
       TypedIndex begin;
