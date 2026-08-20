@@ -44,6 +44,7 @@ known_embedded_native_package_source(String8 name, String8* out_src) {
   if (str8_match_lit("os", name, 0))  { *out_src = join_embedded_lines(ctx_perm(), g_embed_native_pkgs_os_os_3b);   return true; }
   if (str8_match_lit("vm", name, 0))  { *out_src = join_embedded_lines(ctx_perm(), g_embed_native_pkgs_vm_vm_3b);   return true; }
   if (str8_match_lit("rng", name, 0)) { *out_src = join_embedded_lines(ctx_perm(), g_embed_native_pkgs_rng_rng_3b); return true; }
+  if (str8_match_lit("sort", name, 0)) { *out_src = join_embedded_lines(ctx_perm(), g_embed_native_pkgs_sort_sort_3b); return true; }
   return false;
 }
 
