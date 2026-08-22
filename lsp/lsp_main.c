@@ -933,7 +933,7 @@ static const char* KEYWORDS[] = {
   "member-offset", "member-type", "cstring", "get", "get-in", "nth",
   "stream",
   "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
-  "Vector", "Map", "Set", "vector-push", "packed", "align",
+  "Vector", "Map", "Set", "packed", "align",
 };
 
 static const char* BUILTINS[] = {
@@ -947,7 +947,7 @@ static const char* BUILTINS[] = {
   "handle-deref", "handle-free", "handle-valid?",
   "map-set", "map-get", "map-remove", "map-contains?",
   "set-add", "set-contains?", "set-remove",
-  "vector-clear", "vector-contains?", "vector-remove-at",
+  "vector-push", "vector-clear", "vector-contains?", "vector-remove-at",
   "vector-swap-remove", "vector-index-of",
   "string-to-i32", "string-to-i64", "string-to-u32", "string-to-u64",
   "string-to-f32", "string-to-f64",
@@ -986,10 +986,20 @@ static const char* const NATIVE_PKG_RNG_MEMBERS[] = {
   "create", "next-u32", "next-f32", "range-i32", "range-f32", "chance", NULL,
 };
 
+static const char* const NATIVE_PKG_SORT_MEMBERS[] = {
+  "bubble-sort-i8", "bubble-sort-i16", "bubble-sort-i32", "bubble-sort-i64", "bubble-sort-u8", "bubble-sort-u16", "bubble-sort-u32", "bubble-sort-u64", "bubble-sort-f32", "bubble-sort-f64",
+  "quick-sort-i8", "quick-sort-i16", "quick-sort-i32", "quick-sort-i64", "quick-sort-u8", "quick-sort-u16", "quick-sort-u32", "quick-sort-u64", "quick-sort-f32", "quick-sort-f64",
+  "merge-sort-i8", "merge-sort-i16", "merge-sort-i32", "merge-sort-i64", "merge-sort-u8", "merge-sort-u16", "merge-sort-u32", "merge-sort-u64", "merge-sort-f32", "merge-sort-f64",
+  "heap-sort-i8", "heap-sort-i16", "heap-sort-i32", "heap-sort-i64", "heap-sort-u8", "heap-sort-u16", "heap-sort-u32", "heap-sort-u64", "heap-sort-f32", "heap-sort-f64",
+  "insertion-sort-i8", "insertion-sort-i16", "insertion-sort-i32", "insertion-sort-i64", "insertion-sort-u8", "insertion-sort-u16", "insertion-sort-u32", "insertion-sort-u64", "insertion-sort-f32", "insertion-sort-f64",
+  NULL,
+};
+
 static const NativePkg NATIVE_PKGS[] = {
-  { "os",  NATIVE_PKG_OS_MEMBERS },
-  { "vm",  NATIVE_PKG_VM_MEMBERS },
-  { "rng", NATIVE_PKG_RNG_MEMBERS },
+  { "os",   NATIVE_PKG_OS_MEMBERS },
+  { "vm",   NATIVE_PKG_VM_MEMBERS },
+  { "rng",  NATIVE_PKG_RNG_MEMBERS },
+  { "sort", NATIVE_PKG_SORT_MEMBERS },
 };
 
 // Mirrors lexer.c's char_is_delim: an atom runs up to whitespace or one of

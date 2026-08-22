@@ -643,7 +643,7 @@ script.o: script_embed.h
 # script_native.h a project needs to compile against native_script_* --
 # rides along here too, materialized into a project's own output/ by
 # build.c whenever `vm` is one of its packages (see build_invoke_toolchain).
-NATIVE_PKG_EMBED_FILES = native_pkgs/os/os.3b native_pkgs/vm/vm.3b native_pkgs/vm/script_native_abi.h native_pkgs/rng/rng.3b
+NATIVE_PKG_EMBED_FILES = native_pkgs/os/os.3b native_pkgs/vm/vm.3b native_pkgs/vm/script_native_abi.h native_pkgs/rng/rng.3b native_pkgs/sort/sort.3b
 
 native_pkgs_embed.h: tools/embed_runtime $(NATIVE_PKG_EMBED_FILES)
 	./tools/embed_runtime $(NATIVE_PKG_EMBED_FILES) > $@

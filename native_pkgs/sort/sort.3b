@@ -1,0 +1,1165 @@
+(package sort)
+
+(fn bubble-sort-i8 [v [i8]] void
+  (let [count (cast i8 (len v))
+        init-j 0i8
+        last-j (cast i8 (- count 1i8))]
+    (while true
+      (let [init-swap -1i8
+            prev-swap -1i8]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1i8)))
+            (swap (nth v j) (nth v (+ j 1i8)))
+            (set prev-swap j)
+            (when (= init-swap -1i8)
+              (set init-swap j))))
+        (when (= prev-swap -1i8) (return))
+        (set init-j (max (- init-swap 1i8) 0i8))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-i16 [v [i16]] void
+  (let [count (cast i16 (len v))
+        init-j 0i16
+        last-j (cast i16 (- count 1i16))]
+    (while true
+      (let [init-swap -1i16
+            prev-swap -1i16]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1i16)))
+            (swap (nth v j) (nth v (+ j 1i16)))
+            (set prev-swap j)
+            (when (= init-swap -1i16)
+              (set init-swap j))))
+        (when (= prev-swap -1i16) (return))
+        (set init-j (max (- init-swap 1i16) 0i16))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-i32 [v [i32]] void
+  (let [count (cast i32 (len v))
+        init-j 0
+        last-j (- count 1)]
+    (while true
+      (let [init-swap -1
+            prev-swap -1]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1)))
+            (swap (nth v j) (nth v (+ j 1)))
+            (set prev-swap j)
+            (when (= init-swap -1)
+              (set init-swap j))))
+        (when (= prev-swap -1) (return))
+        (set init-j (max (- init-swap 1) 0))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-i64 [v [i64]] void
+  (let [count (cast i64 (len v))
+        init-j 0i64
+        last-j (cast i64 (- count 1i64))]
+    (while true
+      (let [init-swap -1i64
+            prev-swap -1i64]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1i64)))
+            (swap (nth v j) (nth v (+ j 1i64)))
+            (set prev-swap j)
+            (when (= init-swap -1i64)
+              (set init-swap j))))
+        (when (= prev-swap -1i64) (return))
+        (set init-j (max (- init-swap 1i64) 0i64))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-f32 [v [f32]] void
+  (let [count (cast f32 (len v))
+        init-j 0.0f32
+        last-j (cast f32 (- count 1.0f32))]
+    (while true
+      (let [init-swap -1.0f32
+            prev-swap -1.0f32]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1.0f32)))
+            (swap (nth v j) (nth v (+ j 1.0f32)))
+            (set prev-swap j)
+            (when (= init-swap -1.0f32)
+              (set init-swap j))))
+        (when (= prev-swap -1.0f32) (return))
+        (set init-j (max (- init-swap 1.0f32) 0.0f32))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-f64 [v [f64]] void
+  (let [count (cast f64 (len v))
+        init-j 0.0f64
+        last-j (cast f64 (- count 1.0f64))]
+    (while true
+      (let [init-swap -1.0f64
+            prev-swap -1.0f64]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1.0f64)))
+            (swap (nth v j) (nth v (+ j 1.0f64)))
+            (set prev-swap j)
+            (when (= init-swap -1.0f64)
+              (set init-swap j))))
+        (when (= prev-swap -1.0f64) (return))
+        (set init-j (max (- init-swap 1.0f64) 0.0f64))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-u8 [v [u8]] void
+  (let [count (cast u8 (len v))
+        init-j 0u8
+        last-j (cast u8 (- count 1u8))]
+    (while true
+      (let [init-swap count
+            prev-swap count]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1u8)))
+            (swap (nth v j) (nth v (+ j 1u8)))
+            (set prev-swap j)
+            (when (= init-swap count)
+              (set init-swap j))))
+        (when (= prev-swap count) (return))
+        (set init-j (if (> init-swap 0u8) (- init-swap 1u8) 0u8))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-u16 [v [u16]] void
+  (let [count (cast u16 (len v))
+        init-j 0u16
+        last-j (cast u16 (- count 1u16))]
+    (while true
+      (let [init-swap count
+            prev-swap count]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1u16)))
+            (swap (nth v j) (nth v (+ j 1u16)))
+            (set prev-swap j)
+            (when (= init-swap count)
+              (set init-swap j))))
+        (when (= prev-swap count) (return))
+        (set init-j (if (> init-swap 0u16) (- init-swap 1u16) 0u16))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-u32 [v [u32]] void
+  (let [count (cast u32 (len v))
+        init-j 0u32
+        last-j (cast u32 (- count 1u32))]
+    (while true
+      (let [init-swap count
+            prev-swap count]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1u32)))
+            (swap (nth v j) (nth v (+ j 1u32)))
+            (set prev-swap j)
+            (when (= init-swap count)
+              (set init-swap j))))
+        (when (= prev-swap count) (return))
+        (set init-j (if (> init-swap 0u32) (- init-swap 1u32) 0u32))
+        (set last-j prev-swap)))))
+
+(fn bubble-sort-u64 [v [u64]] void
+  (let [count (cast u64 (len v))
+        init-j 0u64
+        last-j (cast u64 (- count 1u64))]
+    (while true
+      (let [init-swap count
+            prev-swap count]
+        (for [j init-j last-j]
+          (when (> (nth v j) (nth v (+ j 1u64)))
+            (swap (nth v j) (nth v (+ j 1u64)))
+            (set prev-swap j)
+            (when (= init-swap count)
+              (set init-swap j))))
+        (when (= prev-swap count) (return))
+        (set init-j (if (> init-swap 0u64) (- init-swap 1u64) 0u64))
+        (set last-j prev-swap)))))
+
+(private
+  (fn partition-i8 [v [i8] lo i8 hi i8] i8
+    (let [pivot (nth v hi)
+          i (- lo 1i8)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1i8)) (nth v hi))
+      (+ i 1i8)))
+  
+  (fn partition-i16 [v [i16] lo i16 hi i16] i16
+    (let [pivot (nth v hi)
+          i (- lo 1i16)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1i16)) (nth v hi))
+      (+ i 1i16)))
+  
+  (fn partition-i32 [v [i32] lo i32 hi i32] i32
+    (let [pivot (nth v hi)
+          i (- lo 1)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1)) (nth v hi))
+      (+ i 1)))
+
+  (fn partition-i64 [v [i64] lo i64 hi i64] i64
+    (let [pivot (nth v hi)
+          i (- lo 1i64)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1i64)) (nth v hi))
+      (+ i 1i64)))
+  
+  (fn partition-f32 [v [f32] lo f32 hi f32] f32
+    (let [pivot (nth v hi)
+          i (- lo 1.0f32)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1.0f32)) (nth v hi))
+      (+ i 1.0f32)))
+  
+  (fn partition-f64 [v [f64] lo f64 hi f64] f64
+    (let [pivot (nth v hi)
+          i (- lo 1.0f64)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1.0f64)) (nth v hi))
+      (+ i 1.0f64)))
+  
+  (fn partition-u8 [v [u8] lo u8 hi u8] u8
+    (let [pivot (nth v hi)
+          i (- lo 1u8)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1u8)) (nth v hi))
+      (+ i 1u8)))
+  
+  (fn partition-u16 [v [u16] lo u16 hi u16] u16
+    (let [pivot (nth v hi)
+          i (- lo 1u16)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1u16)) (nth v hi))
+      (+ i 1u16)))
+  
+  (fn partition-u32 [v [u32] lo u32 hi u32] u32
+    (let [pivot (nth v hi)
+          i (- lo 1u32)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1u32)) (nth v hi))
+      (+ i 1u32)))
+  
+  (fn partition-u64 [v [u64] lo u64 hi u64] u64
+    (let [pivot (nth v hi)
+          i (- lo 1u64)]
+      (for [j lo hi]
+        (when (< (nth v j) pivot)
+          (++ i)
+          (swap (nth v i) (nth v j))))
+      (swap (nth v (+ i 1u64)) (nth v hi))
+      (+ i 1u64)))
+
+  (fn internal-quick-sort-i8 [v [i8] lo i8 hi i8] void
+    (when (< lo hi)
+      (let [pi (partition-i8 v lo hi)]
+        (internal-quick-sort-i8 v lo (- pi 1i8))
+        (internal-quick-sort-i8 v (+ pi 1i8) hi))))
+  
+  (fn internal-quick-sort-i16 [v [i16] lo i16 hi i16] void
+    (when (< lo hi)
+      (let [pi (partition-i16 v lo hi)]
+        (internal-quick-sort-i16 v lo (- pi 1i16))
+        (internal-quick-sort-i16 v (+ pi 1i16) hi))))
+  
+  (fn internal-quick-sort-i32 [v [i32] lo i32 hi i32] void
+    (when (< lo hi)
+      (let [pi (partition-i32 v lo hi)]
+        (internal-quick-sort-i32 v lo (- pi 1))
+        (internal-quick-sort-i32 v (+ pi 1) hi))))
+  
+  (fn internal-quick-sort-i64 [v [i64] lo i64 hi i64] void
+    (when (< lo hi)
+      (let [pi (partition-i64 v lo hi)]
+        (internal-quick-sort-i64 v lo (- pi 1i64))
+        (internal-quick-sort-i64 v (+ pi 1i64) hi))))
+  
+  (fn internal-quick-sort-f32 [v [f32] lo f32 hi f32] void
+    (when (< lo hi)
+      (let [pi (partition-f32 v lo hi)]
+        (internal-quick-sort-f32 v lo (- pi 1.0f32))
+        (internal-quick-sort-f32 v (+ pi 1.0f32) hi))))
+  
+  (fn internal-quick-sort-f64 [v [f64] lo f64 hi f64] void
+    (when (< lo hi)
+      (let [pi (partition-f64 v lo hi)]
+        (internal-quick-sort-f64 v lo (- pi 1.0f64))
+        (internal-quick-sort-f64 v (+ pi 1.0f64) hi))))
+  
+  (fn internal-quick-sort-u8 [v [u8] lo u8 hi u8] void
+    (when (< lo hi)
+      (let [pi (partition-u8 v lo hi)]
+        (when (> pi 0u8)
+          (internal-quick-sort-u8 v lo (- pi 1u8)))
+        (internal-quick-sort-u8 v (+ pi 1u8) hi))))
+  
+  (fn internal-quick-sort-u16 [v [u16] lo u16 hi u16] void
+    (when (< lo hi)
+      (let [pi (partition-u16 v lo hi)]
+        (when (> pi 0u16)
+          (internal-quick-sort-u16 v lo (- pi 1u16)))
+        (internal-quick-sort-u16 v (+ pi 1u16) hi))))
+  
+  (fn internal-quick-sort-u32 [v [u32] lo u32 hi u32] void
+    (when (< lo hi)
+      (let [pi (partition-u32 v lo hi)]
+        (when (> pi 0u32)
+          (internal-quick-sort-u32 v lo (- pi 1u32)))
+        (internal-quick-sort-u32 v (+ pi 1u32) hi))))
+  
+  (fn internal-quick-sort-u64 [v [u64] lo u64 hi u64] void
+    (when (< lo hi)
+      (let [pi (partition-u64 v lo hi)]
+        (when (> pi 0u64)
+          (internal-quick-sort-u64 v lo (- pi 1u64)))
+        (internal-quick-sort-u64 v (+ pi 1u64) hi)))))
+
+(fn quick-sort-i8 [v [i8]] void
+  (let [n (cast i8 (len v))
+        i 0i8]
+    (when (< n 2i8) (return))
+    (internal-quick-sort-i8 v i (- n 1i8))))
+
+(fn quick-sort-i16 [v [i16]] void
+  (let [n (cast i16 (len v))
+        i 0i16]
+    (when (< n 2i16) (return))
+    (internal-quick-sort-i16 v i (- n 1i16))))
+
+(fn quick-sort-i32 [v [i32]] void
+  (let [n (cast i32 (len v))
+        i 0]
+    (when (< n 2) (return))
+    (internal-quick-sort-i32 v i (- n 1))))
+
+(fn quick-sort-i64 [v [i64]] void
+  (let [n (cast i64 (len v))
+        i 0i64]
+    (when (< n 2i64) (return))
+    (internal-quick-sort-i64 v i (- n 1i64))))
+
+(fn quick-sort-f32 [v [f32]] void
+  (let [n (cast f32 (len v))
+        i 0.0f32]
+    (when (< n 2.0f32) (return))
+    (internal-quick-sort-f32 v i (- n 1.0f32))))
+
+(fn quick-sort-f64 [v [f64]] void
+  (let [n (cast f64 (len v))
+        i 0.0f64]
+    (when (< n 2.0f64) (return))
+    (internal-quick-sort-f64 v i (- n 1.0f64))))
+
+(fn quick-sort-u8 [v [u8]] void
+  (let [n (cast u8 (len v))
+        i 0u8]
+    (when (< n 2u8) (return))
+    (internal-quick-sort-u8 v i (- n 1u8))))
+
+(fn quick-sort-u16 [v [u16]] void
+  (let [n (cast u16 (len v))
+        i 0u16]
+    (when (< n 2u16) (return))
+    (internal-quick-sort-u16 v i (- n 1u16))))
+
+(fn quick-sort-u32 [v [u32]] void
+  (let [n (cast u32 (len v))
+        i 0u32]
+    (when (< n 2u32) (return))
+    (internal-quick-sort-u32 v i (- n 1u32))))
+
+(fn quick-sort-u64 [v [u64]] void
+  (let [n (cast u64 (len v))
+        i 0u64]
+    (when (< n 2u64) (return))
+    (internal-quick-sort-u64 v i (- n 1u64))))
+
+(private
+  (fn merge-i8 [v [i8] start i8 mid i8 end i8] void
+    (let [s start
+          m mid
+          s2 (+ m 1i8)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1i8)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-i16 [v [i16] start i16 mid i16 end i16] void
+    (let [s start
+          m mid
+          s2 (+ m 1i16)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1i16)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-i32 [v [i32] start i32 mid i32 end i32] void
+    (let [s start
+          m mid
+          s2 (+ m 1)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+
+  (fn merge-i64 [v [i64] start i64 mid i64 end i64] void
+    (let [s start
+          m mid
+          s2 (+ m 1i64)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1i64)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-f32 [v [f32] start f32 mid f32 end f32] void
+    (let [s start
+          m mid
+          s2 (+ m 1.0f32)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1.0f32)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-f64 [v [f64] start f64 mid f64 end f64] void
+    (let [s start
+          m mid
+          s2 (+ m 1.0f64)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1.0f64)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-u8 [v [u8] start u8 mid u8 end u8] void
+    (let [s start
+          m mid
+          s2 (+ m 1u8)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1u8)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-u16 [v [u16] start u16 mid u16 end u16] void
+    (let [s start
+          m mid
+          s2 (+ m 1u16)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1u16)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-u32 [v [u32] start u32 mid u32 end u32] void
+    (let [s start
+          m mid
+          s2 (+ m 1u32)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1u32)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+  
+  (fn merge-u64 [v [u64] start u64 mid u64 end u64] void
+    (let [s start
+          m mid
+          s2 (+ m 1u64)]
+      (when (<= (nth v m) (nth v s2)) (return))
+      (while (and (<= s m) (<= s2 end))
+        (if (<= (nth v s) (nth v s2))
+          (++ s)
+          (let [v1 (nth v s2)
+                i s2]
+            (while (!= i s)
+              (set (nth v i) (nth v (- i 1u64)))
+              (-- i))
+            (set (nth v s) v1)
+            (++ s)
+            (++ m)
+            (++ s2))))))
+
+  (fn internal-merge-sort-i8 [v [i8] l i8 r i8] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2i8))]
+        (internal-merge-sort-i8 v l m)
+        (internal-merge-sort-i8 v (+ m 1i8) r)
+        (merge-i8 v l m r))))
+  
+  (fn internal-merge-sort-i16 [v [i16] l i16 r i16] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2i16))]
+        (internal-merge-sort-i16 v l m)
+        (internal-merge-sort-i16 v (+ m 1i16) r)
+        (merge-i16 v l m r))))
+  
+  (fn internal-merge-sort-i32 [v [i32] l i32 r i32] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2))]
+        (internal-merge-sort-i32 v l m)
+        (internal-merge-sort-i32 v (+ m 1) r)
+        (merge-i32 v l m r))))
+  
+  (fn internal-merge-sort-i64 [v [i64] l i64 r i64] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2i64))]
+        (internal-merge-sort-i64 v l m)
+        (internal-merge-sort-i64 v (+ m 1i64) r)
+        (merge-i64 v l m r))))
+  
+  (fn internal-merge-sort-f32 [v [f32] l f32 r f32] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2.0f32))]
+        (internal-merge-sort-f32 v l m)
+        (internal-merge-sort-f32 v (+ m 1.0f32) r)
+        (merge-f32 v l m r))))
+  
+  (fn internal-merge-sort-f64 [v [f64] l f64 r f64] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2.0f64))]
+        (internal-merge-sort-f64 v l m)
+        (internal-merge-sort-f64 v (+ m 1.0f64) r)
+        (merge-f64 v l m r))))
+  
+  (fn internal-merge-sort-u8 [v [u8] l u8 r u8] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2u8))]
+        (internal-merge-sort-u8 v l m)
+        (internal-merge-sort-u8 v (+ m 1u8) r)
+        (merge-u8 v l m r))))
+  
+  (fn internal-merge-sort-u16 [v [u16] l u16 r u16] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2u16))]
+        (internal-merge-sort-u16 v l m)
+        (internal-merge-sort-u16 v (+ m 1u16) r)
+        (merge-u16 v l m r))))
+  
+  (fn internal-merge-sort-u32 [v [u32] l u32 r u32] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2u32))]
+        (internal-merge-sort-u32 v l m)
+        (internal-merge-sort-u32 v (+ m 1u32) r)
+        (merge-u32 v l m r))))
+  
+  (fn internal-merge-sort-u64 [v [u64] l u64 r u64] void
+    (when (< l r)
+      (let [m (+ l (/ (- r l) 2u64))]
+        (internal-merge-sort-u64 v l m)
+        (internal-merge-sort-u64 v (+ m 1u64) r)
+        (merge-u64 v l m r)))))
+
+(fn merge-sort-i8 [v [i8]] void
+  (internal-merge-sort-i8 v 0i8 (- (cast i8 (len v)) 1i8)))
+
+(fn merge-sort-i16 [v [i16]] void
+  (internal-merge-sort-i16 v 0i16 (- (cast i16 (len v)) 1i16)))
+
+(fn merge-sort-i32 [v [i32]] void
+  (internal-merge-sort-i32 v 0 (- (cast i32 (len v)) 1)))
+
+(fn merge-sort-i64 [v [i64]] void
+  (internal-merge-sort-i64 v 0i64 (- (cast i64 (len v)) 1i64)))
+
+(fn merge-sort-f32 [v [f32]] void
+  (internal-merge-sort-f32 v 0.0.0f32 (- (cast f32 (len v)) 1.0.0f32)))
+
+(fn merge-sort-f64 [v [f64]] void
+  (internal-merge-sort-f64 v 0.0.0f64 (- (cast f64 (len v)) 1.0.0f64)))
+
+(fn merge-sort-u8 [v [u8]] void
+  (let [n (cast u8 (len v))]
+    (when (> n 0u8)
+      (internal-merge-sort-u8 v 0u8 (- n 1u8)))))
+
+(fn merge-sort-u16 [v [u16]] void
+  (let [n (cast u16 (len v))]
+    (when (> n 0u16)
+      (internal-merge-sort-u16 v 0u16 (- n 1u16)))))
+
+(fn merge-sort-u32 [v [u32]] void
+  (let [n (cast u32 (len v))]
+    (when (> n 0u32)
+      (internal-merge-sort-u32 v 0u32 (- n 1u32)))))
+
+(fn merge-sort-u64 [v [u64]] void
+  (let [n (cast u64 (len v))]
+    (when (> n 0u64)
+      (internal-merge-sort-u64 v 0u64 (- n 1u64)))))
+
+(private
+  (fn sift-i8 [v [i8] pi i8 n i8] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2i8) 1i8)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1i8)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1i8))
+        (set (nth v p) u))))
+  
+  (fn sift-i16 [v [i16] pi i16 n i16] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2i16) 1i16)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1i16)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1i16))
+        (set (nth v p) u))))
+  
+  (fn sift-i32 [v [i32] pi i32 n i32] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2) 1)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1))
+        (set (nth v p) u))))
+  
+  (fn sift-i64 [v [i64] pi i64 n i64] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2i64) 1i64)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1i64)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1i64))
+        (set (nth v p) u))))
+  
+  (fn sift-f32 [v [f32] pi f32 n f32] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2.0.0f32) 1.0.0f32)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1.0.0f32)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1.0.0f32))
+        (set (nth v p) u))))
+  
+  (fn sift-f64 [v [f64] pi f64 n f64] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2.0.0f64) 1.0.0f64)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1.0.0f64)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1.0.0f64))
+        (set (nth v p) u))))
+  
+  (fn sift-u8 [v [u8] pi u8 n u8] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2u8) 1u8)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1u8)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1u8))
+        (set (nth v p) u))))
+  
+  (fn sift-u16 [v [u16] pi u16 n u16] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2u16) 1u16)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1u16)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1u16))
+        (set (nth v p) u))))
+  
+  (fn sift-u32 [v [u32] pi u32 n u32] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2u32) 1u32)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1u32)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1u32))
+        (set (nth v p) u))))
+  
+  (fn sift-u64 [v [u64] pi u64 n u64] void
+    (let [p pi
+          u (nth v p)
+          m (+ (* p 2u64) 1u64)]
+      (while (<= m n)
+        (when (and (< m n) (> (nth v (+ m 1u64)) (nth v m)))
+          (++ m))
+        (when (>= u (nth v m))
+          (break))
+        (set (nth v p) (nth v m))
+        (set p m)
+        (+= m (+ m 1u64))
+        (set (nth v p) u)))))
+
+(fn heap-sort-i8 [v [i8]] void
+  (let [n (cast i8 (len v))]
+    (when (= n 0i8)
+      (return))
+    (for [i (/ n 2i8) (>= i 0i8) (-- i)]
+      (sift-i8 v i (- n 1i8)))
+    (for [i (- n 1i8) (>= i 1i8) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-i8 v 0 (- i 1i8)))))
+
+(fn heap-sort-i16 [v [i16]] void
+  (let [n (cast i16 (len v))]
+    (when (= n 0i16)
+      (return))
+    (for [i (/ n 2i16) (>= i 0i16) (-- i)]
+      (sift-i16 v i (- n 1i16)))
+    (for [i (- n 1i16) (>= i 1i16) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-i16 v 0 (- i 1i16)))))
+
+(fn heap-sort-i32 [v [i32]] void
+  (let [n (cast i32 (len v))]
+    (when (= n 0)
+      (return))
+    (for [i (/ n 2) (>= i 0) (-- i)]
+      (sift-i32 v i (- n 1)))
+    (for [i (- n 1) (>= i 1) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-i32 v 0 (- i 1)))))
+
+(fn heap-sort-i64 [v [i64]] void
+  (let [n (cast i64 (len v))]
+    (when (= n 0i64)
+      (return))
+    (for [i (/ n 2i64) (>= i 0i64) (-- i)]
+      (sift-i64 v i (- n 1i64)))
+    (for [i (- n 1i64) (>= i 1i64) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-i64 v 0 (- i 1i64)))))
+
+(fn heap-sort-f32 [v [f32]] void
+  (let [n (cast f32 (len v))]
+    (when (= n 0.0.0f32)
+      (return))
+    (for [i (/ n 2.0.0f32) (>= i 0.0.0f32) (-- i)]
+      (sift-f32 v i (- n 1.0.0f32)))
+    (for [i (- n 1.0.0f32) (>= i 1.0.0f32) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-f32 v 0.0.0f32 (- i 1.0.0f32)))))
+
+(fn heap-sort-f64 [v [f64]] void
+  (let [n (cast f64 (len v))]
+    (when (= n 0.0.0f64)
+      (return))
+    (for [i (/ n 2.0f64) (>= i 0.0f64) (-- i)]
+      (sift-f64 v i (- n 1.0f64)))
+    (for [i (- n 1.0.0f64) (>= i 1.0f64) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-f64 v 0.0.0f64 (- i 1.0f64)))))
+
+(fn heap-sort-u8 [v [u8]] void
+  (let [n (cast u8 (len v))]
+    (when (= n 0u8)
+      (return))
+    (let [i (/ n 2u8)]
+      (while true
+        (sift-u8 v i (- n 1u8))
+        (when (= i 0u8) (break))
+        (-- i)))
+    (for [i (- n 1u8) (>= i 1u8) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-u8 v 0 (- i 1u8)))))
+
+(fn heap-sort-u16 [v [u16]] void
+  (let [n (cast u16 (len v))]
+    (when (= n 0u16)
+      (return))
+    (let [i (/ n 2u16)]
+      (while true
+        (sift-u16 v i (- n 1u16))
+        (when (= i 0u16) (break))
+        (-- i)))
+    (for [i (- n 1u16) (>= i 1u16) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-u16 v 0 (- i 1u16)))))
+
+(fn heap-sort-u32 [v [u32]] void
+  (let [n (cast u32 (len v))]
+    (when (= n 0u32)
+      (return))
+    (let [i (/ n 2u32)]
+      (while true
+        (sift-u32 v i (- n 1u32))
+        (when (= i 0u32) (break))
+        (-- i)))
+    (for [i (- n 1u32) (>= i 1u32) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-u32 v 0 (- i 1u32)))))
+
+(fn heap-sort-u64 [v [u64]] void
+  (let [n (cast u64 (len v))]
+    (when (= n 0u64)
+      (return))
+    (let [i (/ n 2u64)]
+      (while true
+        (sift-u64 v i (- n 1u64))
+        (when (= i 0u64) (break))
+        (-- i)))
+    (for [i (- n 1u64) (>= i 1u64) (-- i)]
+      (swap (nth v 0) (nth v i))
+      (sift-u64 v 0 (- i 1u64)))))
+
+(private
+  (fn binary-search-i8 [v [i8] key i8 lo i8 hi i8] i8
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1i8) lo)))
+    (let [mid (/ (+ lo hi) 2i8)]
+      (when (= key (nth v mid))
+        (return (+ mid 1i8)))
+      (when (> key (nth v mid))
+        (return (binary-search-i8 v key (+ mid 1i8) hi)))
+      (binary-search-i8 v key lo (- mid 1i8))))
+  
+  (fn binary-search-i16 [v [i16] key i16 lo i16 hi i16] i16
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1i16) lo)))
+    (let [mid (/ (+ lo hi) 2i16)]
+      (when (= key (nth v mid))
+        (return (+ mid 1i16)))
+      (when (> key (nth v mid))
+        (return (binary-search-i16 v key (+ mid 1i16) hi)))
+      (binary-search-i16 v key lo (- mid 1i16))))
+  
+  (fn binary-search-i32 [v [i32] key i32 lo i32 hi i32] i32
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1) lo)))
+    (let [mid (/ (+ lo hi) 2)]
+      (when (= key (nth v mid))
+        (return (+ mid 1)))
+      (when (> key (nth v mid))
+        (return (binary-search-i32 v key (+ mid 1) hi)))
+      (binary-search-i32 v key lo (- mid 1))))
+  
+  (fn binary-search-i64 [v [i64] key i64 lo i64 hi i64] i64
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1i64) lo)))
+    (let [mid (/ (+ lo hi) 2i64)]
+      (when (= key (nth v mid))
+        (return (+ mid 1i64)))
+      (when (> key (nth v mid))
+        (return (binary-search-i64 v key (+ mid 1i64) hi)))
+      (binary-search-i64 v key lo (- mid 1i64))))
+  
+  (fn binary-search-f32 [v [f32] key f32 lo f32 hi f32] f32
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1.0f32) lo)))
+    (let [mid (/ (+ lo hi) 2.0f32)]
+      (when (= key (nth v mid))
+        (return (+ mid 1.0f32)))
+      (when (> key (nth v mid))
+        (return (binary-search-f32 v key (+ mid 1.0f32) hi)))
+      (binary-search-f32 v key lo (- mid 1.0f32))))
+  
+  (fn binary-search-f64 [v [f64] key f64 lo f64 hi f64] f64
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1.0f64) lo)))
+    (let [mid (/ (+ lo hi) 2.0f64)]
+      (when (= key (nth v mid))
+        (return (+ mid 1.0f64)))
+      (when (> key (nth v mid))
+        (return (binary-search-f64 v key (+ mid 1.0f64) hi)))
+      (binary-search-f64 v key lo (- mid 1.0f64))))
+  
+  (fn binary-search-u8 [v [u8] key u8 lo u8 hi u8] u8
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1u8) lo)))
+    (let [mid (/ (+ lo hi) 2u8)]
+      (when (= key (nth v mid))
+        (return (+ mid 1u8)))
+      (when (> key (nth v mid))
+        (return (binary-search-u8 v key (+ mid 1u8) hi)))
+      (when (= mid 0u8)
+        (return 0u8))
+      (binary-search-u8 v key lo (- mid 1u8))))
+  
+  (fn binary-search-u16 [v [u16] key u16 lo u16 hi u16] u16
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1u16) lo)))
+    (let [mid (/ (+ lo hi) 2u16)]
+      (when (= key (nth v mid))
+        (return (+ mid 1u16)))
+      (when (> key (nth v mid))
+        (return (binary-search-u16 v key (+ mid 1u16) hi)))
+      (when (= mid 0u16)
+        (return 0u16))
+      (binary-search-u16 v key lo (- mid 1u16))))
+  
+  (fn binary-search-u32 [v [u32] key u32 lo u32 hi u32] u32
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1u32) lo)))
+    (let [mid (/ (+ lo hi) 2u32)]
+      (when (= key (nth v mid))
+        (return (+ mid 1u32)))
+      (when (> key (nth v mid))
+        (return (binary-search-u32 v key (+ mid 1u32) hi)))
+      (when (= mid 0u32)
+        (return 0u32))
+      (binary-search-u32 v key lo (- mid 1u32))))
+  
+  (fn binary-search-u64 [v [u64] key u64 lo u64 hi u64] u64
+    (when (<= hi lo)
+      (return (if (> key (nth v lo)) (+ lo 1u64) lo)))
+    (let [mid (/ (+ lo hi) 2u64)]
+      (when (= key (nth v mid))
+        (return (+ mid 1u64)))
+      (when (> key (nth v mid))
+        (return (binary-search-u64 v key (+ mid 1u64) hi)))
+      (when (= mid 0u64)
+        (return 0u64))
+      (binary-search-u64 v key lo (- mid 1u64)))))
+
+(fn insertion-sort-i8 [v [i8]] void
+  (let [n (cast i8 (len v))]
+    (for [i 1i8 n]
+      (let [key (nth v i)
+            j (- i 1i8)
+            loc (binary-search-i8 v key 0i8 j)]
+        (while (>= j loc)
+          (set (nth v (+ j 1i8)) (nth v j))
+          (-- j))
+        (set (nth v (+ j 1i8)) key)))))
+
+(fn insertion-sort-i16 [v [i16]] void
+  (let [n (cast i16 (len v))]
+    (for [i 1i16 n]
+      (let [key (nth v i)
+            j (- i 1i16)
+            loc (binary-search-i16 v key 0i16 j)]
+        (while (>= j loc)
+          (set (nth v (+ j 1i16)) (nth v j))
+          (-- j))
+        (set (nth v (+ j 1i16)) key)))))
+
+(fn insertion-sort-i32 [v [i32]] void
+  (let [n (cast i32 (len v))]
+    (for [i 1 n]
+      (let [key (nth v i)
+            j (- i 1)
+            loc (binary-search-i32 v key 0 j)]
+        (while (>= j loc)
+          (set (nth v (+ j 1)) (nth v j))
+          (-- j))
+        (set (nth v (+ j 1)) key)))))
+
+(fn insertion-sort-i64 [v [i64]] void
+  (let [n (cast i64 (len v))]
+    (for [i 1i64 n]
+      (let [key (nth v i)
+            j (- i 1i64)
+            loc (binary-search-i64 v key 0i64 j)]
+        (while (>= j loc)
+          (set (nth v (+ j 1i64)) (nth v j))
+          (-- j))
+        (set (nth v (+ j 1i64)) key)))))
+
+(fn insertion-sort-f32 [v [f32]] void
+  (let [n (cast f32 (len v))]
+    (for [i 1.0f32 n]
+      (let [key (nth v i)
+            j (- i 1.0f32)
+            loc (binary-search-f32 v key 0.0f32 j)]
+        (while (>= j loc)
+          (set (nth v (+ j 1.0f32)) (nth v j))
+          (-- j))
+        (set (nth v (+ j 1.0f32)) key)))))
+
+(fn insertion-sort-f64 [v [f64]] void
+  (let [n (cast f64 (len v))]
+    (for [i 1.0f64 n]
+      (let [key (nth v i)
+            j (- i 1.0f64)
+            loc (binary-search-f64 v key 0.0f64 j)]
+        (while (>= j loc)
+          (set (nth v (+ j 1.0f64)) (nth v j))
+          (-- j))
+        (set (nth v (+ j 1.0f64)) key)))))
+
+(fn insertion-sort-u8 [v [u8]] void
+  (let [n (cast u8 (len v))]
+    (for [i 1u8 n]
+      (let [key (nth v i)
+            j (- i 1u8)
+            loc (binary-search-u8 v key 0u8 j)]
+        (when (>= j loc)
+          (while true
+            (set (nth v (+ j 1u8)) (nth v j))
+            (when (= j loc) (break))
+            (-- j)))
+        (set (nth v loc) key)))))
+
+(fn insertion-sort-u16 [v [u16]] void
+  (let [n (cast u16 (len v))]
+    (for [i 1u16 n]
+      (let [key (nth v i)
+            j (- i 1u16)
+            loc (binary-search-u16 v key 0u16 j)]
+        (when (>= j loc)
+          (while true
+            (set (nth v (+ j 1u16)) (nth v j))
+            (when (= j loc) (break))
+            (-- j)))
+        (set (nth v loc) key)))))
+
+(fn insertion-sort-u32 [v [u32]] void
+  (let [n (cast u32 (len v))]
+    (for [i 1u32 n]
+      (let [key (nth v i)
+            j (- i 1u32)
+            loc (binary-search-u32 v key 0u32 j)]
+        (when (>= j loc)
+          (while true
+            (set (nth v (+ j 1u32)) (nth v j))
+            (when (= j loc) (break))
+            (-- j)))
+        (set (nth v loc) key)))))
+
+(fn insertion-sort-u64 [v [u64]] void
+  (let [n (cast u64 (len v))]
+    (for [i 1u64 n]
+      (let [key (nth v i)
+            j (- i 1u64)
+            loc (binary-search-u64 v key 0u64 j)]
+        (when (>= j loc)
+          (while true
+            (set (nth v (+ j 1u64)) (nth v j))
+            (when (= j loc) (break))
+            (-- j)))
+        (set (nth v loc) key)))))
