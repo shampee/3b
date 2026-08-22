@@ -987,11 +987,11 @@ static const char* const NATIVE_PKG_RNG_MEMBERS[] = {
 };
 
 static const char* const NATIVE_PKG_SORT_MEMBERS[] = {
-  "bubble-sort-i8", "bubble-sort-i16", "bubble-sort-i32", "bubble-sort-i64", "bubble-sort-u8", "bubble-sort-u16", "bubble-sort-u32", "bubble-sort-u64", "bubble-sort-f32", "bubble-sort-f64",
-  "quick-sort-i8", "quick-sort-i16", "quick-sort-i32", "quick-sort-i64", "quick-sort-u8", "quick-sort-u16", "quick-sort-u32", "quick-sort-u64", "quick-sort-f32", "quick-sort-f64",
-  "merge-sort-i8", "merge-sort-i16", "merge-sort-i32", "merge-sort-i64", "merge-sort-u8", "merge-sort-u16", "merge-sort-u32", "merge-sort-u64", "merge-sort-f32", "merge-sort-f64",
-  "heap-sort-i8", "heap-sort-i16", "heap-sort-i32", "heap-sort-i64", "heap-sort-u8", "heap-sort-u16", "heap-sort-u32", "heap-sort-u64", "heap-sort-f32", "heap-sort-f64",
-  "insertion-sort-i8", "insertion-sort-i16", "insertion-sort-i32", "insertion-sort-i64", "insertion-sort-u8", "insertion-sort-u16", "insertion-sort-u32", "insertion-sort-u64", "insertion-sort-f32", "insertion-sort-f64",
+  "bubble-sort-i8", "bubble-sort-i16", "bubble-sort-i32", "bubble-sort-i64", "bubble-sort-u8", "bubble-sort-u16", "bubble-sort-u32", "bubble-sort-u64",
+  "quick-sort-i8", "quick-sort-i16", "quick-sort-i32", "quick-sort-i64", "quick-sort-u8", "quick-sort-u16", "quick-sort-u32", "quick-sort-u64",
+  "merge-sort-i8", "merge-sort-i16", "merge-sort-i32", "merge-sort-i64", "merge-sort-u8", "merge-sort-u16", "merge-sort-u32", "merge-sort-u64",
+  "heap-sort-i8", "heap-sort-i16", "heap-sort-i32", "heap-sort-i64", "heap-sort-u8", "heap-sort-u16", "heap-sort-u32", "heap-sort-u64",
+  "insertion-sort-i8", "insertion-sort-i16", "insertion-sort-i32", "insertion-sort-i64", "insertion-sort-u8", "insertion-sort-u16", "insertion-sort-u32", "insertion-sort-u64",
   NULL,
 };
 

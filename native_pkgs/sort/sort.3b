@@ -68,40 +68,6 @@
         (set init-j (max (- init-swap 1i64) 0i64))
         (set last-j prev-swap)))))
 
-(fn bubble-sort-f32 [v [f32]] void
-  (let [count (cast f32 (len v))
-        init-j 0.0f32
-        last-j (cast f32 (- count 1.0f32))]
-    (while true
-      (let [init-swap -1.0f32
-            prev-swap -1.0f32]
-        (for [j init-j last-j]
-          (when (> (nth v j) (nth v (+ j 1.0f32)))
-            (swap (nth v j) (nth v (+ j 1.0f32)))
-            (set prev-swap j)
-            (when (= init-swap -1.0f32)
-              (set init-swap j))))
-        (when (= prev-swap -1.0f32) (return))
-        (set init-j (max (- init-swap 1.0f32) 0.0f32))
-        (set last-j prev-swap)))))
-
-(fn bubble-sort-f64 [v [f64]] void
-  (let [count (cast f64 (len v))
-        init-j 0.0f64
-        last-j (cast f64 (- count 1.0f64))]
-    (while true
-      (let [init-swap -1.0f64
-            prev-swap -1.0f64]
-        (for [j init-j last-j]
-          (when (> (nth v j) (nth v (+ j 1.0f64)))
-            (swap (nth v j) (nth v (+ j 1.0f64)))
-            (set prev-swap j)
-            (when (= init-swap -1.0f64)
-              (set init-swap j))))
-        (when (= prev-swap -1.0f64) (return))
-        (set init-j (max (- init-swap 1.0f64) 0.0f64))
-        (set last-j prev-swap)))))
-
 (fn bubble-sort-u8 [v [u8]] void
   (let [count (cast u8 (len v))
         init-j 0u8
@@ -211,26 +177,6 @@
       (swap (nth v (+ i 1i64)) (nth v hi))
       (+ i 1i64)))
   
-  (fn partition-f32 [v [f32] lo f32 hi f32] f32
-    (let [pivot (nth v hi)
-          i (- lo 1.0f32)]
-      (for [j lo hi]
-        (when (< (nth v j) pivot)
-          (++ i)
-          (swap (nth v i) (nth v j))))
-      (swap (nth v (+ i 1.0f32)) (nth v hi))
-      (+ i 1.0f32)))
-  
-  (fn partition-f64 [v [f64] lo f64 hi f64] f64
-    (let [pivot (nth v hi)
-          i (- lo 1.0f64)]
-      (for [j lo hi]
-        (when (< (nth v j) pivot)
-          (++ i)
-          (swap (nth v i) (nth v j))))
-      (swap (nth v (+ i 1.0f64)) (nth v hi))
-      (+ i 1.0f64)))
-  
   (fn partition-u8 [v [u8] lo u8 hi u8] u8
     (let [pivot (nth v hi)
           i (- lo 1u8)]
@@ -295,18 +241,6 @@
         (internal-quick-sort-i64 v lo (- pi 1i64))
         (internal-quick-sort-i64 v (+ pi 1i64) hi))))
   
-  (fn internal-quick-sort-f32 [v [f32] lo f32 hi f32] void
-    (when (< lo hi)
-      (let [pi (partition-f32 v lo hi)]
-        (internal-quick-sort-f32 v lo (- pi 1.0f32))
-        (internal-quick-sort-f32 v (+ pi 1.0f32) hi))))
-  
-  (fn internal-quick-sort-f64 [v [f64] lo f64 hi f64] void
-    (when (< lo hi)
-      (let [pi (partition-f64 v lo hi)]
-        (internal-quick-sort-f64 v lo (- pi 1.0f64))
-        (internal-quick-sort-f64 v (+ pi 1.0f64) hi))))
-  
   (fn internal-quick-sort-u8 [v [u8] lo u8 hi u8] void
     (when (< lo hi)
       (let [pi (partition-u8 v lo hi)]
@@ -358,18 +292,6 @@
         i 0i64]
     (when (< n 2i64) (return))
     (internal-quick-sort-i64 v i (- n 1i64))))
-
-(fn quick-sort-f32 [v [f32]] void
-  (let [n (cast f32 (len v))
-        i 0.0f32]
-    (when (< n 2.0f32) (return))
-    (internal-quick-sort-f32 v i (- n 1.0f32))))
-
-(fn quick-sort-f64 [v [f64]] void
-  (let [n (cast f64 (len v))
-        i 0.0f64]
-    (when (< n 2.0f64) (return))
-    (internal-quick-sort-f64 v i (- n 1.0f64))))
 
 (fn quick-sort-u8 [v [u8]] void
   (let [n (cast u8 (len v))
@@ -462,42 +384,6 @@
                 i s2]
             (while (!= i s)
               (set (nth v i) (nth v (- i 1i64)))
-              (-- i))
-            (set (nth v s) v1)
-            (++ s)
-            (++ m)
-            (++ s2))))))
-  
-  (fn merge-f32 [v [f32] start f32 mid f32 end f32] void
-    (let [s start
-          m mid
-          s2 (+ m 1.0f32)]
-      (when (<= (nth v m) (nth v s2)) (return))
-      (while (and (<= s m) (<= s2 end))
-        (if (<= (nth v s) (nth v s2))
-          (++ s)
-          (let [v1 (nth v s2)
-                i s2]
-            (while (!= i s)
-              (set (nth v i) (nth v (- i 1.0f32)))
-              (-- i))
-            (set (nth v s) v1)
-            (++ s)
-            (++ m)
-            (++ s2))))))
-  
-  (fn merge-f64 [v [f64] start f64 mid f64 end f64] void
-    (let [s start
-          m mid
-          s2 (+ m 1.0f64)]
-      (when (<= (nth v m) (nth v s2)) (return))
-      (while (and (<= s m) (<= s2 end))
-        (if (<= (nth v s) (nth v s2))
-          (++ s)
-          (let [v1 (nth v s2)
-                i s2]
-            (while (!= i s)
-              (set (nth v i) (nth v (- i 1.0f64)))
               (-- i))
             (set (nth v s) v1)
             (++ s)
@@ -604,20 +490,6 @@
         (internal-merge-sort-i64 v (+ m 1i64) r)
         (merge-i64 v l m r))))
   
-  (fn internal-merge-sort-f32 [v [f32] l f32 r f32] void
-    (when (< l r)
-      (let [m (+ l (/ (- r l) 2.0f32))]
-        (internal-merge-sort-f32 v l m)
-        (internal-merge-sort-f32 v (+ m 1.0f32) r)
-        (merge-f32 v l m r))))
-  
-  (fn internal-merge-sort-f64 [v [f64] l f64 r f64] void
-    (when (< l r)
-      (let [m (+ l (/ (- r l) 2.0f64))]
-        (internal-merge-sort-f64 v l m)
-        (internal-merge-sort-f64 v (+ m 1.0f64) r)
-        (merge-f64 v l m r))))
-  
   (fn internal-merge-sort-u8 [v [u8] l u8 r u8] void
     (when (< l r)
       (let [m (+ l (/ (- r l) 2u8))]
@@ -657,12 +529,6 @@
 
 (fn merge-sort-i64 [v [i64]] void
   (internal-merge-sort-i64 v 0i64 (- (cast i64 (len v)) 1i64)))
-
-(fn merge-sort-f32 [v [f32]] void
-  (internal-merge-sort-f32 v 0.0.0f32 (- (cast f32 (len v)) 1.0.0f32)))
-
-(fn merge-sort-f64 [v [f64]] void
-  (internal-merge-sort-f64 v 0.0.0f64 (- (cast f64 (len v)) 1.0.0f64)))
 
 (fn merge-sort-u8 [v [u8]] void
   (let [n (cast u8 (len v))]
@@ -739,34 +605,6 @@
         (set (nth v p) (nth v m))
         (set p m)
         (+= m (+ m 1i64))
-        (set (nth v p) u))))
-  
-  (fn sift-f32 [v [f32] pi f32 n f32] void
-    (let [p pi
-          u (nth v p)
-          m (+ (* p 2.0.0f32) 1.0.0f32)]
-      (while (<= m n)
-        (when (and (< m n) (> (nth v (+ m 1.0.0f32)) (nth v m)))
-          (++ m))
-        (when (>= u (nth v m))
-          (break))
-        (set (nth v p) (nth v m))
-        (set p m)
-        (+= m (+ m 1.0.0f32))
-        (set (nth v p) u))))
-  
-  (fn sift-f64 [v [f64] pi f64 n f64] void
-    (let [p pi
-          u (nth v p)
-          m (+ (* p 2.0.0f64) 1.0.0f64)]
-      (while (<= m n)
-        (when (and (< m n) (> (nth v (+ m 1.0.0f64)) (nth v m)))
-          (++ m))
-        (when (>= u (nth v m))
-          (break))
-        (set (nth v p) (nth v m))
-        (set p m)
-        (+= m (+ m 1.0.0f64))
         (set (nth v p) u))))
   
   (fn sift-u8 [v [u8] pi u8 n u8] void
@@ -865,26 +703,6 @@
       (swap (nth v 0) (nth v i))
       (sift-i64 v 0 (- i 1i64)))))
 
-(fn heap-sort-f32 [v [f32]] void
-  (let [n (cast f32 (len v))]
-    (when (= n 0.0.0f32)
-      (return))
-    (for [i (/ n 2.0.0f32) (>= i 0.0.0f32) (-- i)]
-      (sift-f32 v i (- n 1.0.0f32)))
-    (for [i (- n 1.0.0f32) (>= i 1.0.0f32) (-- i)]
-      (swap (nth v 0) (nth v i))
-      (sift-f32 v 0.0.0f32 (- i 1.0.0f32)))))
-
-(fn heap-sort-f64 [v [f64]] void
-  (let [n (cast f64 (len v))]
-    (when (= n 0.0.0f64)
-      (return))
-    (for [i (/ n 2.0f64) (>= i 0.0f64) (-- i)]
-      (sift-f64 v i (- n 1.0f64)))
-    (for [i (- n 1.0.0f64) (>= i 1.0f64) (-- i)]
-      (swap (nth v 0) (nth v i))
-      (sift-f64 v 0.0.0f64 (- i 1.0f64)))))
-
 (fn heap-sort-u8 [v [u8]] void
   (let [n (cast u8 (len v))]
     (when (= n 0u8)
@@ -978,26 +796,6 @@
         (return (binary-search-i64 v key (+ mid 1i64) hi)))
       (binary-search-i64 v key lo (- mid 1i64))))
   
-  (fn binary-search-f32 [v [f32] key f32 lo f32 hi f32] f32
-    (when (<= hi lo)
-      (return (if (> key (nth v lo)) (+ lo 1.0f32) lo)))
-    (let [mid (/ (+ lo hi) 2.0f32)]
-      (when (= key (nth v mid))
-        (return (+ mid 1.0f32)))
-      (when (> key (nth v mid))
-        (return (binary-search-f32 v key (+ mid 1.0f32) hi)))
-      (binary-search-f32 v key lo (- mid 1.0f32))))
-  
-  (fn binary-search-f64 [v [f64] key f64 lo f64 hi f64] f64
-    (when (<= hi lo)
-      (return (if (> key (nth v lo)) (+ lo 1.0f64) lo)))
-    (let [mid (/ (+ lo hi) 2.0f64)]
-      (when (= key (nth v mid))
-        (return (+ mid 1.0f64)))
-      (when (> key (nth v mid))
-        (return (binary-search-f64 v key (+ mid 1.0f64) hi)))
-      (binary-search-f64 v key lo (- mid 1.0f64))))
-  
   (fn binary-search-u8 [v [u8] key u8 lo u8 hi u8] u8
     (when (<= hi lo)
       (return (if (> key (nth v lo)) (+ lo 1u8) lo)))
@@ -1089,28 +887,6 @@
           (set (nth v (+ j 1i64)) (nth v j))
           (-- j))
         (set (nth v (+ j 1i64)) key)))))
-
-(fn insertion-sort-f32 [v [f32]] void
-  (let [n (cast f32 (len v))]
-    (for [i 1.0f32 n]
-      (let [key (nth v i)
-            j (- i 1.0f32)
-            loc (binary-search-f32 v key 0.0f32 j)]
-        (while (>= j loc)
-          (set (nth v (+ j 1.0f32)) (nth v j))
-          (-- j))
-        (set (nth v (+ j 1.0f32)) key)))))
-
-(fn insertion-sort-f64 [v [f64]] void
-  (let [n (cast f64 (len v))]
-    (for [i 1.0f64 n]
-      (let [key (nth v i)
-            j (- i 1.0f64)
-            loc (binary-search-f64 v key 0.0f64 j)]
-        (while (>= j loc)
-          (set (nth v (+ j 1.0f64)) (nth v j))
-          (-- j))
-        (set (nth v (+ j 1.0f64)) key)))))
 
 (fn insertion-sort-u8 [v [u8]] void
   (let [n (cast u8 (len v))]
