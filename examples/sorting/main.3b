@@ -1,0 +1,22 @@
+(package sorting)
+
+(import sort)
+
+(fn main [] i32
+  (scratch [t]
+    (var v [i32])
+    (vector-push t v 55)
+    (vector-push t v 888)
+    (vector-push t v 22)
+    (vector-push t v 33)
+    (vector-push t v 444)
+    (vector-push t v 11)
+    (vector-push t v 99)
+    (vector-push t v 88)
+    (vector-push t v 77)
+    (vector-push t v 111)
+    (sort/quick-sort-i32 v)
+    (for [e v]
+      (print "{} " e))
+    (println ""))
+  0)

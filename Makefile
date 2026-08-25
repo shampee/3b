@@ -628,7 +628,7 @@ codegen.o: runtime_embed.h
 # top-of-file note) -- baked into the `3b` binary the same way runtime
 # source is above, so `(import build)` inside a `.3bs` script works with
 # no separate file to find/ship at runtime.
-SCRIPT_MODULE_FILES = translate/build.3bs translate/config.3bs native_pkgs/rng/rng.3b
+SCRIPT_MODULE_FILES = translate/build.3bs translate/config.3bs native_pkgs/rng/rng.3b native_pkgs/sort/sort.3b
 
 script_embed.h: tools/embed_runtime $(SCRIPT_MODULE_FILES)
 	./tools/embed_runtime $(SCRIPT_MODULE_FILES) > $@

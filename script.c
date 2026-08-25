@@ -57,6 +57,7 @@ typedef struct KnownModule {
 static const KnownModule g_known_modules[] = {
   { "build",  g_embed_translate_build_3bs },
   { "config", g_embed_translate_config_3bs },
+  { "sort",   g_embed_native_pkgs_sort_sort_3b },
   { "rng",    g_embed_native_pkgs_rng_rng_3b }, // same source native code also uses (see
                                                     // native_pkgs/rng/rng.3b) -- pure 3b arithmetic,
                                                     // no host imports needed, so it works unchanged
