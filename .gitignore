@@ -67,6 +67,7 @@ examples/multi-return/multi-return
 examples/nested-scratch/nested-scratch
 examples/os-portable/os-portable
 examples/set/set
+examples/sorting/sorting
 examples/streams/streams
 examples/string-parsing/string-parsing
 examples/structs/structs
